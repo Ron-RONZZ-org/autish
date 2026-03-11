@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "autish"
+version = "0.0.1"
+description = "Cross-platform CLI for essential tasks with minimum stimulation — designed with neurodiversity in mind."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+keywords = ["cli", "neurodiversity", "accessibility", "linux", "esperanto"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "typer>=0.12",
+    "rich>=13",
+    "psutil>=5.9",
+    "pyperclip>=1.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-mock>=3",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+autish = "autish.main:app"
+
+[project.urls]
+Repository = "https://github.com/Ron-RONZZ-org/autish"
+Issues = "https://github.com/Ron-RONZZ-org/autish/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["autish"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    "B008",  # Typer requires function calls (typer.Argument/Option) in argument defaults
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
