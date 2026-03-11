@@ -26,7 +26,7 @@
 | Clipboard | [pyperclip](https://github.com/asweigart/pyperclip) |
 | Linting / formatting | [Ruff](https://docs.astral.sh/ruff/) |
 | Testing | [pytest](https://pytest.org/) + [pytest-mock](https://pytest-mock.readthedocs.io/) |
-| Build | [Hatchling](https://hatch.pypa.io/) via `pyproject.toml` |
+| Build / dep management | [Poetry](https://python-poetry.org/) ≥ 2.0 via `pyproject.toml` + `poetry.lock` |
 
 ---
 

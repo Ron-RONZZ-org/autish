@@ -19,6 +19,7 @@ Thank you for your interest in contributing! This guide covers how to set up you
 
 - **Target platform (v0.0.1):** Debian-based Linux (Ubuntu, Debian, Mint, …)
 - **Python version:** 3.10+
+- **Dependency manager:** [Poetry](https://python-poetry.org/) ≥ 2.0
 - **CLI framework:** [Typer](https://typer.tiangolo.com/)
 - **Command keywords:** Esperanto (see below)
 
@@ -32,20 +33,39 @@ Examples: `tempo`, `wifi`, `konekti`, `malkonekti`, `forigi`, `horzono`, `sistem
 
 ## Development Setup
 
+### 1. Install Poetry
+
 ```bash
-# 1. Clone the repository
+curl -sSL https://install.python-poetry.org | python3 -
+```
+
+Ensure Poetry's bin directory (`~/.local/bin`) is on your PATH:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+poetry --version
+```
+
+### 2. Clone and install
+
+```bash
 git clone https://github.com/Ron-RONZZ-org/autish.git
 cd autish
 
-# 2. Create and activate a virtual environment
-python3 -m venv .venv
-source .venv/bin/activate
+# Install all dependencies (runtime + dev) into an isolated virtualenv
+poetry install
 
-# 3. Install the package in editable mode with dev dependencies
-pip install -e ".[dev]"
+# Verify the CLI works
+poetry run autish --help
+```
 
-# 4. Verify the CLI is available
-autish --help
+### 3. (Optional) Activate the Poetry shell
+
+```bash
+poetry shell    # spawns a subshell with the venv active
+autish --help   # no prefix needed
+exit            # return to your normal shell
 ```
 
 ---
@@ -67,7 +87,8 @@ autish/
 ├── tests/               # pytest tests (mirror package structure)
 │   ├── __init__.py
 │   └── test_tempo.py
-├── pyproject.toml       # PEP 517/518 build config, deps, entry points
+├── pyproject.toml       # Poetry build config, deps, entry points, tool config
+├── poetry.lock          # Locked dependency versions (commit this file)
 ├── README.md
 ├── CONTRIBUTING.md      # This file
 └── TODO.md
@@ -110,31 +131,45 @@ autish/
 ### Run from source (development)
 
 ```bash
-# After `pip install -e ".[dev]"`
-autish --help
-autish tempo
+poetry run autish --help
+poetry run autish tempo
 ```
+
+Or activate the Poetry shell first (`poetry shell`) and use `autish` directly.
 
 ### Run tests
 
 ```bash
-pytest
+poetry run pytest
 ```
 
 ### Lint and format
 
 ```bash
-ruff check .
-ruff format .
+poetry run ruff check .
+poetry run ruff format .
 ```
 
 ### Build a distributable package
 
 ```bash
-python -m build
+poetry build
 ```
 
 The `dist/` directory will contain a `.whl` and a `.tar.gz`.
+
+### Add or update a dependency
+
+```bash
+# Runtime dependency
+poetry add <package>
+
+# Dev-only dependency
+poetry add --group dev <package>
+
+# Update all dependencies to latest compatible versions
+poetry update
+```
 
 ---
 
