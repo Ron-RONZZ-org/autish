@@ -8,12 +8,17 @@ Strategy (Option B from TODO.md):
     When `kp <command>` is used, stdout is stored in a temp file so that
     bare `autish kp` can retrieve it without re-running the command.
     This requires no shell configuration.
+
+    Autish subcommands (e.g. `tempo`, `sistemo`) are automatically resolved
+    to `autish <subcommand>` so that `autish kp sistemo` works as expected.
 """
 
 from __future__ import annotations
 
 import getpass
+import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -23,9 +28,30 @@ import typer
 app = typer.Typer(
     help="Execute a command and copy its output to clipboard.",
     invoke_without_command=True,
+    context_settings={"help_option_names": ["-h", "--help"]},
 )
 
 _CACHE_FILE = Path(tempfile.gettempdir()) / f"autish_kp_{getpass.getuser()}.txt"
+
+# Known autish subcommands that should be run via the autish executable.
+_AUTISH_SUBCOMMANDS = frozenset(
+    {"tempo", "wifi", "bluhdento", "sistemo", "kp", "shelo"}
+)
+
+
+def _autish_prefix() -> list[str]:
+    """Return the command prefix needed to invoke autish (e.g. ['autish'])."""
+    exe = shutil.which("autish")
+    if exe:
+        return [exe]
+    return [sys.executable, "-m", "autish"]
+
+
+def _resolve_command(command: list[str]) -> list[str]:
+    """Prepend the autish executable when *command* starts with an autish subcommand."""
+    if command and command[0] in _AUTISH_SUBCOMMANDS:
+        return _autish_prefix() + command
+    return command
 
 
 def _copy(text: str) -> None:
@@ -60,8 +86,9 @@ def kp(
         typer.echo(text, nl=False)
         return
 
-    # Execute mode — run the command
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    # Execute mode — run the command (auto-resolving autish subcommands)
+    resolved = _resolve_command(command)
+    result = subprocess.run(resolved, capture_output=True, text=True, check=False)
     output = result.stdout
     if result.stderr:
         typer.echo(result.stderr, nl=False, err=True)

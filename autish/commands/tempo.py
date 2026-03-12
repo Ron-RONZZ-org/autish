@@ -3,7 +3,7 @@
 Usage:
     autish tempo
     autish tempo --horzono 9
-    autish tempo --horzono        # prints all UTC offsets
+    autish tempo -z              # prints all UTC offsets
 """
 
 from __future__ import annotations
@@ -13,9 +13,12 @@ import locale
 
 import typer
 
+from autish.utils import echo_padded
+
 app = typer.Typer(
     help="Print current local time and day of week.",
     invoke_without_command=True,
+    context_settings={"help_option_names": ["-h", "--help"]},
 )
 
 _UTC_MIN = -12
@@ -36,64 +39,52 @@ def _day_name(dt: datetime.datetime) -> str:
     return dt.strftime("%A")
 
 
-def _print_time(dt: datetime.datetime, *, show_offset: bool = False) -> None:
-    utcoff = dt.utcoffset()
-    if show_offset and utcoff is not None:
-        prefix = f"UTC{utcoff.total_seconds() / 3600:+g}  "
-    else:
-        prefix = ""
-    typer.echo(f"{prefix}{dt.isoformat(timespec='seconds')}")
-    if not show_offset:
-        typer.echo(_day_name(dt))
-
-
 @app.callback(invoke_without_command=True)
 def tempo(
     ctx: typer.Context,
-    horzono: str | None = typer.Option(
+    horzono: int | None = typer.Option(
         None,
         "--horzono",
+        help="UTC timezone offset (-12 to +14) to display time for.",
+    ),
+    chiuj: bool = typer.Option(
+        False,
         "-z",
-        help=(
-            "UTC timezone offset (-12 to +14). "
-            "Omit the value entirely to print all offsets."
-        ),
-        is_eager=False,
+        "--chiuj-horzonoj",
+        help="Print current time for all UTC offsets (-12 to +14).",
     ),
 ) -> None:
     """Print current local time (ISO 8601) and day of week."""
     if ctx.invoked_subcommand is not None:
         return
 
-    # Flag given with no value: horzono == "" (empty string from CLI)
-    # Flag not given at all: horzono is None
-    if horzono is None:
-        # No flag — print local system time
-        now = datetime.datetime.now(tz=datetime.timezone.utc).astimezone()
-        _print_time(now)
-        return
-
-    if horzono == "":
-        # Flag present but no value — print all offsets
+    if chiuj:
+        # -z flag: print all UTC offsets
+        lines = []
         for offset in range(_UTC_MIN, _UTC_MAX + 1):
-            _print_time(_time_for_offset(offset), show_offset=True)
+            dt = _time_for_offset(offset)
+            utcoff = dt.utcoffset()
+            prefix = (
+                f"UTC{utcoff.total_seconds() / 3600:+g}  "
+                if utcoff is not None
+                else ""
+            )
+            lines.append(f"{prefix}{dt.isoformat(timespec='seconds')}")
+        echo_padded("\n".join(lines))
         return
 
-    # Flag with a value — validate and display that offset
-    try:
-        offset = int(horzono)
-    except ValueError:
-        typer.echo(
-            f"Error: horzono must be an integer between {_UTC_MIN} and {_UTC_MAX}.",
-            err=True,
-        )
-        raise typer.Exit(code=1) from None
+    if horzono is not None:
+        # Specific UTC offset
+        if not (_UTC_MIN <= horzono <= _UTC_MAX):
+            typer.echo(
+                f"Error: horzono {horzono} is out of range ({_UTC_MIN}…{_UTC_MAX}).",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        dt = _time_for_offset(horzono)
+        echo_padded(f"{dt.isoformat(timespec='seconds')}\n{_day_name(dt)}")
+        return
 
-    if not (_UTC_MIN <= offset <= _UTC_MAX):
-        typer.echo(
-            f"Error: horzono {offset} is out of range ({_UTC_MIN}…{_UTC_MAX}).",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    _print_time(_time_for_offset(offset))
+    # Default — print local system time
+    now = datetime.datetime.now(tz=datetime.timezone.utc).astimezone()
+    echo_padded(f"{now.isoformat(timespec='seconds')}\n{_day_name(now)}")
