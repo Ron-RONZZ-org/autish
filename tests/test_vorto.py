@@ -9,6 +9,8 @@ from typer.testing import CliRunner
 
 from autish.commands.vorto import (
     _detect_kategorio,
+    _entries_to_lines,
+    _entry_to_lines,
     _find_entry,
     _normalize_tipo,
     _normalize_tono,
@@ -279,23 +281,23 @@ class TestAldoni:
         assert saved_stack[0]["op"] == "aldoni"
 
 
-class TestVido:
+class TestVidi:
     def test_displays_entry(self):
         entry = _make_entry()
         with patch(_LOAD, return_value=[entry]):
-            result = runner.invoke(app, ["vorto", "vido", SAMPLE_UUID])
+            result = runner.invoke(app, ["vorto", "vidi", SAMPLE_UUID])
         assert result.exit_code == 0
         assert "hello" in result.output
 
     def test_uuid_prefix_works(self):
         entry = _make_entry()
         with patch(_LOAD, return_value=[entry]):
-            result = runner.invoke(app, ["vorto", "vido", "aaaaaaaa"])
+            result = runner.invoke(app, ["vorto", "vidi", "aaaaaaaa"])
         assert result.exit_code == 0
 
     def test_not_found_exits_nonzero(self):
         with patch(_LOAD, return_value=[]):
-            result = runner.invoke(app, ["vorto", "vido", "notfound"])
+            result = runner.invoke(app, ["vorto", "vidi", "notfound"])
         assert result.exit_code != 0
 
 
@@ -581,10 +583,257 @@ class TestRegistration:
     def test_vorto_subcommands_visible(self):
         result = runner.invoke(app, ["vorto", "--help"])
         assert result.exit_code == 0
-        for sub in ("aldoni", "vido", "modifi", "serci", "forigi", "malfari"):
+        for sub in ("aldoni", "vidi", "modifi", "serci", "forigi", "malfari"):
             assert sub in result.output
 
     def test_vorto_in_kp_subcommands(self):
         from autish.commands.kp import _AUTISH_SUBCOMMANDS
 
         assert "vorto" in _AUTISH_SUBCOMMANDS
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# TUI helper tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestEntryToLines:
+    def test_basic_fields_present(self):
+        entry = _make_entry()
+        lines = _entry_to_lines(entry)
+        joined = "\n".join(lines)
+        assert "hello" in joined
+        assert "aaaaaaaa" in joined   # UUID prefix
+        assert "en" in joined         # lingvo
+
+    def test_definition_listed(self):
+        entry = _make_entry(difinoj=["a greeting", "a salutation"])
+        lines = _entry_to_lines(entry)
+        joined = "\n".join(lines)
+        assert "a greeting" in joined
+        assert "a salutation" in joined
+
+    def test_empty_optional_fields_omitted(self):
+        entry = _make_entry(temo=None, tono=None, nivelo=None, etikedoj={})
+        lines = _entry_to_lines(entry)
+        joined = "\n".join(lines)
+        assert "temo" not in joined
+        assert "tono" not in joined
+        assert "nivelo" not in joined
+
+    def test_returns_list_of_strings(self):
+        entry = _make_entry()
+        lines = _entry_to_lines(entry)
+        assert isinstance(lines, list)
+        assert all(isinstance(ln, str) for ln in lines)
+
+
+class TestEntriesToLines:
+    def test_empty_list_gives_no_results_message(self):
+        lines = _entries_to_lines([])
+        assert any("Neniu" in ln or "No results" in ln for ln in lines)
+
+    def test_header_row_present(self):
+        entry = _make_entry()
+        lines = _entries_to_lines([entry])
+        joined = "\n".join(lines)
+        assert "Teksto" in joined
+        assert "Lingvo" in joined
+
+    def test_entry_teksto_present(self):
+        entry = _make_entry()
+        lines = _entries_to_lines([entry])
+        joined = "\n".join(lines)
+        assert "hello" in joined
+
+    def test_multiple_entries(self):
+        entries = [
+            _make_entry(uuid=SAMPLE_UUID, teksto="hello"),
+            _make_entry(uuid=SAMPLE_UUID2, teksto="saluton"),
+        ]
+        lines = _entries_to_lines(entries)
+        joined = "\n".join(lines)
+        assert "hello" in joined
+        assert "saluton" in joined
+
+
+class TestLineEditor:
+    """Unit tests for the LineEditor Vim-style text editor."""
+
+    def _make_editor(self, text: str = "", insert: bool = True):
+        from autish.commands._vorto_tui import LineEditor
+        return LineEditor(text, insert_on_start=insert)
+
+    def test_initial_text(self):
+        ed = self._make_editor("hello")
+        assert ed.text == "hello"
+
+    def test_insert_mode_typing(self):
+        ed = self._make_editor("")
+        for ch in "hello":
+            ed.handle_key(ord(ch))
+        assert ed.text == "hello"
+
+    def test_backspace_in_insert(self):
+        ed = self._make_editor("hello")
+        ed.handle_key(127)  # backspace
+        assert ed.text == "hell"
+
+    def test_esc_switches_to_normal(self):
+        ed = self._make_editor("hello")
+        assert ed.mode == "INSERT"
+        ed.handle_key(27)  # ESC
+        assert ed.mode == "NORMAL"
+
+    def test_normal_h_moves_left(self):
+        ed = self._make_editor("hello", insert=False)
+        ed.pos = 3
+        ed.handle_key(ord("h"))
+        assert ed.pos == 2
+
+    def test_normal_l_moves_right(self):
+        ed = self._make_editor("hello", insert=False)
+        ed.pos = 0
+        ed.handle_key(ord("l"))
+        assert ed.pos == 1
+
+    def test_normal_0_goes_to_start(self):
+        ed = self._make_editor("hello", insert=False)
+        ed.pos = 4
+        ed.handle_key(ord("0"))
+        assert ed.pos == 0
+
+    def test_normal_dollar_goes_to_end(self):
+        ed = self._make_editor("hello", insert=False)
+        ed.pos = 0
+        ed.handle_key(ord("$"))
+        assert ed.pos == len("hello") - 1
+
+    def test_normal_w_moves_to_next_word(self):
+        ed = self._make_editor("hello world", insert=False)
+        ed.pos = 0
+        ed.handle_key(ord("w"))
+        assert ed.pos == 6  # 'w' in 'world'
+
+    def test_normal_x_deletes_char(self):
+        ed = self._make_editor("hello", insert=False)
+        ed.pos = 0
+        ed.handle_key(ord("x"))
+        assert ed.text == "ello"
+
+    def test_dd_clears_field(self):
+        ed = self._make_editor("hello world", insert=False)
+        ed._pending_op = "d"
+        ed._pending_count = 1
+        ed._apply_pending(ord("d"), "d")
+        assert ed.text == ""
+
+    def test_yank_copies_to_register(self):
+        ed = self._make_editor("hello", insert=False)
+        ed._pending_op = "y"
+        ed._pending_count = 1
+        ed._apply_pending(ord("y"), "y")
+        assert ed.register == "hello"
+
+    def test_visual_mode_entered(self):
+        ed = self._make_editor("hello", insert=False)
+        ed.handle_key(ord("v"))
+        assert ed.mode == "VISUAL"
+
+    def test_enter_returns_done_in_insert(self):
+        ed = self._make_editor("")
+        result = ed.handle_key(ord("\n"))
+        assert result == "done"
+
+    def test_count_prefix_multiplies_motion(self):
+        ed = self._make_editor("hello world foo", insert=False)
+        ed.pos = 0
+        # 2w should skip two words
+        ed.handle_key(ord("2"))
+        ed.handle_key(ord("w"))
+        # Should be at 'foo' (index 12)
+        assert ed.pos > 6
+
+
+class TestPager:
+    """Unit tests for the Pager navigation logic (no curses rendering)."""
+
+    def _make_pager(self, lines=None):
+        from unittest.mock import MagicMock
+
+        from autish.commands._vorto_tui import Pager
+        stdscr = MagicMock()
+        stdscr.getmaxyx.return_value = (24, 80)
+        stdscr.getch.return_value = ord("q")
+        p = Pager(stdscr, lines or ["line1", "line2", "line3"], title="test")
+        return p
+
+    def test_initial_position(self):
+        p = self._make_pager()
+        assert p.row == 0
+
+    def test_j_moves_down(self):
+        p = self._make_pager(["l1", "l2", "l3"])
+        p._normal_key(ord("j"), "j")
+        assert p.row == 1
+
+    def test_k_moves_up(self):
+        p = self._make_pager(["l1", "l2", "l3"])
+        p.row = 2
+        p._normal_key(ord("k"), "k")
+        assert p.row == 1
+
+    def test_count_prefix_j(self):
+        p = self._make_pager(["l1", "l2", "l3", "l4"])
+        p._count_buf = "2"
+        p._normal_key(ord("j"), "j")
+        assert p.row == 2
+
+    def test_G_goes_to_last_line(self):
+        p = self._make_pager(["l1", "l2", "l3"])
+        p._normal_key(ord("G"), "G")
+        assert p.row == 2
+
+    def test_gg_goes_to_first_line(self):
+        from unittest.mock import MagicMock
+
+        from autish.commands._vorto_tui import Pager
+        stdscr = MagicMock()
+        stdscr.getmaxyx.return_value = (24, 80)
+        # Simulate 'g' followed by 'g'
+        stdscr.getch.return_value = ord("g")
+        p = Pager(stdscr, ["l1", "l2", "l3"], title="test")
+        p.row = 2
+        p._normal_key(ord("g"), "g")
+        assert p.row == 0
+
+    def test_0_resets_col(self):
+        p = self._make_pager()
+        p.col = 10
+        p._normal_key(ord("0"), "0")
+        assert p.col == 0
+
+    def test_search_finds_match(self):
+        p = self._make_pager(["hello", "world", "hello again"])
+        p.search_term = "hello"
+        p._do_search()
+        assert 0 in p.search_matches
+        assert 2 in p.search_matches
+
+    def test_next_match_advances(self):
+        p = self._make_pager(["hello", "world", "hello again"])
+        p.search_term = "hello"
+        p._do_search()
+        p.row = 0
+        p._next_match(forward=True)
+        assert p.row == 2
+
+    def test_visual_mode(self):
+        p = self._make_pager()
+        p._normal_key(ord("v"), "v")
+        assert p._mode == "VISUAL"
+
+    def test_q_returns_back(self):
+        p = self._make_pager()
+        result = p._normal_key(ord("q"), "q")
+        assert result == "back"

@@ -3,7 +3,7 @@
 Usage:
     vorto                    — interactive mode (welcome screen)
     vorto aldoni <teksto>    — add an entry
-    vorto vido   <uuid>      — view an entry
+    vorto vidi   <uuid>      — view an entry
     vorto modifi <uuid>      — modify an entry
     vorto serci  [teksto]    — search entries
     vorto forigi <uuid>      — delete an entry
@@ -495,8 +495,8 @@ def aldoni(
     typer.echo(f"Aldonis #{entry['uuid'][:8]}  \"{entry['teksto']}\"")
 
 
-@app.command("vido")
-def vido(
+@app.command("vidi")
+def vidi(
     uid: str = typer.Argument(..., help="UUID (or prefix) of the entry to view."),
 ) -> None:
     """View a wordbank entry in full detail."""
@@ -732,316 +732,152 @@ def malfari() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Interactive mode
+# Interactive mode — full-screen curses TUI
 # ──────────────────────────────────────────────────────────────────────────────
 
-_VERSION = "0.0.1"
 
-_WELCOME_ART = f"""\
+def _entry_to_lines(entry: dict) -> list[str]:
+    """Convert an entry dict to a list of plain-text lines for the pager."""
+    uid_short = entry["uuid"][:8]
+    lines: list[str] = [
+        f"{entry['teksto']}  #{uid_short}",
+        "",
+    ]
 
-                      Mia Vorto {_VERSION}
+    def _row(label: str, value: str) -> None:
+        if value:
+            lines.append(f"  {label:<14}{value}")
 
-                    `a`  aldoni   (add)
-                    `v`  vidi     (visualise)
-                    `m`  modifi   (modify)
-                    `s`  serĉi    (search)
-                    `f`  forigi   (delete)
-                    `h`  helpo    (HELP)
-                    `q`  eliri    (quit)
+    _row("lingvo:", entry.get("lingvo") or "")
+    kategorio = entry.get("kategorio") or ""
+    tipo = entry.get("tipo") or ""
+    tipo_str = kategorio + ("/" + tipo if tipo else "")
+    _row("tipo:", tipo_str)
+    _row("temo:", entry.get("temo") or "")
+    _row("tono:", entry.get("tono") or "")
+    nivelo = entry.get("nivelo")
+    _row("nivelo:", f"{nivelo:.1f}" if nivelo is not None else "")
 
-  Unuan fojon ĉi tie?  Tajpu  :tuto  por gvida lernilo.
-  (First time here? Type :tuto for an interactive tutorial.)
-"""
+    difinoj: list[str] = entry.get("difinoj") or []
+    if difinoj:
+        lines.append(f"  {'difinoj:':<14}")
+        for i, d in enumerate(difinoj, 1):
+            lines.append(f"    {i}. {d}")
 
-_STATUS_BAR = (
-    "[bold]`a`[/bold] aldoni  "
-    "[bold]`v`[/bold] vidi  "
-    "[bold]`m`[/bold] modifi  "
-    "[bold]`s`[/bold] serĉi  "
-    "[bold]`f`[/bold] forigi  "
-    "[bold]`h`[/bold] helpo  "
-    "[bold]`q`[/bold] eliri"
-)
+    etikedoj: dict[str, str] = entry.get("etikedoj") or {}
+    if etikedoj:
+        lines.append(f"  {'etikedoj:':<14}")
+        for k, v in etikedoj.items():
+            lines.append(f"    {k}: {v}")
 
+    ligiloj: list[str] = entry.get("ligiloj") or []
+    if ligiloj:
+        _row("ligiloj:", ", ".join(ligiloj))
 
-def _read_char() -> str:
-    """Read one character from stdin without echo (raw mode, Linux/macOS)."""
-    try:
-        import termios
-        import tty
+    lines.append("")
+    _row("kreita:", (entry.get("kreita_je") or "")[:19])
+    modifita = entry.get("modifita_je") or ""
+    kreita = entry.get("kreita_je") or ""
+    if modifita and modifita != kreita:
+        _row("modifita:", modifita[:19])
 
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
-        try:
-            tty.setraw(fd)
-            ch = sys.stdin.read(1)
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        return ch
-    except (ImportError, AttributeError, OSError):
-        # Fallback for non-TTY / unsupported environments
-        line = input("> ")
-        return line[:1] if line else ""
-
-
-def _clear() -> None:
-    console.clear()
+    return lines
 
 
-def _show_help() -> None:
-    console.print(
-        Panel(
-            "[bold]Mia Vorto — Helpo[/bold]\n\n"
-            "  [dim]a[/dim]  aldoni  — aldonu novan vorton/frazon\n"
-            "  [dim]v[/dim]  vidi    — montru eniron per UUID\n"
-            "  [dim]m[/dim]  modifi  — ŝanĝu ekzistantan eniron\n"
-            "  [dim]s[/dim]  serĉi   — serĉu la vortaron\n"
-            "  [dim]f[/dim]  forigi  — forigu eniron\n"
-            "  [dim]h[/dim]  helpo   — montru ĉi tiun helpon\n"
-            "  [dim]q[/dim]  eliri   — eliru la programon\n\n"
-            "  [dim]:[/dim]  komanda reĝimo  (ekz: :serci saluton, :tuto, :q)\n\n"
-            "Rekta aliro:\n"
-            "  vorto aldoni <teksto> [opcioj]\n"
-            "  vorto vido <uuid>\n"
-            "  vorto modifi <uuid> [opcioj]\n"
-            "  vorto serci [teksto] [opcioj]\n"
-            "  vorto forigi <uuid>\n"
-            "  vorto malfari\n",
-            border_style="dim",
-            expand=False,
-            title="helpo",
+def _entries_to_lines(entries: list[dict]) -> list[str]:
+    """Convert a list of entries to pager-ready plain-text lines."""
+    if not entries:
+        return ["Neniu rezulto trovita. (No results found.)"]
+    col_uuid = 10
+    col_teksto = 28
+    col_lingvo = 8
+    col_tipo = 18
+    col_niv = 5
+    col_dato = 12
+    header = (
+        f"{'UUID':<{col_uuid}} {'Teksto':<{col_teksto}} "
+        f"{'Lingvo':<{col_lingvo}} {'Tipo':<{col_tipo}} "
+        f"{'Niv.':<{col_niv}} {'Dato':<{col_dato}}"
+    )
+    sep = "─" * len(header)
+    lines = [header, sep]
+    for e in entries:
+        uid_short = e["uuid"][:col_uuid]
+        kategorio = e.get("kategorio") or ""
+        tipo = e.get("tipo") or ""
+        tipo_str = (kategorio + ("/" + tipo if tipo else ""))[:col_tipo]
+        date_str = (e.get("kreita_je") or "")[:10]
+        nivelo = e.get("nivelo")
+        niv_str = f"{nivelo:.1f}" if nivelo is not None else ""
+        teksto = e["teksto"][:col_teksto]
+        lines.append(
+            f"{uid_short:<{col_uuid}} {teksto:<{col_teksto}} "
+            f"{(e.get('lingvo') or ''):<{col_lingvo}} {tipo_str:<{col_tipo}} "
+            f"{niv_str:<{col_niv}} {date_str:<{col_dato}}"
         )
-    )
+    return lines
 
 
-def _run_tutorial() -> None:
-    console.print(
-        Panel(
-            "[bold]Tutorialo — Mia Vorto[/bold]\n\n"
-            "1. Premu [bold]a[/bold] por aldoni vian unuan vorton.\n"
-            "   Ekzemplo CLI: vorto aldoni 'saluton' -l eo -t verbo\n\n"
-            "2. Premu [bold]s[/bold] por serĉi ĉiujn viajn vortojn.\n\n"
-            "3. Premu [bold]v[/bold] kaj entajpu UUID por vidi eniron.\n\n"
-            "4. Premu [bold]m[/bold] kaj UUID por modifi eniron.\n\n"
-            "5. Premu [bold]f[/bold] kaj UUID por forigi eniron.\n\n"
-            "6. Uzu 'vorto malfari' por malfari la lastan ŝanĝon.\n\n"
-            "7. Premu [bold]q[/bold] por eliri.\n",
-            border_style="dim",
-            expand=False,
-            title="tutorialo",
+def _undo_action() -> str:
+    """Run undo and return a status string."""
+    stack = _load_undo_stack()
+    if not stack:
+        return "Nenio por malfari. (Nothing to undo.)"
+
+    op = stack.pop()
+    entries = _load_entries()
+
+    if op["op"] == "aldoni":
+        uid = op["uuid"]
+        entries = [e for e in entries if e["uuid"] != uid]
+        msg = f"Malfaris aldoni — forigis #{uid[:8]}."
+    elif op["op"] == "modifi":
+        old = op["old"]
+        idx = next(
+            (i for i, e in enumerate(entries) if e["uuid"] == old["uuid"]), None
         )
-    )
-
-
-def _handle_colon_command(cmd: str) -> bool:
-    """Handle a ':cmd' input.  Returns True if the app should quit."""
-    if cmd in ("q", "eliru", "exit"):
-        console.print("[dim]Ĝis revido. (Goodbye.)[/dim]")
-        return True
-    if cmd == "tuto":
-        _run_tutorial()
-    elif cmd.startswith("serci"):
-        query = cmd.removeprefix("serci").strip()
-        _clear()
-        all_entries = _load_entries()
-        if query:
-            low = query.lower()
-            found = [e for e in all_entries if low in e["teksto"].lower()][:50]
-        else:
-            found = all_entries[:50]
-        typer.echo(f"{len(found)} rezulto(j).")
-        _display_results(found)
+        if idx is not None:
+            entries[idx] = old
+        msg = f"Malfaris modifi — restaŭris #{old['uuid'][:8]}."
+    elif op["op"] == "forigi":
+        old = op["entry"]
+        entries.append(old)
+        msg = f"Malfaris forigi — restaŭris #{old['uuid'][:8]}  \"{old['teksto']}\"."
     else:
-        console.print(f"[dim]Nekonata komando: :{cmd}[/dim]")
-    return False
+        msg = "Nekonata operacio."
+
+    _save_entries(entries)
+    _save_undo_stack(stack)
+    return msg
 
 
-def _interactive_aldoni() -> None:
-    console.print("[bold]Aldoni[/bold] — Entajpu la vorton/frazon/frazdaron:\n")
-    try:
-        teksto = input("  teksto      : ").strip()
-        if not teksto:
-            console.print("[dim]Nuligita.[/dim]")
-            return
-        lingvo = input("  lingvo      : ").strip() or None
-        tipo_raw = input("  tipo        : ").strip() or None
-        temo = input("  temo        : ").strip() or None
-        tono_raw = input("  tono        : ").strip() or None
-        nivelo_str = input("  nivelo 1-10 : ").strip()
-        difino_str = input("  difino(j)   : ").strip()
-        etikedo_str = input("  etikedoj    : ").strip()
-    except (EOFError, KeyboardInterrupt):
-        console.print("\n[dim]Nuligita.[/dim]")
-        return
-
-    nivelo: float | None = None
-    if nivelo_str:
-        try:
-            nivelo = float(nivelo_str)
-        except ValueError:
-            console.print("[dim]Nevalida nivelo, ignorita.[/dim]")
-
-    difinoj = [d.strip() for d in difino_str.split(";") if d.strip()]
-    etikedoj = _parse_etikedo(etikedo_str.split() if etikedo_str else [])
-
-    now = _now_iso()
-    entry: dict = {
-        "uuid": str(_uuid_mod.uuid4()),
-        "teksto": teksto,
-        "lingvo": lingvo,
-        "kategorio": _detect_kategorio(teksto),
-        "tipo": _normalize_tipo(tipo_raw),
-        "temo": temo,
-        "tono": _normalize_tono(tono_raw),
-        "nivelo": nivelo,
-        "difinoj": difinoj,
-        "etikedoj": etikedoj,
-        "ligiloj": [],
-        "kreita_je": now,
-        "modifita_je": now,
-    }
-
-    _display_entry(entry)
-    try:
-        if typer.confirm("Aldoni? (Add?)", default=True):
-            all_entries = _load_entries()
-            all_entries.append(entry)
-            _save_entries(all_entries)
-            _push_undo({"op": "aldoni", "uuid": entry["uuid"]})
-            console.print(f"[dim]Aldonis #{entry['uuid'][:8]}[/dim]")
-    except (EOFError, KeyboardInterrupt):
-        console.print("\n[dim]Nuligita.[/dim]")
-
-
-def _interactive_vido() -> None:
-    console.print("[bold]Vidi[/bold] — Entajpu UUID (aŭ prefikson):\n")
-    try:
-        uid = input("  UUID : ").strip()
-    except (EOFError, KeyboardInterrupt):
-        console.print("\n[dim]Nuligita.[/dim]")
-        return
-    if not uid:
-        return
+def _tui_save_new(entry: dict) -> None:
     all_entries = _load_entries()
-    entry = _find_entry(uid, all_entries)
-    if entry is None:
-        console.print(f"[dim]Ne trovita: {uid!r}[/dim]")
-        return
-    _display_entry(entry)
+    all_entries.append(entry)
+    _save_entries(all_entries)
+    _push_undo({"op": "aldoni", "uuid": entry["uuid"]})
 
 
-def _interactive_modifi() -> None:
-    console.print("[bold]Modifi[/bold] — Entajpu UUID:\n")
-    try:
-        uid = input("  UUID : ").strip()
-    except (EOFError, KeyboardInterrupt):
-        console.print("\n[dim]Nuligita.[/dim]")
-        return
-    if not uid:
-        return
-
+def _tui_save_modified(entry: dict, old_entry: dict) -> None:
     all_entries = _load_entries()
-    entry = _find_entry(uid, all_entries)
-    if entry is None:
-        console.print(f"[dim]Ne trovita: {uid!r}[/dim]")
-        return
-
-    _display_entry(entry)
-    console.print("[dim]Lasu malplena por konservi la nunan valoron.[/dim]\n")
-
-    try:
-        new_teksto = input(f"  teksto  [{entry['teksto']}] : ").strip()
-        new_lingvo = input(f"  lingvo  [{entry.get('lingvo') or ''}] : ").strip()
-        new_tipo = input(f"  tipo    [{entry.get('tipo') or ''}] : ").strip()
-        new_temo = input(f"  temo    [{entry.get('temo') or ''}] : ").strip()
-        new_tono = input(f"  tono    [{entry.get('tono') or ''}] : ").strip()
-        new_nivelo_str = input(
-            f"  nivelo  [{entry.get('nivelo') or ''}] : "
-        ).strip()
-    except (EOFError, KeyboardInterrupt):
-        console.print("\n[dim]Nuligita.[/dim]")
-        return
-
-    old_entry = dict(entry)
-    if new_teksto:
-        entry["teksto"] = new_teksto
-        entry["kategorio"] = _detect_kategorio(new_teksto)
-    if new_lingvo:
-        entry["lingvo"] = new_lingvo
-    if new_tipo:
-        entry["tipo"] = _normalize_tipo(new_tipo)
-    if new_temo:
-        entry["temo"] = new_temo
-    if new_tono:
-        entry["tono"] = _normalize_tono(new_tono)
-    if new_nivelo_str:
-        try:
-            entry["nivelo"] = float(new_nivelo_str)
-        except ValueError:
-            console.print("[dim]Nevalida nivelo, ignorita.[/dim]")
-    entry["modifita_je"] = _now_iso()
-
-    try:
-        if typer.confirm("Konservi? (Save?)", default=True):
-            idx = next(
-                i for i, e in enumerate(all_entries) if e["uuid"] == entry["uuid"]
-            )
-            all_entries[idx] = entry
-            _save_entries(all_entries)
-            _push_undo({"op": "modifi", "old": old_entry})
-            console.print(f"[dim]Modifis #{entry['uuid'][:8]}[/dim]")
-    except (EOFError, KeyboardInterrupt):
-        console.print("\n[dim]Nuligita.[/dim]")
-
-
-def _interactive_serci() -> None:
-    console.print(
-        "[bold]Serĉi[/bold] — Entajpu serĉtermon (enteru por montri ĉiujn):\n"
+    idx = next(
+        (i for i, e in enumerate(all_entries) if e["uuid"] == entry["uuid"]), None
     )
-    try:
-        query = input("  serĉo : ").strip()
-    except (EOFError, KeyboardInterrupt):
-        console.print("\n[dim]Nuligita.[/dim]")
-        return
+    if idx is not None:
+        all_entries[idx] = entry
+    _save_entries(all_entries)
+    _push_undo({"op": "modifi", "old": old_entry})
+
+
+def _tui_delete(entry: dict) -> None:
     all_entries = _load_entries()
-    if query:
-        low = query.lower()
-        found = [e for e in all_entries if low in e["teksto"].lower()][:50]
-    else:
-        found = all_entries[:50]
-    typer.echo(f"{len(found)} rezulto(j).")
-    _display_results(found)
-
-
-def _interactive_forigi() -> None:
-    console.print("[bold]Forigi[/bold] — Entajpu UUID (aŭ prefikson):\n")
-    try:
-        uid = input("  UUID : ").strip()
-    except (EOFError, KeyboardInterrupt):
-        console.print("\n[dim]Nuligita.[/dim]")
-        return
-    if not uid:
-        return
-
-    all_entries = _load_entries()
-    entry = _find_entry(uid, all_entries)
-    if entry is None:
-        console.print(f"[dim]Ne trovita: {uid!r}[/dim]")
-        return
-
-    _display_entry(entry)
-    try:
-        if typer.confirm("Forigi? (Delete?)", default=False):
-            all_entries = [e for e in all_entries if e["uuid"] != entry["uuid"]]
-            _save_entries(all_entries)
-            _push_undo({"op": "forigi", "entry": entry})
-            console.print(f"[dim]Forigis #{entry['uuid'][:8]}[/dim]")
-    except (EOFError, KeyboardInterrupt):
-        console.print("\n[dim]Nuligita.[/dim]")
+    all_entries = [e for e in all_entries if e["uuid"] != entry["uuid"]]
+    _save_entries(all_entries)
+    _push_undo({"op": "forigi", "entry": entry})
 
 
 def _interactive_mode() -> None:
-    """Launch the Mia Vorto interactive mode (requires a TTY)."""
+    """Launch the Mia Vorto full-screen TUI (requires a TTY)."""
     if not sys.stdin.isatty():
         typer.echo(
             "Interactive mode requires a terminal. Use subcommands directly.",
@@ -1049,52 +885,25 @@ def _interactive_mode() -> None:
         )
         raise typer.Exit(code=1)
 
-    _clear()
-    console.print(_WELCOME_ART, style="dim")
+    from autish.commands._vorto_tui import VortoTUI  # noqa: PLC0415
 
-    while True:
-        console.rule(style="dim")
-        console.print(_STATUS_BAR)
-        console.print()
-
-        ch = _read_char()
-
-        # quit
-        if ch in ("q", "\x03", "\x04"):  # q, Ctrl+C, Ctrl+D
-            console.print("\n[dim]Ĝis revido. (Goodbye.)[/dim]")
-            break
-
-        # colon command mode
-        elif ch == ":":
-            console.print(": ", end="")
-            try:
-                cmd = input().strip()
-            except (EOFError, KeyboardInterrupt):
-                break
-            if _handle_colon_command(cmd):
-                break
-
-        elif ch == "a":
-            _clear()
-            _interactive_aldoni()
-        elif ch == "v":
-            _clear()
-            _interactive_vido()
-        elif ch == "m":
-            _clear()
-            _interactive_modifi()
-        elif ch == "s":
-            _clear()
-            _interactive_serci()
-        elif ch == "f":
-            _clear()
-            _interactive_forigi()
-        elif ch == "h":
-            _clear()
-            _show_help()
-        # any other key: redraw status
-        else:
-            _clear()
+    tui = VortoTUI(
+        load_entries=_load_entries,
+        save_new_entry=_tui_save_new,
+        save_modified_entry=_tui_save_modified,
+        delete_entry=_tui_delete,
+        undo=_undo_action,
+        render_entry=_entry_to_lines,
+        render_results=_entries_to_lines,
+        detect_kategorio=_detect_kategorio,
+        normalize_tipo=_normalize_tipo,
+        normalize_tono=_normalize_tono,
+        parse_etikedo=_parse_etikedo,
+        find_entry=_find_entry,
+        now_iso=_now_iso,
+        make_uuid=lambda: str(_uuid_mod.uuid4()),
+    )
+    tui.run()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
