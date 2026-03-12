@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from unittest.mock import patch
 
 from autish.commands.kp import _AUTISH_SUBCOMMANDS, _resolve_command
@@ -31,8 +32,6 @@ class TestResolveCommand:
         assert _resolve_command([]) == []
 
     def test_fallback_to_python_when_autish_not_found(self):
-        import sys
-
         with patch("autish.commands.kp.shutil.which", return_value=None):
             result = _resolve_command(["tempo"])
         assert result[0] == sys.executable

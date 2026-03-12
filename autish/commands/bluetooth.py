@@ -80,7 +80,7 @@ def ls(
     if all_lines:
         echo_padded("\n".join(all_lines))
     else:
-        typer.echo("No paired devices found.")
+        echo_padded("No paired devices found.")
 
 
 @app.command("konekti")

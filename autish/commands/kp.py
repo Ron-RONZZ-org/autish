@@ -48,7 +48,12 @@ def _autish_prefix() -> list[str]:
 
 
 def _resolve_command(command: list[str]) -> list[str]:
-    """Prepend the autish executable when *command* starts with an autish subcommand."""
+    """Return the command to execute, prepending the autish executable as needed.
+
+    If *command* starts with a known autish subcommand (e.g. ``["sistemo"]``),
+    the autish executable is prepended so the subcommand runs correctly.
+    Otherwise *command* is returned unchanged.
+    """
     if command and command[0] in _AUTISH_SUBCOMMANDS:
         return _autish_prefix() + command
     return command
