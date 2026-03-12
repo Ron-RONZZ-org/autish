@@ -844,8 +844,8 @@ class Pager:
                 self.row = 0
                 self.scroll_top = 0
 
-        elif ch == "d" and key == ord("d"):
-            # Ctrl+D = page down
+        elif ch == "d":
+            # d = scroll down half page (vi pager convention)
             self.row = min(n - 1, self.row + content_h // 2)
         elif key == curses.KEY_NPAGE:
             self.row = min(n - 1, self.row + content_h)
@@ -1304,7 +1304,9 @@ class VortoTUI:
             "tipo": entry.get("tipo") or "",
             "temo": entry.get("temo") or "",
             "tono": entry.get("tono") or "",
-            "nivelo": str(entry["nivelo"]) if entry.get("nivelo") is not None else "",
+            "nivelo": (
+                str(entry.get("nivelo")) if entry.get("nivelo") is not None else ""
+            ),
             "etikedoj": entry.get("etikedoj") or {},
             "ligiloj": entry.get("ligiloj") or [],
         }
@@ -1350,7 +1352,7 @@ class VortoTUI:
         else:
             found = entries[:50]
         lines = self._render_results(found)
-        title = f"Serĉi: {query!r}" if query else "Ĉiuj vojoj (maks 50)"
+        title = f"Serĉi: {query!r}" if query else "Ĉiuj vortoj (maks 50)"
         self._status_msg = f"{len(found)} rezulto(j)."
         self._run_pager(lines, title=title)
 
