@@ -15,7 +15,13 @@ import subprocess
 import psutil
 import typer
 
-app = typer.Typer(help="Print system information.", invoke_without_command=True)
+from autish.utils import echo_padded
+
+app = typer.Typer(
+    help="Print system information.",
+    invoke_without_command=True,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 
 
 def _bytes_to_gib(n: int) -> str:
@@ -105,4 +111,4 @@ def sistemo(ctx: typer.Context) -> None:
     else:
         lines.append("Bluetooth: unavailable")
 
-    typer.echo("\n".join(lines))
+    echo_padded("\n".join(lines))

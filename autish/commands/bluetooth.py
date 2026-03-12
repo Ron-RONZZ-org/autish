@@ -14,7 +14,13 @@ import subprocess
 
 import typer
 
-app = typer.Typer(help="Bluetooth device management commands.", no_args_is_help=True)
+from autish.utils import echo_padded
+
+app = typer.Typer(
+    help="Bluetooth device management commands.",
+    no_args_is_help=True,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -38,7 +44,7 @@ def ls(
         if result.returncode != 0:
             typer.echo(result.stderr.strip() or "Device not found.", err=True)
             raise typer.Exit(code=result.returncode)
-        typer.echo(result.stdout.strip())
+        echo_padded(result.stdout.strip())
         return
 
     paired = _bluetoothctl("devices", "Paired")
@@ -70,11 +76,11 @@ def ls(
         else:
             other.append(f"  {line}")
 
-    for line in connected + other:
-        typer.echo(line)
-
-    if not devices:
-        typer.echo("No paired devices found.")
+    all_lines = connected + other
+    if all_lines:
+        echo_padded("\n".join(all_lines))
+    else:
+        echo_padded("No paired devices found.")
 
 
 @app.command("konekti")
@@ -86,7 +92,7 @@ def konekti(
     if result.returncode != 0:
         typer.echo(result.stderr.strip() or "Connection failed.", err=True)
         raise typer.Exit(code=result.returncode)
-    typer.echo(result.stdout.strip())
+    echo_padded(result.stdout.strip())
 
 
 @app.command("malkonekti")
@@ -102,7 +108,7 @@ def malkonekti(
         if result.returncode != 0:
             typer.echo(result.stderr.strip() or "Disconnect failed.", err=True)
             raise typer.Exit(code=result.returncode)
-        typer.echo(result.stdout.strip())
+        echo_padded(result.stdout.strip())
         return
 
     # Disconnect all connected devices using a single query
@@ -115,7 +121,7 @@ def malkonekti(
         device_mac = parts[1]
         r = _bluetoothctl("disconnect", device_mac)
         if r.returncode == 0:
-            typer.echo(r.stdout.strip())
+            echo_padded(r.stdout.strip())
             disconnected_any = True
         else:
             typer.echo(

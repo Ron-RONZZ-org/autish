@@ -15,7 +15,13 @@ import subprocess
 
 import typer
 
-app = typer.Typer(help="Wi-Fi management commands.", no_args_is_help=True)
+from autish.utils import echo_padded
+
+app = typer.Typer(
+    help="Wi-Fi management commands.",
+    no_args_is_help=True,
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 
 
 def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -44,7 +50,7 @@ def ls(
         typer.echo(result.stderr.strip() or "nmcli error.", err=True)
         raise typer.Exit(code=result.returncode)
 
-    typer.echo(result.stdout.strip())
+    echo_padded(result.stdout.strip())
 
 
 @app.command("konekti")
@@ -69,7 +75,7 @@ def konekti(
         typer.echo(result.stderr.strip() or "Connection failed.", err=True)
         raise typer.Exit(code=result.returncode)
 
-    typer.echo(result.stdout.strip())
+    echo_padded(result.stdout.strip())
 
 
 @app.command("malkonekti")
@@ -90,7 +96,7 @@ def malkonekti() -> None:
         if r.returncode != 0:
             typer.echo(r.stderr.strip() or f"Failed to disconnect {iface}.", err=True)
             raise typer.Exit(code=r.returncode)
-        typer.echo(r.stdout.strip())
+        echo_padded(r.stdout.strip())
 
 
 @app.command("forigi")
@@ -108,4 +114,4 @@ def forigi(
         typer.echo(result.stderr.strip() or "Deletion failed.", err=True)
         raise typer.Exit(code=result.returncode)
 
-    typer.echo(result.stdout.strip())
+    echo_padded(result.stdout.strip())
