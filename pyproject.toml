@@ -37,6 +37,7 @@ ruff = ">=0.4"
 
 [tool.poetry.scripts]
 autish = "autish.main:app"
+vorto = "autish.commands.vorto:app"
 
 [tool.ruff]
 line-length = 88

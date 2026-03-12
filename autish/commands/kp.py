@@ -35,7 +35,7 @@ _CACHE_FILE = Path(tempfile.gettempdir()) / f"autish_kp_{getpass.getuser()}.txt"
 
 # Known autish subcommands that should be run via the autish executable.
 _AUTISH_SUBCOMMANDS = frozenset(
-    {"tempo", "wifi", "bluhdento", "sistemo", "kp", "shelo"}
+    {"tempo", "wifi", "bluhdento", "sistemo", "kp", "shelo", "vorto"}
 )
 
 
