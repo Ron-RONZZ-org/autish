@@ -161,8 +161,8 @@ through the interactive UI and direct CLI subcommands.
 #### Wordbook — *Mia Vorto* (`vorto`)
 
 - [x] Data model: UUID, teksto, lingvo, kategorio, tipo, temo, tono, nivelo, difinoj, etikedoj, ligiloj, kreita_je, modifita_je
-- [x] Storage: `~/.local/share/autish/vorto.json`
-- [x] Undo stack (up to 10): `~/.local/share/autish/vorto_undo.json`
+- [x] Storage: `~/.local/share/autish/vorto.db` (SQLite, WAL mode)
+- [x] Undo stack (up to 10): same `vorto.db`, `undo_stack` table
 - [x] Auto-detect kategorio from text (vorto / frazo / frazdaro)
 - [x] Subcommand `aldoni` — add entry with all property options
 - [x] Subcommand `vido` — view full entry detail

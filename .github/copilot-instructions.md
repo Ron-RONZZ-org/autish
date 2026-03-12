@@ -24,6 +24,7 @@
 | Rich output | [Rich](https://github.com/Textualize/rich) |
 | System info | [psutil](https://github.com/giampaolo/psutil) |
 | Clipboard | [pyperclip](https://github.com/asweigart/pyperclip) |
+| Microapp data storage | **SQLite** (stdlib `sqlite3`) — scalable, efficient, single-file, no extra dependency |
 | Linting / formatting | [Ruff](https://docs.astral.sh/ruff/) |
 | Testing | [pytest](https://pytest.org/) + [pytest-mock](https://pytest-mock.readthedocs.io/) |
 | Build / dep management | [Poetry](https://python-poetry.org/) ≥ 2.0 via `pyproject.toml` + `poetry.lock` |
@@ -43,10 +44,13 @@ autish/
 │       ├── wifi.py        # Wi-Fi subcommands
 │       ├── bluetooth.py   # Bluetooth subcommands
 │       ├── sistemo.py     # system info
-│       └── kp.py          # clipboard copy
+│       ├── kp.py          # clipboard copy
+│       └── vorto.py       # Mia Vorto wordbook microapp (SQLite)
 ├── tests/
 │   ├── __init__.py
-│   └── test_tempo.py
+│   ├── test_tempo.py
+│   ├── test_kp.py
+│   └── test_vorto.py
 ├── pyproject.toml
 ├── README.md
 ├── CONTRIBUTING.md
@@ -65,6 +69,7 @@ autish/
 6. **Subprocess calls** — wrap `subprocess.run()` calls; capture `CalledProcessError` and surface a clean error message.
 7. **No internet dependency** — all v0.0.1 commands must work offline. Do not add network calls.
 8. **Test coverage** — every command module should have a corresponding test file under `tests/`.
+9. **Microapp data storage** — use SQLite (stdlib `sqlite3`) for any microapp that needs to persist structured data. Scalability and efficiency matter: prefer granular `INSERT`/`UPDATE`/`DELETE` over full-table rewrites; use `WAL` journal mode; store JSON arrays/objects in `TEXT` columns when normalisation would be overkill for the data size. Never use plain JSON files for databases.
 
 ---
 

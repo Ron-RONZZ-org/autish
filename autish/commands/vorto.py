@@ -9,14 +9,15 @@ Usage:
     vorto forigi <uuid>      — delete an entry
     vorto malfari            — undo the last change (up to 10)
 
-Data is stored in ~/.local/share/autish/vorto.json.
-An undo stack (last 10 operations) is kept in vorto_undo.json.
+Data is stored in an SQLite database at ~/.local/share/autish/vorto.db.
+The undo stack (last 10 operations) is kept in the same database.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import sys
 import uuid as _uuid_mod
 from datetime import datetime, timezone
@@ -46,9 +47,79 @@ console = Console()
 # ──────────────────────────────────────────────────────────────────────────────
 
 _DATA_DIR: Path = Path.home() / ".local" / "share" / "autish"
-_VORTO_FILE: Path = _DATA_DIR / "vorto.json"
-_UNDO_FILE: Path = _DATA_DIR / "vorto_undo.json"
+_DB_FILE: Path = _DATA_DIR / "vorto.db"
 _MAX_UNDO: int = 10
+
+# ──────────────────────────────────────────────────────────────────────────────
+# SQLite helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+_CREATE_VORTO = """
+CREATE TABLE IF NOT EXISTS vorto (
+    uuid        TEXT PRIMARY KEY,
+    teksto      TEXT NOT NULL,
+    lingvo      TEXT,
+    kategorio   TEXT,
+    tipo        TEXT,
+    temo        TEXT,
+    tono        TEXT,
+    nivelo      REAL,
+    difinoj     TEXT NOT NULL DEFAULT '[]',
+    etikedoj    TEXT NOT NULL DEFAULT '{}',
+    ligiloj     TEXT NOT NULL DEFAULT '[]',
+    kreita_je   TEXT NOT NULL,
+    modifita_je TEXT NOT NULL
+);
+"""
+
+_CREATE_UNDO = """
+CREATE TABLE IF NOT EXISTS undo_stack (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation TEXT NOT NULL
+);
+"""
+
+
+def _get_db() -> sqlite3.Connection:
+    """Open (and initialise) the SQLite database, returning a connection."""
+    _DATA_DIR.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(str(_DB_FILE), timeout=5.0)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL;")
+    con.execute("PRAGMA foreign_keys=ON;")
+    con.executescript(_CREATE_VORTO + _CREATE_UNDO)
+    return con
+
+
+def _row_to_dict(row: sqlite3.Row) -> dict:
+    """Convert a *vorto* table row to a plain dict, parsing JSON columns."""
+    d = dict(row)
+    for col, default in (("difinoj", "[]"), ("etikedoj", "{}"), ("ligiloj", "[]")):
+        raw = d.get(col) or default
+        try:
+            d[col] = json.loads(raw)
+        except json.JSONDecodeError:
+            d[col] = json.loads(default)
+    return d
+
+
+def _dict_to_params(entry: dict) -> tuple:
+    """Return the parameter tuple used for INSERT/UPDATE statements."""
+    return (
+        entry["uuid"],
+        entry["teksto"],
+        entry.get("lingvo"),
+        entry.get("kategorio"),
+        entry.get("tipo"),
+        entry.get("temo"),
+        entry.get("tono"),
+        entry.get("nivelo"),
+        json.dumps(entry.get("difinoj") or [], ensure_ascii=False),
+        json.dumps(entry.get("etikedoj") or {}, ensure_ascii=False),
+        json.dumps(entry.get("ligiloj") or [], ensure_ascii=False),
+        entry["kreita_je"],
+        entry["modifita_je"],
+    )
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Lookup tables (Esperanto type/tonality abbreviations)
@@ -92,44 +163,59 @@ _TONO_MAP: dict[str, str] = {
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Data I/O
+# Data I/O  (SQLite-backed; signatures are identical to the old JSON layer so
+# that existing tests that mock these functions continue to work unchanged)
 # ──────────────────────────────────────────────────────────────────────────────
 
 
 def _load_entries() -> list[dict]:
-    if not _VORTO_FILE.exists():
-        return []
-    try:
-        data = json.loads(_VORTO_FILE.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except (json.JSONDecodeError, OSError):
-        return []
+    """Return all wordbank entries ordered by creation date (oldest first)."""
+    with _get_db() as con:
+        rows = con.execute(
+            "SELECT * FROM vorto ORDER BY kreita_je ASC"
+        ).fetchall()
+    return [_row_to_dict(r) for r in rows]
 
 
 def _save_entries(entries: list[dict]) -> None:
-    _DATA_DIR.mkdir(parents=True, exist_ok=True)
-    _VORTO_FILE.write_text(
-        json.dumps(entries, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    """Replace the entire entry table with *entries* in a single transaction.
+
+    This is used exclusively by the undo system which must restore an arbitrary
+    prior snapshot.  Normal CRUD operations call the granular helpers below.
+    """
+    with _get_db() as con:
+        con.execute("DELETE FROM vorto")
+        con.executemany(
+            """
+            INSERT INTO vorto
+                (uuid, teksto, lingvo, kategorio, tipo, temo, tono,
+                 nivelo, difinoj, etikedoj, ligiloj, kreita_je, modifita_je)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [_dict_to_params(e) for e in entries],
+        )
+        con.commit()
 
 
 def _load_undo_stack() -> list[dict]:
-    if not _UNDO_FILE.exists():
-        return []
-    try:
-        data = json.loads(_UNDO_FILE.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except (json.JSONDecodeError, OSError):
-        return []
+    """Return the undo stack (oldest operation first, max _MAX_UNDO items)."""
+    with _get_db() as con:
+        rows = con.execute(
+            "SELECT operation FROM undo_stack ORDER BY id ASC"
+        ).fetchall()
+    return [json.loads(r["operation"]) for r in rows]
 
 
 def _save_undo_stack(stack: list[dict]) -> None:
-    _DATA_DIR.mkdir(parents=True, exist_ok=True)
-    _UNDO_FILE.write_text(
-        json.dumps(stack, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    """Persist *stack*, keeping only the last _MAX_UNDO entries."""
+    stack = stack[-_MAX_UNDO:]
+    with _get_db() as con:
+        con.execute("DELETE FROM undo_stack")
+        con.executemany(
+            "INSERT INTO undo_stack (operation) VALUES (?)",
+            [(json.dumps(op, ensure_ascii=False),) for op in stack],
+        )
+        con.commit()
 
 
 def _push_undo(operation: dict) -> None:
