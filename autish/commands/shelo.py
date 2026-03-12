@@ -29,6 +29,15 @@ _EXIT_WORDS = frozenset({"eliru", "exit", "q", "quit"})
 _HISTORY_FILE = Path.home() / ".local" / "share" / "autish" / "shelo_history"
 _MAX_HISTORY = 500
 
+# readline is optional — not available on all platforms/environments
+try:
+    import readline as _readline
+
+    _HAS_READLINE = True
+except ImportError:
+    _readline = None  # type: ignore[assignment]
+    _HAS_READLINE = False
+
 
 def _autish_cmd() -> list[str]:
     """Return the command list needed to invoke autish."""
@@ -39,37 +48,38 @@ def _autish_cmd() -> list[str]:
 
 
 def _setup_readline() -> None:
-    """Configure readline for history navigation and persistence."""
+    """Configure readline history navigation and persistence."""
+    if not _HAS_READLINE:
+        return
     try:
-        import readline  # noqa: PLC0415
-
-        readline.set_history_length(_MAX_HISTORY)
+        _readline.set_history_length(_MAX_HISTORY)
         if _HISTORY_FILE.exists():
-            readline.read_history_file(str(_HISTORY_FILE))
+            _readline.read_history_file(str(_HISTORY_FILE))
     except Exception:
         pass
 
 
 def _save_history() -> None:
     """Persist readline history to disk."""
+    if not _HAS_READLINE:
+        return
     try:
-        import readline  # noqa: PLC0415
-
         _HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        readline.write_history_file(str(_HISTORY_FILE))
+        _readline.write_history_file(str(_HISTORY_FILE))
     except Exception:
         pass
 
 
 def _search_history(query: str) -> None:
     """Print the last 5 history entries that contain *query*."""
+    if not _HAS_READLINE:
+        typer.echo("Historio ne disponebla en ĉi tiu medio.")
+        return
     try:
-        import readline  # noqa: PLC0415
-
         found: list[str] = []
-        hist_len = readline.get_current_history_length()
+        hist_len = _readline.get_current_history_length()
         for i in range(hist_len, 0, -1):
-            item = readline.get_history_item(i)
+            item = _readline.get_history_item(i)
             if item and query.lower() in item.lower() and not item.startswith("/"):
                 found.append(item)
                 if len(found) >= 5:

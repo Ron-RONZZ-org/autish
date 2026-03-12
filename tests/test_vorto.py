@@ -850,7 +850,7 @@ class TestVidiNoArg:
     def test_no_arg_shows_latest_50(self):
         entries = [
             _make_entry(
-                uuid=str(__import__("uuid").uuid4()),
+                uuid=str(uuid.uuid4()),
                 teksto=f"word{i}",
                 kreita_je=f"2024-0{(i % 9) + 1}-01T00:00:00+00:00",
                 modifita_je=f"2024-0{(i % 9) + 1}-01T00:00:00+00:00",
@@ -864,7 +864,7 @@ class TestVidiNoArg:
 
     def test_no_arg_inverse_flag(self):
         entries = [
-            _make_entry(uuid=str(__import__("uuid").uuid4()), teksto=f"word{i}")
+            _make_entry(uuid=str(uuid.uuid4()), teksto=f"word{i}")
             for i in range(3)
         ]
         with patch(_LOAD, return_value=entries):

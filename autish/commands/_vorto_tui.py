@@ -991,13 +991,15 @@ class Pager:
             self.row = before[-1] if before else self.search_matches[-1]
 
     def _yank(self, lines: list[str]) -> None:
+        _PREVIEW_LEN = 40
         text = "\n".join(lines)
+        preview = text[:_PREVIEW_LEN]
         try:
             import pyperclip  # noqa: PLC0415
             pyperclip.copy(text)
-            self._yank_status = f"✓ Yankita: {text[:40]!r}"
+            self._yank_status = f"✓ Yankita: {preview!r}"
         except Exception:
-            self._yank_status = f"✓ Yankita (tondujo ne disponebla): {text[:40]!r}"
+            self._yank_status = f"✓ Yankita (tondujo ne disponebla): {preview!r}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
