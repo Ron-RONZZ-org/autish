@@ -132,3 +132,47 @@
 - Shell hook for `kp` (Option A above)
 - `--json` output flag for machine-readable output
 - Man page generation
+
+---
+
+## Microapps
+
+Interactive CLI programs that accomplish a particular task; accessible both
+through the interactive UI and direct CLI subcommands.
+
+### Productivity
+
+#### Calendar
+- [ ] view/navigate calendar months
+- [ ] add/edit events
+
+#### Todo list
+- [ ] add/complete/delete tasks
+- [ ] list with priority and due-date
+
+### Communication
+
+#### Email
+- [ ] compose and send (SMTP)
+- [ ] list/read inbox (IMAP)
+
+### Learning
+
+#### Wordbook — *Mia Vorto* (`vorto`)
+
+- [x] Data model: UUID, teksto, lingvo, kategorio, tipo, temo, tono, nivelo, difinoj, etikedoj, ligiloj, kreita_je, modifita_je
+- [x] Storage: `~/.local/share/autish/vorto.json`
+- [x] Undo stack (up to 10): `~/.local/share/autish/vorto_undo.json`
+- [x] Auto-detect kategorio from text (vorto / frazo / frazdaro)
+- [x] Subcommand `aldoni` — add entry with all property options
+- [x] Subcommand `vido` — view full entry detail
+- [x] Subcommand `modifi` — modify any field; show help when no options given
+- [x] Subcommand `serci` — full-text + filter search with limit/order/regex
+- [x] Subcommand `forigi` — delete by UUID/prefix/text, with confirmation
+- [x] Subcommand `malfari` — undo last operation (up to 10 chained)
+- [x] Confirmation prompts for aldoni / modifi / forigi
+- [x] Interactive mode — welcome screen + Neovim-style key navigation
+- [x] Standalone `vorto` entry point in addition to `autish vorto`
+- [ ] Review/recall mode (by date range, linked word, filter tag, max number)
+- [ ] Field-level display filtering in `vido` (`-l/-t/--temo/...` flags)
+- [ ] Link UI: navigate between related entries interactively
