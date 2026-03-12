@@ -1,0 +1,1 @@
+"""autish.commands — subcommand modules."""
