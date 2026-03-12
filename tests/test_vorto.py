@@ -837,3 +837,192 @@ class TestPager:
         p = self._make_pager()
         result = p._normal_key(ord("q"), "q")
         assert result == "back"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# New functionality tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestVidiNoArg:
+    """Tests for the new optional-argument vidi command."""
+
+    def test_no_arg_shows_latest_50(self):
+        entries = [
+            _make_entry(
+                uuid=str(__import__("uuid").uuid4()),
+                teksto=f"word{i}",
+                kreita_je=f"2024-0{(i % 9) + 1}-01T00:00:00+00:00",
+                modifita_je=f"2024-0{(i % 9) + 1}-01T00:00:00+00:00",
+            )
+            for i in range(5)
+        ]
+        with patch(_LOAD, return_value=entries):
+            result = runner.invoke(app, ["vorto", "vidi"])
+        assert result.exit_code == 0
+        assert "5 rezulto" in result.output
+
+    def test_no_arg_inverse_flag(self):
+        entries = [
+            _make_entry(uuid=str(__import__("uuid").uuid4()), teksto=f"word{i}")
+            for i in range(3)
+        ]
+        with patch(_LOAD, return_value=entries):
+            result = runner.invoke(app, ["vorto", "vidi", "-i"])
+        assert result.exit_code == 0
+
+    def test_with_uuid_still_shows_single_entry(self):
+        entry = _make_entry()
+        with patch(_LOAD, return_value=[entry]):
+            result = runner.invoke(app, ["vorto", "vidi", SAMPLE_UUID])
+        assert result.exit_code == 0
+        assert "hello" in result.output
+
+    def test_empty_db_no_arg(self):
+        with patch(_LOAD, return_value=[]):
+            result = runner.invoke(app, ["vorto", "vidi"])
+        assert result.exit_code == 0
+        assert "0 rezulto" in result.output
+
+
+class TestHelpCommand:
+    """Tests for the autish help command."""
+
+    def test_help_command_exits_zero(self):
+        result = runner.invoke(app, ["help"])
+        assert result.exit_code == 0
+
+    def test_help_command_shows_commands(self):
+        result = runner.invoke(app, ["help"])
+        assert "autish" in result.output.lower() or "Usage" in result.output
+
+
+class TestLineEditorViewStart:
+    """Tests for the fixed LineEditor horizontal scroll."""
+
+    def _make_editor(self, text: str = "", insert: bool = True):
+        from autish.commands._vorto_tui import LineEditor
+        return LineEditor(text, insert_on_start=insert)
+
+    def test_view_start_initialized_to_zero(self):
+        ed = self._make_editor("hello")
+        assert ed._view_start == 0
+
+    def test_view_start_scrolls_when_cursor_beyond_width(self):
+        """When the cursor is beyond the visible width, view_start should scroll."""
+        from unittest.mock import MagicMock
+        ed = self._make_editor("a" * 50)
+        ed.pos = 40
+        win = MagicMock()
+        win.addstr = MagicMock()
+        win.move = MagicMock()
+        # width = 20, col = 5 (screen column)
+        ed.render(win, row=1, col=5, width=20, focused=True)
+        # After render with pos=40 and width=20, view_start should be >= 21
+        assert ed._view_start >= 21
+
+    def test_view_start_resets_when_cursor_before_view(self):
+        from unittest.mock import MagicMock
+        ed = self._make_editor("a" * 50)
+        ed._view_start = 30  # scroll far right
+        ed.pos = 5           # cursor is before the scrolled view
+        win = MagicMock()
+        ed.render(win, row=1, col=5, width=20, focused=True)
+        # view_start should have moved back to 5 (at cursor)
+        assert ed._view_start <= ed.pos
+
+
+class TestFormEditorModeInit:
+    """Tests that FormEditor initializes only the first field in INSERT mode."""
+
+    def test_first_editor_starts_in_insert(self):
+        from unittest.mock import MagicMock
+
+        from autish.commands._vorto_tui import FormEditor
+        stdscr = MagicMock()
+        stdscr.getmaxyx.return_value = (40, 120)
+        form = FormEditor(stdscr, title="Test")
+        assert form.editors[0].mode == "INSERT"
+
+    def test_other_editors_start_in_normal(self):
+        from unittest.mock import MagicMock
+
+        from autish.commands._vorto_tui import FormEditor
+        stdscr = MagicMock()
+        stdscr.getmaxyx.return_value = (40, 120)
+        form = FormEditor(stdscr, title="Test")
+        for ed in form.editors[1:]:
+            assert ed.mode == "NORMAL"
+
+
+class TestPagerCharCursor:
+    """Tests for the Pager character cursor and new J/K navigation."""
+
+    def _make_pager(self, lines=None):
+        from unittest.mock import MagicMock
+
+        from autish.commands._vorto_tui import Pager
+        stdscr = MagicMock()
+        stdscr.getmaxyx.return_value = (24, 80)
+        stdscr.getch.return_value = ord("q")
+        return Pager(
+            stdscr,
+            lines or ["hello world", "second line", "third"],
+            title="t",
+        )
+
+    def test_char_pos_initialized_to_zero(self):
+        p = self._make_pager()
+        assert p.char_pos == 0
+
+    def test_h_decrements_char_pos(self):
+        p = self._make_pager()
+        p.char_pos = 5
+        p._normal_key(ord("h"), "h")
+        assert p.char_pos == 4
+
+    def test_l_increments_char_pos(self):
+        p = self._make_pager()
+        p.char_pos = 0
+        p._normal_key(ord("l"), "l")
+        assert p.char_pos == 1
+
+    def test_l_clamps_at_line_end(self):
+        p = self._make_pager(["abc"])
+        p.char_pos = 2  # last char of "abc"
+        p._normal_key(ord("l"), "l")
+        assert p.char_pos == 2  # can't go past end
+
+    def test_zero_resets_char_pos_and_col(self):
+        p = self._make_pager()
+        p.char_pos = 5
+        p.col = 3
+        p._normal_key(ord("0"), "0")
+        assert p.char_pos == 0
+        assert p.col == 0
+
+    def test_dollar_sets_char_pos_to_last_char(self):
+        p = self._make_pager(["hello"])
+        p._normal_key(ord("$"), "$")
+        assert p.char_pos == len("hello") - 1
+
+    def test_J_moves_page_down(self):
+        lines = [f"line{i}" for i in range(50)]
+        p = self._make_pager(lines)
+        p.row = 0
+        p._normal_key(ord("J"), "J")
+        assert p.row > 0
+
+    def test_K_moves_page_up(self):
+        lines = [f"line{i}" for i in range(50)]
+        p = self._make_pager(lines)
+        p.row = 25
+        p._normal_key(ord("K"), "K")
+        assert p.row < 25
+
+    def test_yank_sets_status(self):
+        p = self._make_pager(["hello world"])
+        p._yank_status = ""
+        p._yank(["hello world"])
+        assert p._yank_status != ""
+        assert "Yankita" in p._yank_status

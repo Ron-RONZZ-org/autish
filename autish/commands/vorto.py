@@ -497,10 +497,26 @@ def aldoni(
 
 @app.command("vidi")
 def vidi(
-    uid: str = typer.Argument(..., help="UUID (or prefix) of the entry to view."),
+    uid: str | None = typer.Argument(
+        None,
+        help="UUID (or prefix) of the entry to view. Omit to list latest 50.",
+    ),
+    inverse: bool = typer.Option(
+        False, "-i", "--inverse", help="List oldest 50 first (only without UUID)."
+    ),
 ) -> None:
-    """View a wordbank entry in full detail."""
+    """View a wordbank entry, or list the latest 50 entries when called
+    without argument."""
     entries = _load_entries()
+    if uid is None:
+        # Show latest (or oldest) 50
+        if inverse:
+            results = entries[:50]
+        else:
+            results = list(reversed(entries))[:50]
+        typer.echo(f"{len(results)} rezulto(j).")
+        _display_results(results)
+        return
     entry = _find_entry(uid, entries)
     if entry is None:
         typer.echo(f"Eniro ne trovita: {uid!r}", err=True)

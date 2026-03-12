@@ -21,5 +21,15 @@ app.add_typer(shelo.app, name="shelo")
 app.add_typer(vorto.app, name="vorto")
 
 
+@app.command("help")
+def help_cmd(ctx: typer.Context) -> None:
+    """Show help (equivalent to autish -h)."""
+    root = ctx
+    while root.parent:
+        root = root.parent
+    typer.echo(root.get_help())
+    raise typer.Exit()
+
+
 if __name__ == "__main__":
     app()
