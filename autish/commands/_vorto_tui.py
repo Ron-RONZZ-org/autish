@@ -32,6 +32,31 @@ _CTRL_D = 4
 _CTRL_H = 8   # legacy backspace in some terminals
 _CTRL_R = 18  # Ctrl+R (redo / paste-register in insert)
 
+# Ctrl+Arrow — common xterm values (with keypad(True) these are in terminfo).
+# Fall back to raw integers if the named constants are absent.
+try:
+    _CTRL_LEFT: int = curses.KEY_CLEFT   # type: ignore[attr-defined]
+except AttributeError:
+    _CTRL_LEFT = 0x234  # 564
+
+try:
+    _CTRL_RIGHT: int = curses.KEY_CRIGHT  # type: ignore[attr-defined]
+except AttributeError:
+    _CTRL_RIGHT = 0x235  # 565
+
+
+def _safe_addstr(win, row: int, col: int, text: str, attr: int = 0) -> None:
+    """Wrapper around win.addstr that silently drops non-encodable characters."""
+    try:
+        win.addstr(row, col, text, attr)
+    except (curses.error, UnicodeEncodeError):
+        # Try character-by-character so as many chars as possible are shown
+        for i, ch in enumerate(text):
+            try:
+                win.addstr(row, col + i, ch, attr)
+            except (curses.error, UnicodeEncodeError):
+                pass
+
 
 def _is_backspace(key: int) -> bool:
     return key in (curses.KEY_BACKSPACE, 127, _CTRL_H)
@@ -152,6 +177,11 @@ class LineEditor:
             self.pos = max(0, self.pos - 1)
         elif key == curses.KEY_RIGHT:
             self.pos = min(len(self.buf), self.pos + 1)
+        elif key in (_CTRL_LEFT,):
+            self.pos = self._word_back(self.pos)
+        elif key in (_CTRL_RIGHT,):
+            self.pos = self._word_fwd(self.pos)
+            self._clamp()
         elif key == curses.KEY_HOME:
             self.pos = 0
         elif key == curses.KEY_END:
@@ -202,6 +232,13 @@ class LineEditor:
                 self.pos = min(max(0, len(self.buf) - 1), self.pos + count)
             else:
                 self.pos = 0
+        elif key == _CTRL_LEFT:
+            for _ in range(count):
+                self.pos = self._word_back(self.pos)
+        elif key == _CTRL_RIGHT:
+            for _ in range(count):
+                self.pos = self._word_fwd(self.pos)
+            self._clamp()
         elif ch == "0" or key == curses.KEY_HOME:
             self.pos = 0
         elif ch == "$" or key == curses.KEY_END:
@@ -391,19 +428,35 @@ class LineEditor:
         displayed = text[view_start : view_start + width].ljust(width)[:width]
 
         if focused:
-            attr = curses.A_UNDERLINE if self.mode == "INSERT" else (
-                curses.A_STANDOUT if self.mode == "VISUAL" else curses.A_BOLD
-            )
+            if self.mode == "INSERT":
+                attr = curses.A_UNDERLINE
+            elif self.mode == "VISUAL":
+                attr = curses.A_STANDOUT
+            else:
+                attr = curses.A_BOLD
         else:
             attr = curses.A_NORMAL
 
-        try:
-            win.addstr(row, col, displayed, attr)
-        except curses.error:
-            pass
+        _safe_addstr(win, row, col, displayed, attr)
 
         if focused:
             cursor_col = col + min(self.pos - view_start, width - 1)
+            # In NORMAL/VISUAL mode draw a block cursor on the character
+            if self.mode in ("NORMAL", "VISUAL") and self.buf:
+                char_in_view = self.pos - view_start
+                if 0 <= char_in_view < width:
+                    rstrip_len = len(displayed.rstrip())
+                    char = (
+                        displayed[char_in_view]
+                        if char_in_view < rstrip_len
+                        else " "
+                    )
+                    try:
+                        _safe_addstr(
+                            win, row, col + char_in_view, char, curses.A_STANDOUT
+                        )
+                    except Exception:
+                        pass
             try:
                 win.move(row, cursor_col)
             except curses.error:
@@ -524,6 +577,20 @@ class FormEditor:
             if ch == "k" or key == curses.KEY_UP:
                 self.current_row = max(0, self.current_row - 1)
                 return None
+            # o → go to next field in INSERT mode (like vim's 'o' for new line below)
+            if ch == "o":
+                self.current_row = min(len(self.editors) - 1, self.current_row + 1)
+                nxt = self.editors[self.current_row]
+                nxt.mode = "INSERT"
+                nxt.pos = len(nxt.buf)
+                return None
+            # O → go to previous field in INSERT mode
+            if ch == "O":
+                self.current_row = max(0, self.current_row - 1)
+                nxt = self.editors[self.current_row]
+                nxt.mode = "INSERT"
+                nxt.pos = len(nxt.buf)
+                return None
             if key == _ESC:
                 self._status_msg = "Uzu  :wq  por konservi aŭ  :q  por forĵeti."
                 return None
@@ -594,10 +661,7 @@ class FormEditor:
 
         # ── title bar ────────────────────────────────────────────────────
         title_line = f" {self.title} "[:w - 1].ljust(w - 1)
-        try:
-            self.stdscr.addstr(0, 0, title_line, curses.A_REVERSE)
-        except curses.error:
-            pass
+        _safe_addstr(self.stdscr, 0, 0, title_line, curses.A_REVERSE)
 
         # ── table ────────────────────────────────────────────────────────
         label_w = 20
@@ -606,10 +670,7 @@ class FormEditor:
 
         # Top border
         border = "─" * label_w + "─┼─" + "─" * value_w
-        try:
-            self.stdscr.addstr(1, 0, border[:w - 1], curses.A_DIM)
-        except curses.error:
-            pass
+        _safe_addstr(self.stdscr, 1, 0, border[:w - 1], curses.A_DIM)
 
         for i, ((_key, hint), editor) in enumerate(
             zip(_FORM_FIELDS, self.editors, strict=False)
@@ -622,21 +683,15 @@ class FormEditor:
             # Label
             label_text = hint[:label_w].ljust(label_w)
             label_attr = curses.A_BOLD if focused else curses.A_DIM
-            try:
-                self.stdscr.addstr(scr_row, 0, label_text, label_attr)
-                self.stdscr.addstr(scr_row, label_w, sep, curses.A_DIM)
-            except curses.error:
-                pass
+            _safe_addstr(self.stdscr, scr_row, 0, label_text, label_attr)
+            _safe_addstr(self.stdscr, scr_row, label_w, sep, curses.A_DIM)
 
             # Value via LineEditor
             editor.render(self.stdscr, scr_row, label_w + len(sep), value_w, focused)
 
             # Row separator
             if scr_row + 1 < h - 3:
-                try:
-                    self.stdscr.addstr(scr_row + 1, 0, border[:w - 1], curses.A_DIM)
-                except curses.error:
-                    pass
+                _safe_addstr(self.stdscr, scr_row + 1, 0, border[:w - 1], curses.A_DIM)
 
         # ── status / command line ─────────────────────────────────────────
         if self._mode == "CMD":
@@ -646,11 +701,9 @@ class FormEditor:
             mode_tag = f"[{ed.mode}]"
             status = f"{mode_tag}  {self._status_msg}"
 
-        try:
-            status_line = status[:w - 1].ljust(w - 1)
-            self.stdscr.addstr(h - 1, 0, status_line, curses.A_REVERSE)
-        except curses.error:
-            pass
+        _safe_addstr(
+            self.stdscr, h - 1, 0, status[:w - 1].ljust(w - 1), curses.A_REVERSE
+        )
 
         self.stdscr.refresh()
 
@@ -666,34 +719,59 @@ class Pager:
     Jumps: gg G  {N}G
     Line edges: 0 $
     Search: /term  n N
-    Visual: v  then y to yank, Esc/v to exit.
+    Visual (line): V  then y to yank, Esc/V to exit.
+    Visual (char): v  then h/l to select, y to yank, Esc/v to exit.
     Yank line: y (normal mode).
-    Exit: q Esc.
+    Exit: q (or :q).  Esc shows a hint.
     """
 
     _NUM_W = 5  # width of the line-number gutter  ("NNN  ")
 
-    def __init__(self, stdscr, lines: list[str], title: str = "") -> None:
+    def __init__(
+        self,
+        stdscr,
+        lines: list[str],
+        title: str = "",
+        *,
+        detail_lines: list[str] | None = None,
+        entry: dict | None = None,
+        entries: list[dict] | None = None,
+        entry_line_offset: int = 2,
+    ) -> None:
         self.stdscr = stdscr
-        self.lines = lines or [""]
+        self._default_lines = lines or [""]
+        self._detail_lines = detail_lines
+        self.lines = self._default_lines
         self.title = title
+        self._show_detail = False  # p toggles between default and detail
+
+        # Optional entry context (for m/f actions and search-result Enter)
+        self.entry: dict | None = entry
+        self.entries: list[dict] | None = entries
+        self._entry_line_offset = entry_line_offset  # header rows before data rows
+        self.selected_entry: dict | None = None  # set when user opens a result
+
         self.row = 0          # cursor line (absolute)
         self.col = 0          # horizontal scroll offset
         self.char_pos = 0     # cursor column within the current line
         self.scroll_top = 0   # first visible line
         self._count_buf = ""
-        self._mode = "NORMAL"   # NORMAL | SEARCH | VISUAL
+        self._mode = "NORMAL"   # NORMAL | SEARCH | VISUAL_LINE | VISUAL_CHAR
         self.search_term = ""
         self.search_matches: list[int] = []
         self.search_match_idx = 0
-        self._visual_start = 0
+        self._visual_start_row = 0
+        self._visual_start_char = 0
         self._status = ""
         self._yank_status = ""  # transient yank feedback (cleared after next keypress)
 
     # ── run ─────────────────────────────────────────────────────────────────
 
     def run(self) -> str:
-        """Block until exit.  Returns 'back' or 'quit'."""
+        """Block until exit.
+
+        Returns: 'back', 'quit', 'modify', 'delete', or 'open_entry'.
+        """
         curses.curs_set(0)
         while True:
             self._render()
@@ -737,20 +815,28 @@ class Pager:
 
         # Title bar
         title = f" {self.title} "[:w - 1].ljust(w - 1)
-        try:
-            self.stdscr.addstr(0, 0, title, curses.A_REVERSE)
-        except curses.error:
-            pass
+        _safe_addstr(self.stdscr, 0, 0, title, curses.A_REVERSE)
+
+        # Visual range (for VISUAL_LINE and VISUAL_CHAR)
+        vis_row_lo = vis_row_hi = -1
+        vis_char_lo = vis_char_hi = -1
+        if self._mode == "VISUAL_LINE":
+            vis_row_lo = min(self._visual_start_row, self.row)
+            vis_row_hi = max(self._visual_start_row, self.row)
+        elif self._mode == "VISUAL_CHAR" and self._visual_start_row == self.row:
+            vis_row_lo = vis_row_hi = self.row
+            vis_char_lo = min(self._visual_start_char, self.char_pos)
+            vis_char_hi = max(self._visual_start_char, self.char_pos)
 
         # Content + line numbers
         for sr in range(content_h):
             li = self.scroll_top + sr
             scr_r = sr + 1
             if li >= len(self.lines):
-                try:
-                    self.stdscr.addstr(scr_r, 0, "~".ljust(self._NUM_W), curses.A_DIM)
-                except curses.error:
-                    pass
+                _safe_addstr(
+                    self.stdscr, scr_r, 0,
+                    "~".ljust(self._NUM_W), curses.A_DIM,
+                )
                 continue
 
             # Relative line number
@@ -761,10 +847,7 @@ class Pager:
             else:
                 num_str = f"{abs(rel):>{self._NUM_W - 1}} "
                 num_attr = curses.A_DIM
-            try:
-                self.stdscr.addstr(scr_r, 0, num_str, num_attr)
-            except curses.error:
-                pass
+            _safe_addstr(self.stdscr, scr_r, 0, num_str, num_attr)
 
             # Line content (with horizontal scroll)
             line = self.lines[li]
@@ -772,17 +855,12 @@ class Pager:
             visible = visible.ljust(content_w)[:content_w]
 
             is_current = li == self.row
-            in_visual = (
-                self._mode == "VISUAL"
-                and min(self._visual_start, self.row)
-                <= li
-                <= max(self._visual_start, self.row)
-            )
+            in_visual_line = vis_row_lo <= li <= vis_row_hi
             has_match = bool(
                 self.search_term and self.search_term.lower() in line.lower()
             )
 
-            if in_visual:
+            if in_visual_line:
                 attr = curses.A_STANDOUT
             elif is_current:
                 attr = curses.A_UNDERLINE | curses.A_BOLD
@@ -791,13 +869,10 @@ class Pager:
             else:
                 attr = curses.A_NORMAL
 
-            try:
-                self.stdscr.addstr(scr_r, self._NUM_W, visible, attr)
-            except curses.error:
-                pass
+            _safe_addstr(self.stdscr, scr_r, self._NUM_W, visible, attr)
 
-            # Draw character cursor on the current line (NORMAL mode)
-            if is_current and self._mode == "NORMAL":
+            # Draw character cursor on the current line
+            if is_current and self._mode in ("NORMAL", "VISUAL_CHAR"):
                 char_in_view = self.char_pos - self.col
                 if 0 <= char_in_view < content_w:
                     rstripped = visible.rstrip()
@@ -806,33 +881,55 @@ class Pager:
                         if char_in_view < len(rstripped)
                         else " "
                     )
-                    try:
-                        self.stdscr.addstr(
-                            scr_r, self._NUM_W + char_in_view, char, curses.A_STANDOUT
+                    _safe_addstr(
+                        self.stdscr,
+                        scr_r,
+                        self._NUM_W + char_in_view,
+                        char,
+                        curses.A_STANDOUT,
+                    )
+
+            # For VISUAL_CHAR on the same row, highlight the selection range
+            if self._mode == "VISUAL_CHAR" and li == vis_row_lo and vis_char_lo >= 0:
+                for ci in range(vis_char_lo, vis_char_hi + 1):
+                    ci_view = ci - self.col
+                    if 0 <= ci_view < content_w:
+                        c = visible[ci_view] if ci_view < len(visible.rstrip()) else " "
+                        _safe_addstr(
+                            self.stdscr,
+                            scr_r,
+                            self._NUM_W + ci_view,
+                            c,
+                            curses.A_STANDOUT,
                         )
-                    except curses.error:
-                        pass
 
         # Status bar
         if self._mode == "SEARCH":
             status = f"/{self.search_term}█"
-        elif self._mode == "VISUAL":
-            status = "-- VISUAL --   y:yank   v/Esc: eliri elektan reĝimon"
+        elif self._mode == "VISUAL_LINE":
+            status = "-- VISUAL LINIO --  y:yank  V/Esc:eliri"
+        elif self._mode == "VISUAL_CHAR":
+            status = "-- VISUAL SIGNO --  h/l:elektu  y:yank  v/Esc:eliri"
         elif self._yank_status:
             status = self._yank_status
         else:
             pfx = self._count_buf or ""
+            extra = ""
+            if self.entry:
+                extra = "  m:modifi  f:forigi"
+            elif self.entries:
+                extra = "  Enter:malfermi"
+            toggle = "  p:detaloj" if self._detail_lines else ""
             status = (
                 f"{pfx} [NORMAL]  "
                 f"j/k:↕  h/l:↔  0/$:linio  gg/G:⇕  J/K:paĝo  "
-                f"/:serĉi  n/N:sekva  v:elekta  y:yank  q:reen"
+                f"/:serĉi  n/N:sekva  v:signo  V:linio  y:yank  q:reen"
+                f"{toggle}{extra}"
             )
 
-        try:
-            status_line = status[:w - 1].ljust(w - 1)
-            self.stdscr.addstr(h - 1, 0, status_line, curses.A_REVERSE)
-        except curses.error:
-            pass
+        _safe_addstr(
+            self.stdscr, h - 1, 0, status[:w - 1].ljust(w - 1), curses.A_REVERSE
+        )
 
         self.stdscr.refresh()
 
@@ -842,7 +939,7 @@ class Pager:
         ch = chr(key) if 0 < key < 256 else ""
         if self._mode == "SEARCH":
             return self._search_key(key, ch)
-        if self._mode == "VISUAL":
+        if self._mode in ("VISUAL_LINE", "VISUAL_CHAR"):
             return self._visual_key(key, ch)
         return self._normal_key(key, ch)
 
@@ -861,14 +958,24 @@ class Pager:
         h, w, content_h, content_w = self._geom()
         n = len(self.lines)
 
-        if key == _ESC or ch == "q":
+        if key == _ESC:
+            self._yank_status = "Premu  q  por reen, aŭ  :q  por eliri Mia Vorto."
+            return None
+        if ch == "q":
             return "back"
         if key in (_CTRL_C, _CTRL_D):
             return "quit"
 
+        elif key in (_ENTER, _CR):
+            # Open highlighted entry from search results
+            if self.entries is not None:
+                idx = self.row - self._entry_line_offset
+                if 0 <= idx < len(self.entries):
+                    self.selected_entry = self.entries[idx]
+                    return "open_entry"
+
         elif ch == "j" or key == curses.KEY_DOWN:
             self.row = min(n - 1, self.row + count)
-            # clamp char_pos to new line length
             cur = self.lines[self.row] if self.lines else ""
             self.char_pos = min(self.char_pos, max(0, len(cur) - 1))
         elif ch == "k" or key == curses.KEY_UP:
@@ -897,16 +1004,13 @@ class Pager:
 
         elif ch == "G":
             if count == 1 and not self._count_buf:
-                # bare G → bottom
                 self.row = n - 1
             else:
-                # {N}G → go to line N (1-based)
                 self.row = max(0, min(count - 1, n - 1))
             cur = self.lines[self.row] if self.lines else ""
             self.char_pos = min(self.char_pos, max(0, len(cur) - 1))
 
         elif ch == "g":
-            # Wait for second key to form 'gg'
             next_key = self.stdscr.getch()
             if chr(next_key) == "g":
                 self.row = 0
@@ -914,7 +1018,6 @@ class Pager:
                 self.char_pos = 0
 
         elif ch == "d":
-            # d = scroll down half page (vi pager convention)
             self.row = min(n - 1, self.row + content_h // 2)
             cur = self.lines[self.row] if self.lines else ""
             self.char_pos = min(self.char_pos, max(0, len(cur) - 1))
@@ -928,11 +1031,35 @@ class Pager:
             self._next_match(forward=False)
 
         elif ch == "v":
-            self._mode = "VISUAL"
-            self._visual_start = self.row
+            # Character-wise visual mode
+            self._mode = "VISUAL_CHAR"
+            self._visual_start_row = self.row
+            self._visual_start_char = self.char_pos
+        elif ch == "V":
+            # Line-wise visual mode
+            self._mode = "VISUAL_LINE"
+            self._visual_start_row = self.row
 
         elif ch == "y":
             self._yank([self.lines[self.row]])
+
+        elif ch == "p":
+            # Toggle default ↔ detail view
+            if self._detail_lines:
+                self._show_detail = not self._show_detail
+                self.lines = (
+                    self._detail_lines
+                    if self._show_detail
+                    else self._default_lines
+                )
+                self.row = 0
+                self.scroll_top = 0
+
+        elif ch == "m" and self.entry:
+            return "modify"
+
+        elif (ch == "f" or key == curses.KEY_DC) and self.entry:
+            return "delete"
 
         return None
 
@@ -954,19 +1081,75 @@ class Pager:
         return None
 
     def _visual_key(self, key: int, ch: str) -> str | None:
-        if key == _ESC or ch == "v":
+        if key == _ESC:
             self._mode = "NORMAL"
-        elif ch == "j" or key == curses.KEY_DOWN:
-            self.row = min(len(self.lines) - 1, self.row + 1)
-        elif ch == "k" or key == curses.KEY_UP:
-            self.row = max(0, self.row - 1)
-        elif ch == "y":
-            s = min(self._visual_start, self.row)
-            e = max(self._visual_start, self.row)
-            self._yank(self.lines[s : e + 1])
-            self._mode = "NORMAL"
-        elif ch == "q" or key == _ESC:
-            return "back"
+            return None
+        if ch == "v":
+            if self._mode == "VISUAL_CHAR":
+                self._mode = "NORMAL"
+            else:
+                # Switch from line to char visual
+                self._mode = "VISUAL_CHAR"
+                self._visual_start_row = self.row
+                self._visual_start_char = self.char_pos
+            return None
+        if ch == "V":
+            if self._mode == "VISUAL_LINE":
+                self._mode = "NORMAL"
+            else:
+                self._mode = "VISUAL_LINE"
+                self._visual_start_row = self.row
+            return None
+
+        if self._mode == "VISUAL_LINE":
+            if ch == "j" or key == curses.KEY_DOWN:
+                self.row = min(len(self.lines) - 1, self.row + 1)
+            elif ch == "k" or key == curses.KEY_UP:
+                self.row = max(0, self.row - 1)
+            elif ch == "y":
+                s = min(self._visual_start_row, self.row)
+                e = max(self._visual_start_row, self.row)
+                self._yank(self.lines[s : e + 1])
+                self._mode = "NORMAL"
+        elif self._mode == "VISUAL_CHAR":
+            cur_line = self.lines[self.row] if self.lines else ""
+            if ch == "h" or key == curses.KEY_LEFT:
+                self.char_pos = max(0, self.char_pos - 1)
+            elif ch == "l" or key == curses.KEY_RIGHT:
+                self.char_pos = min(max(0, len(cur_line) - 1), self.char_pos + 1)
+            elif ch == "w":
+                # word forward
+                p = self.char_pos
+                n = len(cur_line)
+                if p < n - 1 and not cur_line[p].isspace():
+                    p += 1
+                while p < n and cur_line[p].isspace():
+                    p += 1
+                while p < n - 1 and not cur_line[p + 1].isspace():
+                    p += 1
+                self.char_pos = min(max(0, n - 1), p) if n else 0
+            elif ch == "b":
+                p = self.char_pos
+                if p > 0:
+                    p -= 1
+                while p > 0 and cur_line[p].isspace():
+                    p -= 1
+                while p > 0 and not cur_line[p - 1].isspace():
+                    p -= 1
+                self.char_pos = p
+            elif ch == "0" or key == curses.KEY_HOME:
+                self.char_pos = 0
+            elif ch == "$" or key == curses.KEY_END:
+                self.char_pos = max(0, len(cur_line) - 1)
+            elif ch == "y":
+                # Yank the char-range on the same line
+                if self._visual_start_row == self.row:
+                    lo = min(self._visual_start_char, self.char_pos)
+                    hi = max(self._visual_start_char, self.char_pos) + 1
+                    self._yank([cur_line[lo:hi]])
+                else:
+                    self._yank([cur_line])
+                self._mode = "NORMAL"
         return None
 
     def _do_search(self) -> None:
@@ -1128,6 +1311,11 @@ class VortoTUI:
         find_entry: Callable[[str, list[dict]], dict | None],
         now_iso: Callable[[], str],
         make_uuid: Callable[[], str],
+        # Rubujo (recycle bin) callbacks — optional for backward compatibility
+        load_rubujo: Callable[[], list[dict]] | None = None,
+        render_rubujo_results: Callable[[list[dict]], list[str]] | None = None,
+        recover_from_rubujo: Callable[[str], dict | None] | None = None,
+        permanent_delete_from_rubujo: Callable[[str], bool] | None = None,
     ) -> None:
         self._load_entries = load_entries
         self._save_new = save_new_entry
@@ -1143,6 +1331,10 @@ class VortoTUI:
         self._find_entry = find_entry
         self._now_iso = now_iso
         self._make_uuid = make_uuid
+        self._load_rubujo = load_rubujo
+        self._render_rubujo_results = render_rubujo_results
+        self._recover_from_rubujo = recover_from_rubujo
+        self._permanent_delete_from_rubujo = permanent_delete_from_rubujo
 
     def run(self) -> None:
         locale.setlocale(locale.LC_ALL, "")
@@ -1183,6 +1375,8 @@ class VortoTUI:
                 # Normal mode
                 if ch in ("q",) or key in (_CTRL_C, _CTRL_D):
                     break
+                elif key == _ESC:
+                    self._status_msg = "Premu  q  por eliri Mia Vorto."
                 elif ch == ":":
                     self._mode = "COMMAND"
                     self._cmd_buf = ""
@@ -1199,6 +1393,8 @@ class VortoTUI:
                     self._action_serci()
                 elif ch == "f":
                     self._action_forigi()
+                elif ch == "R":
+                    self._action_rubujo()
                 elif ch == "h":
                     self._run_pager(_HELP_LINES, title="Helpo")
                 elif key == curses.KEY_RESIZE:
@@ -1220,10 +1416,7 @@ class VortoTUI:
             if row >= h - 1:
                 break
             col = max(0, (w - len(line)) // 2)
-            try:
-                stdscr.addstr(row, col, line[:w - 1], curses.A_DIM)
-            except curses.error:
-                pass
+            _safe_addstr(stdscr, row, col, line[:w - 1], curses.A_DIM)
 
         # Status / cmd / search bar at very bottom
         if self._mode == "COMMAND":
@@ -1236,11 +1429,7 @@ class VortoTUI:
                 or "NORMAL  a v m s f h q  |  : komando  |  / serĉi"
             )
 
-        try:
-            status_line = status[:w - 1].ljust(w - 1)
-            stdscr.addstr(h - 1, 0, status_line, curses.A_REVERSE)
-        except curses.error:
-            pass
+        _safe_addstr(stdscr, h - 1, 0, status[:w - 1].ljust(w - 1), curses.A_REVERSE)
 
         stdscr.refresh()
 
@@ -1290,6 +1479,8 @@ class VortoTUI:
         elif cmd.startswith("malfari"):
             msg = self._undo()
             self._status_msg = msg
+        elif cmd in ("rubujo", "rb"):
+            self._action_rubujo()
         else:
             self._status_msg = f"Nekonata komando: :{cmd}"
         return False
@@ -1316,11 +1507,90 @@ class VortoTUI:
 
     # ── actions ──────────────────────────────────────────────────────────────
 
-    def _run_pager(self, lines: list[str], title: str = "") -> str:
+    def _run_pager(
+        self,
+        lines: list[str],
+        title: str = "",
+    ) -> str:
         pager = Pager(self.stdscr, lines, title=title)
         result = pager.run()
         curses.curs_set(0)
         return result
+
+    def _view_entry(self, entry: dict) -> None:
+        """Open pager for a single entry; handle m (modify) and f/DELETE (delete)."""
+        while True:
+            default_lines = self._render_entry_default(entry)
+            detail_lines = self._render_entry(entry)
+            pager = Pager(
+                self.stdscr,
+                default_lines,
+                title=f"Vidi — {entry['teksto'][:40]}",
+                detail_lines=detail_lines,
+                entry=entry,
+            )
+            result = pager.run()
+            curses.curs_set(0)
+
+            if result == "modify":
+                self._do_modifi_entry(entry)
+                # Reload entry in case it was modified
+                entries = self._load_entries()
+                updated = self._find_entry(entry["uuid"], entries)
+                if updated:
+                    entry = updated
+                else:
+                    break
+            elif result == "delete":
+                confirmed = self._prompt_confirm(
+                    f"Forigi  #{entry['uuid'][:8]}  \"{entry['teksto']}\"? (j/N)"
+                )
+                if confirmed:
+                    self._delete_entry(entry)
+                    self._status_msg = (
+                        f"Sendis al rubujo: #{entry['uuid'][:8]}  \"{entry['teksto']}\""
+                    )
+                else:
+                    self._status_msg = "Nuligita."
+                break
+            else:
+                break
+
+    def _render_entry_default(self, entry: dict) -> list[str]:
+        """Compact default view: header, tipo, difinoj, temo, nivelo."""
+        lines: list[str] = []
+        teksto = entry.get("teksto") or ""
+        uid_short = entry["uuid"][:8]
+        lines.append(f"# {teksto}  #{uid_short}")
+        kategorio = entry.get("kategorio") or ""
+        tipo = entry.get("tipo") or ""
+        tipo_str = (
+            (kategorio + ("/" + tipo if tipo else ""))
+            if (kategorio or tipo) else ""
+        )
+        if tipo_str:
+            lines.append(f"  _{tipo_str}_")
+        lines.append("")
+        lines.append("─" * 40)
+        lines.append("")
+        difinoj: list[str] = entry.get("difinoj") or []
+        if difinoj:
+            for i, d in enumerate(difinoj, 1):
+                lines.append(f"  {i}. {d}")
+        else:
+            lines.append("  (neniu difino)")
+        lines.append("")
+        lines.append("─" * 40)
+        lines.append("")
+        temo = entry.get("temo") or ""
+        if temo:
+            lines.append(f"  temo:   {temo}")
+        nivelo = entry.get("nivelo")
+        if nivelo is not None:
+            lines.append(f"  nivelo: {nivelo:.1f}")
+        lines.append("")
+        lines.append("  p:detaloj  m:modifi  f:forigi  q:reen")
+        return lines
 
     def _action_aldoni(self) -> None:
         form = FormEditor(self.stdscr, title="Aldoni — nova eniro")
@@ -1359,21 +1629,11 @@ class VortoTUI:
         if entry is None:
             self._status_msg = f"Ne trovita: {uid!r}"
             return
-        lines = self._render_entry(entry)
-        self._run_pager(lines, title=f"Vidi — {entry['teksto'][:40]}")
+        self._view_entry(entry)
 
-    def _action_modifi(self) -> None:
-        uid = self._prompt_uid("Modifi")
-        if not uid:
-            return
-        entries = self._load_entries()
-        entry = self._find_entry(uid, entries)
-        if entry is None:
-            self._status_msg = f"Ne trovita: {uid!r}"
-            return
+    def _do_modifi_entry(self, entry: dict) -> None:
+        """Run the modify form for *entry* and save changes in-place."""
         old_entry = dict(entry)
-
-        # Pre-populate form with existing values
         initial: dict = {
             "teksto": entry.get("teksto") or "",
             "lingvo": entry.get("lingvo") or "",
@@ -1396,7 +1656,6 @@ class VortoTUI:
         if vals is None:
             self._status_msg = "Nuligita."
             return
-
         _MODIFI_KEYS = (
             "teksto", "lingvo", "tipo", "temo", "tono",
             "difinoj", "etikedoj", "ligiloj",
@@ -1413,9 +1672,19 @@ class VortoTUI:
         if vals.get("nivelo") is not None:
             entry["nivelo"] = vals["nivelo"]
         entry["modifita_je"] = self._now_iso()
-
         self._save_modified(entry, old_entry)
         self._status_msg = f"Modifis #{entry['uuid'][:8]}  \"{entry['teksto']}\""
+
+    def _action_modifi(self) -> None:
+        uid = self._prompt_uid("Modifi")
+        if not uid:
+            return
+        entries = self._load_entries()
+        entry = self._find_entry(uid, entries)
+        if entry is None:
+            self._status_msg = f"Ne trovita: {uid!r}"
+            return
+        self._do_modifi_entry(entry)
 
     def _action_serci(self) -> None:
         query = self._prompt_inline("Serĉi")
@@ -1431,7 +1700,22 @@ class VortoTUI:
         lines = self._render_results(found)
         title = f"Serĉi: {query!r}" if query else "Ĉiuj vortoj (maks 50)"
         self._status_msg = f"{len(found)} rezulto(j)."
-        self._run_pager(lines, title=title)
+        # entry_line_offset=2: header + separator rows before data rows
+        while True:
+            pager = Pager(
+                self.stdscr,
+                lines,
+                title=title,
+                entries=found,
+                entry_line_offset=2,
+            )
+            result = pager.run()
+            curses.curs_set(0)
+            if result == "open_entry" and pager.selected_entry is not None:
+                self._view_entry(pager.selected_entry)
+                # Re-show search results after returning from entry view
+            else:
+                break
 
     def _do_vidi(self, query: str) -> None:
         """Show entry by UUID/text, or show latest 50 when query is empty."""
@@ -1441,8 +1725,7 @@ class VortoTUI:
         entries = self._load_entries()
         entry = self._find_entry(query, entries)
         if entry is not None:
-            lines = self._render_entry(entry)
-            self._run_pager(lines, title=f"Vidi — {entry['teksto'][:40]}")
+            self._view_entry(entry)
         else:
             # Fall back to text search
             self._do_serci(query)
@@ -1498,23 +1781,104 @@ class VortoTUI:
         if entry is None:
             self._status_msg = f"Ne trovita: {uid!r}"
             return
-        # Show entry for confirmation
-        lines = self._render_entry(entry) + [
-            "",
-            "ATENTU: ĉi tiu eniro estos forigita.",
-            "  y  — daŭrigi (forigi)",
-            "  n / q — nuligi",
-        ]
-        self._run_pager(lines, title="Forigi — konfirmo")
-        # Ask for confirmation via bottom prompt
         confirmed = self._prompt_confirm(
-            f"Forigi  #{entry['uuid'][:8]}  \"{entry['teksto']}\"? (y/n)"
+            f"Forigi  #{entry['uuid'][:8]}  \"{entry['teksto']}\"? (j/N)"
         )
         if confirmed:
             self._delete_entry(entry)
-            self._status_msg = f"Forigis #{entry['uuid'][:8]}  \"{entry['teksto']}\""
+            self._status_msg = (
+                f"Sendis al rubujo: #{entry['uuid'][:8]}  \"{entry['teksto']}\""
+            )
         else:
             self._status_msg = "Nuligita."
+
+    def _action_rubujo(self) -> None:
+        """Show recycle bin; recover (u), view (Enter), perm-delete (F/DEL)."""
+        if self._load_rubujo is None or self._render_rubujo_results is None:
+            self._status_msg = "Rubujo ne disponeblas."
+            return
+        while True:
+            rb_entries = self._load_rubujo()
+            lines = self._render_rubujo_results(rb_entries)
+            # entry_line_offset=2 because header+separator precede data rows
+            pager = Pager(
+                self.stdscr,
+                lines,
+                title="Rubujo",
+                entries=rb_entries,
+                entry_line_offset=2,
+            )
+            result = pager.run()
+            curses.curs_set(0)
+            if result == "open_entry" and pager.selected_entry is not None:
+                self._view_rubujo_entry(pager.selected_entry)
+            else:
+                break
+        self._status_msg = f"{len(self._load_rubujo())} eniro(j) en rubujo."
+
+    def _view_rubujo_entry(self, entry: dict) -> None:
+        """View a rubujo entry; u=recover, F/DEL=permanent delete."""
+        lines = self._render_entry(entry) + [
+            "",
+            "─" * 40,
+            "  u:reakiri   F/DEL:definitive forigi   q:reen",
+            f"  (Forigita: {(entry.get('forigita_je') or '')[:19]})",
+        ]
+        while True:
+            pager = Pager(
+                self.stdscr,
+                lines,
+                title=f"Rubujo — {entry['teksto'][:40]}",
+            )
+            result = pager.run()
+            curses.curs_set(0)
+            if result in ("modify", "delete", "m", "f"):
+                # Hint: m/f not available in rubujo
+                self._status_msg = (
+                    "Uzu  u  por reakiri,  F  aŭ  DELETE  por forigi definitive."
+                )
+                continue
+
+            # Handle custom keys by patching pager: read one more key after pager exits
+            # since pager exits on 'q', we handle u/F via a post-pager prompt
+            break
+
+        # Post-pager action prompt
+        self._draw_welcome()
+        h, w = self.stdscr.getmaxyx()
+        hint = "u:reakiri  F:forigi definitive  q:reen"
+        _safe_addstr(
+            self.stdscr, h - 1, 0, hint[:w - 1].ljust(w - 1), curses.A_REVERSE
+        )
+        self.stdscr.refresh()
+        key2 = self.stdscr.getch()
+        ch2 = chr(key2) if 0 < key2 < 256 else ""
+        if ch2 == "u" and self._recover_from_rubujo:
+            recovered = self._recover_from_rubujo(entry["uuid"])
+            if recovered:
+                self._status_msg = (
+                    f"Reakivis #{entry['uuid'][:8]}  \"{recovered['teksto']}\""
+                )
+            else:
+                self._status_msg = "Ne povis reakiri."
+        elif (
+            (ch2 == "F" or key2 == curses.KEY_DC)
+            and self._permanent_delete_from_rubujo
+        ):
+            confirmed = self._prompt_confirm(
+                f"Definitive forigi  #{entry['uuid'][:8]}  \"{entry['teksto']}\"? (j/N)"
+            )
+            if confirmed:
+                ok = self._permanent_delete_from_rubujo(entry["uuid"])
+                if ok:
+                    self._status_msg = (
+                        f"Definitive forigis #{entry['uuid'][:8]}"
+                        f"  \"{entry['teksto']}\""
+                    )
+                else:
+                    self._status_msg = "Ne povis forigi."
+            else:
+                self._status_msg = "Nuligita."
 
     # ── small prompts (single-line overlay at bottom) ─────────────────────────
 
@@ -1529,13 +1893,10 @@ class VortoTUI:
             self._draw_welcome()
             h, w = self.stdscr.getmaxyx()
             line = f"{prompt}: {buf}█"
-            try:
-                self.stdscr.addstr(
-                    h - 1, 0, line[:w - 1].ljust(w - 1), curses.A_REVERSE
-                )
-                self.stdscr.refresh()
-            except curses.error:
-                pass
+            _safe_addstr(
+                self.stdscr, h - 1, 0, line[:w - 1].ljust(w - 1), curses.A_REVERSE
+            )
+            self.stdscr.refresh()
             key = self.stdscr.getch()
             ch = chr(key) if 0 < key < 256 else ""
             if key in (_ENTER, _CR):
@@ -1550,19 +1911,17 @@ class VortoTUI:
                 buf += ch
 
     def _prompt_confirm(self, prompt: str) -> bool:
-        """Ask y/n at the bottom of the screen; returns True for 'y'."""
+        """Ask j/N at the bottom of the screen; returns True for 'j'."""
         while True:
             self._draw_welcome()
             h, w = self.stdscr.getmaxyx()
-            try:
-                line = f"{prompt}"[:w - 1].ljust(w - 1)
-                self.stdscr.addstr(h - 1, 0, line, curses.A_REVERSE)
-                self.stdscr.refresh()
-            except curses.error:
-                pass
+            _safe_addstr(
+                self.stdscr, h - 1, 0, prompt[:w - 1].ljust(w - 1), curses.A_REVERSE
+            )
+            self.stdscr.refresh()
             key = self.stdscr.getch()
             ch = chr(key) if 0 < key < 256 else ""
-            if ch == "y":
+            if ch in ("j", "y"):
                 return True
-            if ch in ("n", "q") or key in (_ESC, _CTRL_C, _CTRL_D):
+            if ch in ("n", "N", "q") or key in (_ESC, _CTRL_C, _CTRL_D):
                 return False

@@ -182,6 +182,8 @@ _SAVE = "autish.commands.vorto._save_entries"
 _LOAD_UNDO = "autish.commands.vorto._load_undo_stack"
 _SAVE_UNDO = "autish.commands.vorto._save_undo_stack"
 _CONFIRM = "autish.commands.vorto.typer.confirm"
+_MOVE_TO_RUBUJO = "autish.commands.vorto._move_to_rubujo"
+_RECOVER_FROM_RUBUJO = "autish.commands.vorto._recover_from_rubujo"
 
 
 class TestAldoni:
@@ -460,27 +462,26 @@ class TestForigi:
         entry = _make_entry()
         with (
             patch(_LOAD, return_value=[entry]),
-            patch(_SAVE) as mock_save,
+            patch(_MOVE_TO_RUBUJO) as mock_move,
             patch(_LOAD_UNDO, return_value=[]),
             patch(_SAVE_UNDO),
             patch(_CONFIRM, return_value=True),
         ):
             result = runner.invoke(app, ["vorto", "forigi", SAMPLE_UUID])
         assert result.exit_code == 0
-        saved = mock_save.call_args[0][0]
-        assert len(saved) == 0
+        mock_move.assert_called_once_with(entry)
 
     def test_cancelled_keeps_entry(self):
         entry = _make_entry()
         with (
             patch(_LOAD, return_value=[entry]),
-            patch(_SAVE) as mock_save,
+            patch(_MOVE_TO_RUBUJO) as mock_move,
             patch(_LOAD_UNDO, return_value=[]),
             patch(_SAVE_UNDO),
             patch(_CONFIRM, return_value=False),
         ):
             runner.invoke(app, ["vorto", "forigi", SAMPLE_UUID])
-        mock_save.assert_not_called()
+        mock_move.assert_not_called()
 
     def test_not_found_exits_nonzero(self):
         with patch(_LOAD, return_value=[]):
@@ -491,7 +492,7 @@ class TestForigi:
         entry = _make_entry()
         with (
             patch(_LOAD, return_value=[entry]),
-            patch(_SAVE),
+            patch(_MOVE_TO_RUBUJO),
             patch(_LOAD_UNDO, return_value=[]),
             patch(_SAVE_UNDO) as mock_save_undo,
             patch(_CONFIRM, return_value=True),
@@ -499,6 +500,7 @@ class TestForigi:
             runner.invoke(app, ["vorto", "forigi", SAMPLE_UUID])
         saved_stack = mock_save_undo.call_args[0][0]
         assert saved_stack[-1]["op"] == "forigi"
+        assert saved_stack[-1]["uuid"] == SAMPLE_UUID
 
 
 class TestMalfari:
@@ -533,18 +535,19 @@ class TestMalfari:
 
     def test_undo_forigi(self):
         entry = _make_entry()
-        stack = [{"op": "forigi", "entry": entry}]
+        stack = [{"op": "forigi", "uuid": SAMPLE_UUID}]
         with (
             patch(_LOAD, return_value=[]),
             patch(_SAVE) as mock_save,
             patch(_LOAD_UNDO, return_value=stack),
             patch(_SAVE_UNDO),
+            patch(_RECOVER_FROM_RUBUJO, return_value=entry) as mock_recover,
         ):
             result = runner.invoke(app, ["vorto", "malfari"])
         assert result.exit_code == 0
-        saved = mock_save.call_args[0][0]
-        assert len(saved) == 1
-        assert saved[0]["teksto"] == "hello"
+        mock_recover.assert_called_once_with(SAMPLE_UUID)
+        # _save_entries not called directly (recovery happens in _recover_from_rubujo)
+        mock_save.assert_not_called()
 
     def test_empty_stack_message(self):
         with patch(_LOAD_UNDO, return_value=[]):
@@ -831,7 +834,12 @@ class TestPager:
     def test_visual_mode(self):
         p = self._make_pager()
         p._normal_key(ord("v"), "v")
-        assert p._mode == "VISUAL"
+        assert p._mode == "VISUAL_CHAR"
+
+    def test_visual_line_mode(self):
+        p = self._make_pager()
+        p._normal_key(ord("V"), "V")
+        assert p._mode == "VISUAL_LINE"
 
     def test_q_returns_back(self):
         p = self._make_pager()
@@ -1026,3 +1034,103 @@ class TestPagerCharCursor:
         p._yank(["hello world"])
         assert p._yank_status != ""
         assert "Yankita" in p._yank_status
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rubujo (recycle bin) tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+_LOAD_RUBUJO = "autish.commands.vorto._load_rubujo"
+_MOVE_RUBUJO = "autish.commands.vorto._move_to_rubujo"
+_RECOVER = "autish.commands.vorto._recover_from_rubujo"
+_PERM_DELETE = "autish.commands.vorto._permanent_delete_from_rubujo"
+_CLEANUP = "autish.commands.vorto._cleanup_old_rubujo"
+
+
+def _make_rubujo_entry(**kwargs) -> dict:
+    base = _make_entry(**kwargs)
+    base["forigita_je"] = "2024-06-01T12:00:00+00:00"
+    return base
+
+
+class TestRubujoListi:
+    def test_empty_bin_message(self):
+        with (
+            patch(_LOAD_RUBUJO, return_value=[]),
+            patch(_CLEANUP, return_value=0),
+        ):
+            result = runner.invoke(app, ["vorto", "rubujo"])
+        assert result.exit_code == 0
+        assert "0 eniro" in result.output
+
+    def test_shows_entry_in_bin(self):
+        entry = _make_rubujo_entry()
+        with (
+            patch(_LOAD_RUBUJO, return_value=[entry]),
+            patch(_CLEANUP, return_value=0),
+        ):
+            result = runner.invoke(app, ["vorto", "rubujo"])
+        assert result.exit_code == 0
+        assert "hello" in result.output
+
+
+class TestRubujoReakiri:
+    def test_recovers_entry(self):
+        entry = _make_rubujo_entry()
+        with (
+            patch(_LOAD_RUBUJO, return_value=[entry]),
+            patch(_RECOVER, return_value=entry) as mock_rec,
+        ):
+            result = runner.invoke(app, ["vorto", "rubujo", "reakiri", SAMPLE_UUID])
+        assert result.exit_code == 0
+        mock_rec.assert_called_once_with(SAMPLE_UUID)
+
+    def test_not_found_exits_nonzero(self):
+        with patch(_LOAD_RUBUJO, return_value=[]):
+            result = runner.invoke(app, ["vorto", "rubujo", "reakiri", "notfound"])
+        assert result.exit_code != 0
+
+
+class TestRubujoForigi:
+    def test_perm_deletes_with_confirm(self):
+        entry = _make_rubujo_entry()
+        with (
+            patch(_LOAD_RUBUJO, return_value=[entry]),
+            patch(_PERM_DELETE, return_value=True) as mock_del,
+            patch("autish.commands.vorto.typer.prompt", return_value="y"),
+        ):
+            result = runner.invoke(
+                app, ["vorto", "rubujo", "forigi", SAMPLE_UUID]
+            )
+        assert result.exit_code == 0
+        mock_del.assert_called_once_with(SAMPLE_UUID)
+
+    def test_cancelled_does_not_delete(self):
+        entry = _make_rubujo_entry()
+        with (
+            patch(_LOAD_RUBUJO, return_value=[entry]),
+            patch(_PERM_DELETE) as mock_del,
+            patch("autish.commands.vorto.typer.prompt", return_value="N"),
+        ):
+            runner.invoke(app, ["vorto", "rubujo", "forigi", SAMPLE_UUID])
+        mock_del.assert_not_called()
+
+    def test_justa_flag_skips_confirm(self):
+        entry = _make_rubujo_entry()
+        with (
+            patch(_LOAD_RUBUJO, return_value=[entry]),
+            patch(_PERM_DELETE, return_value=True) as mock_del,
+        ):
+            result = runner.invoke(
+                app,
+                ["vorto", "rubujo", "forigi", "--justa", SAMPLE_UUID],
+            )
+        assert result.exit_code == 0
+        mock_del.assert_called_once_with(SAMPLE_UUID)
+
+
+class TestRubujoSubcommandVisible:
+    def test_rubujo_in_vorto_help(self):
+        result = runner.invoke(app, ["vorto", "--help"])
+        assert result.exit_code == 0
+        assert "rubujo" in result.output

@@ -20,7 +20,7 @@ import re
 import sqlite3
 import sys
 import uuid as _uuid_mod
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import typer
@@ -72,6 +72,25 @@ CREATE TABLE IF NOT EXISTS vorto (
 );
 """
 
+_CREATE_RUBUJO = """
+CREATE TABLE IF NOT EXISTS rubujo (
+    uuid        TEXT PRIMARY KEY,
+    teksto      TEXT NOT NULL,
+    lingvo      TEXT,
+    kategorio   TEXT,
+    tipo        TEXT,
+    temo        TEXT,
+    tono        TEXT,
+    nivelo      REAL,
+    difinoj     TEXT NOT NULL DEFAULT '[]',
+    etikedoj    TEXT NOT NULL DEFAULT '{}',
+    ligiloj     TEXT NOT NULL DEFAULT '[]',
+    kreita_je   TEXT NOT NULL,
+    modifita_je TEXT NOT NULL,
+    forigita_je TEXT NOT NULL
+);
+"""
+
 _CREATE_UNDO = """
 CREATE TABLE IF NOT EXISTS undo_stack (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,7 +106,7 @@ def _get_db() -> sqlite3.Connection:
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL;")
     con.execute("PRAGMA foreign_keys=ON;")
-    con.executescript(_CREATE_VORTO + _CREATE_UNDO)
+    con.executescript(_CREATE_VORTO + _CREATE_RUBUJO + _CREATE_UNDO)
     return con
 
 
@@ -224,6 +243,86 @@ def _push_undo(operation: dict) -> None:
     if len(stack) > _MAX_UNDO:
         stack = stack[-_MAX_UNDO:]
     _save_undo_stack(stack)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rubujo (recycle bin) helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+_RUBUJO_INSERT = """
+INSERT INTO rubujo
+    (uuid, teksto, lingvo, kategorio, tipo, temo, tono, nivelo,
+     difinoj, etikedoj, ligiloj, kreita_je, modifita_je, forigita_je)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+_RUBUJO_DAYS = 30  # entries older than this are auto-purged
+
+
+def _move_to_rubujo(entry: dict) -> None:
+    """Move *entry* from the vorto table into the rubujo table."""
+    forigita_je = _now_iso()
+    params = _dict_to_params(entry) + (forigita_je,)
+    with _get_db() as con:
+        con.execute("DELETE FROM vorto WHERE uuid = ?", (entry["uuid"],))
+        con.execute(_RUBUJO_INSERT, params)
+        con.commit()
+
+
+def _load_rubujo() -> list[dict]:
+    """Return all rubujo entries ordered by deletion date (most recent first)."""
+    with _get_db() as con:
+        rows = con.execute(
+            "SELECT * FROM rubujo ORDER BY forigita_je DESC"
+        ).fetchall()
+    result: list[dict] = []
+    for r in rows:
+        d = _row_to_dict(r)
+        d["forigita_je"] = r["forigita_je"]
+        result.append(d)
+    return result
+
+
+def _recover_from_rubujo(uuid: str) -> dict | None:
+    """Restore an entry from rubujo to vorto; return the entry or None."""
+    with _get_db() as con:
+        row = con.execute("SELECT * FROM rubujo WHERE uuid = ?", (uuid,)).fetchone()
+        if row is None:
+            return None
+        entry = _row_to_dict(row)
+        con.execute("DELETE FROM rubujo WHERE uuid = ?", (uuid,))
+        con.execute(
+            """
+            INSERT OR REPLACE INTO vorto
+                (uuid, teksto, lingvo, kategorio, tipo, temo, tono, nivelo,
+                 difinoj, etikedoj, ligiloj, kreita_je, modifita_je)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            _dict_to_params(entry),
+        )
+        con.commit()
+    return entry
+
+
+def _permanent_delete_from_rubujo(uuid: str) -> bool:
+    """Permanently delete one entry from rubujo; return True if it existed."""
+    with _get_db() as con:
+        cur = con.execute("DELETE FROM rubujo WHERE uuid = ?", (uuid,))
+        con.commit()
+        return cur.rowcount > 0
+
+
+def _cleanup_old_rubujo() -> int:
+    """Delete rubujo entries older than _RUBUJO_DAYS days; return count removed."""
+    cutoff_str = (
+        datetime.now(tz=timezone.utc) - timedelta(days=_RUBUJO_DAYS)
+    ).isoformat(timespec="seconds")
+    with _get_db() as con:
+        cur = con.execute(
+            "DELETE FROM rubujo WHERE forigita_je < ?", (cutoff_str,)
+        )
+        con.commit()
+        return cur.rowcount
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -696,21 +795,27 @@ def forigi(
         ..., help="UUID (or prefix) or exact text of the entry to delete."
     ),
 ) -> None:
-    """Delete a wordbank entry (with confirmation)."""
+    """Move a wordbank entry to the recycle bin (with confirmation).
+
+    Entries in the recycle bin are permanently deleted after 30 days.
+    Use  vorto rubujo reakiri <uuid>  to restore.
+    """
     entries = _load_entries()
     entry = _find_entry(uid_or_teksto, entries)
     if entry is None:
         typer.echo(f"Eniro ne trovita: {uid_or_teksto!r}", err=True)
         raise typer.Exit(code=1)
 
-    if not _show_diff_confirmation("forigi", entry):
+    if not _show_diff_confirmation("forigi (→ rubujo)", entry):
         typer.echo("Nuligita. (Cancelled.)")
         return
 
-    entries = [e for e in entries if e["uuid"] != entry["uuid"]]
-    _save_entries(entries)
-    _push_undo({"op": "forigi", "entry": entry})
-    typer.echo(f"Forigis #{entry['uuid'][:8]}  \"{entry['teksto']}\"")
+    _move_to_rubujo(entry)
+    _push_undo({"op": "forigi", "uuid": entry["uuid"]})
+    typer.echo(
+        f"Sendis al rubujo: #{entry['uuid'][:8]}  \"{entry['teksto']}\""
+        f"  (aŭtomate forigita post {_RUBUJO_DAYS} tagoj)"
+    )
 
 
 @app.command("malfari")
@@ -727,6 +832,7 @@ def malfari() -> None:
     if op["op"] == "aldoni":
         uid = op["uuid"]
         entries = [e for e in entries if e["uuid"] != uid]
+        _save_entries(entries)
         typer.echo(f"Malfaris aldoni — forigis #{uid[:8]}.")
     elif op["op"] == "modifi":
         old = op["old"]
@@ -735,15 +841,37 @@ def malfari() -> None:
         )
         if idx is not None:
             entries[idx] = old
+        _save_entries(entries)
         typer.echo(f"Malfaris modifi — restaŭris #{old['uuid'][:8]}.")
     elif op["op"] == "forigi":
-        old = op["entry"]
-        entries.append(old)
-        typer.echo(
-            f"Malfaris forigi — restaŭris #{old['uuid'][:8]}  \"{old['teksto']}\"."
-        )
+        uuid = op.get("uuid") or (op.get("entry") or {}).get("uuid")
+        if uuid:
+            recovered = _recover_from_rubujo(uuid)
+            if recovered:
+                typer.echo(
+                    f"Malfaris forigi — restaŭris "
+                    f"#{uuid[:8]}  \"{recovered['teksto']}\"."
+                )
+            else:
+                # Fallback: old format stored the full entry
+                old = op.get("entry")
+                if old:
+                    entries.append(old)
+                    _save_entries(entries)
+                    typer.echo(
+                        f"Malfaris forigi — restaŭris "
+                        f"#{old['uuid'][:8]}  \"{old['teksto']}\"."
+                    )
+                else:
+                    typer.echo(
+                        "Ne povis restaŭri: eniro ne trovita en rubujo.",
+                        err=True,
+                    )
+        else:
+            typer.echo(
+                "Ne povis restaŭri: malvalida malfar-operacio.", err=True
+            )
 
-    _save_entries(entries)
     _save_undo_stack(stack)
 
 
@@ -846,6 +974,7 @@ def _undo_action() -> str:
     if op["op"] == "aldoni":
         uid = op["uuid"]
         entries = [e for e in entries if e["uuid"] != uid]
+        _save_entries(entries)
         msg = f"Malfaris aldoni — forigis #{uid[:8]}."
     elif op["op"] == "modifi":
         old = op["old"]
@@ -854,15 +983,33 @@ def _undo_action() -> str:
         )
         if idx is not None:
             entries[idx] = old
+        _save_entries(entries)
         msg = f"Malfaris modifi — restaŭris #{old['uuid'][:8]}."
     elif op["op"] == "forigi":
-        old = op["entry"]
-        entries.append(old)
-        msg = f"Malfaris forigi — restaŭris #{old['uuid'][:8]}  \"{old['teksto']}\"."
+        uuid = op.get("uuid") or (op.get("entry") or {}).get("uuid")
+        if uuid:
+            recovered = _recover_from_rubujo(uuid)
+            if recovered:
+                msg = (
+                    f"Malfaris forigi — restaŭris "
+                    f"#{uuid[:8]}  \"{recovered['teksto']}\"."
+                )
+            else:
+                old = op.get("entry")
+                if old:
+                    entries.append(old)
+                    _save_entries(entries)
+                    msg = (
+                        f"Malfaris forigi — restaŭris "
+                        f"#{old['uuid'][:8]}  \"{old['teksto']}\"."
+                    )
+                else:
+                    msg = "Ne povis restaŭri: eniro ne trovita en rubujo."
+        else:
+            msg = "Ne povis restaŭri: malvalida malfar-operacio."
     else:
         msg = "Nekonata operacio."
 
-    _save_entries(entries)
     _save_undo_stack(stack)
     return msg
 
@@ -886,10 +1033,181 @@ def _tui_save_modified(entry: dict, old_entry: dict) -> None:
 
 
 def _tui_delete(entry: dict) -> None:
-    all_entries = _load_entries()
-    all_entries = [e for e in all_entries if e["uuid"] != entry["uuid"]]
-    _save_entries(all_entries)
-    _push_undo({"op": "forigi", "entry": entry})
+    _move_to_rubujo(entry)
+    _push_undo({"op": "forigi", "uuid": entry["uuid"]})
+
+
+def _rubujo_entries_to_lines(entries: list[dict]) -> list[str]:
+    """Convert a list of rubujo entries to pager-ready plain-text lines."""
+    if not entries:
+        return ["Rubujo estas malplena. (Recycle bin is empty.)"]
+    col_uuid = 10
+    col_teksto = 28
+    col_lingvo = 8
+    col_tipo = 18
+    col_dato = 14
+    header = (
+        f"{'UUID':<{col_uuid}} {'Teksto':<{col_teksto}} "
+        f"{'Lingvo':<{col_lingvo}} {'Tipo':<{col_tipo}} "
+        f"{'Forigita':<{col_dato}}"
+    )
+    sep = "─" * len(header)
+    lines = [header, sep]
+    for e in entries:
+        uid_short = e["uuid"][:col_uuid]
+        kategorio = e.get("kategorio") or ""
+        tipo = e.get("tipo") or ""
+        tipo_str = (kategorio + ("/" + tipo if tipo else ""))[:col_tipo]
+        forigita = (e.get("forigita_je") or "")[:13]
+        teksto = e["teksto"][:col_teksto]
+        lines.append(
+            f"{uid_short:<{col_uuid}} {teksto:<{col_teksto}} "
+            f"{(e.get('lingvo') or ''):<{col_lingvo}} {tipo_str:<{col_tipo}} "
+            f"{forigita:<{col_dato}}"
+        )
+    return lines
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# rubujo subcommands
+# ──────────────────────────────────────────────────────────────────────────────
+
+rubujo_app = typer.Typer(
+    name="rubujo",
+    help="Recycle bin — view, recover, or permanently delete trashed entries.",
+    no_args_is_help=False,
+)
+app.add_typer(rubujo_app)
+
+
+@rubujo_app.callback(invoke_without_command=True)
+def rubujo_callback(ctx: typer.Context) -> None:
+    """List entries in the recycle bin when called without a subcommand."""
+    if ctx.invoked_subcommand is not None:
+        return
+    # Auto-purge stale entries first
+    purged = _cleanup_old_rubujo()
+    entries = _load_rubujo()
+    if purged:
+        typer.echo(f"Aŭtomate forigis {purged} maljunaj eniro(j) (>{_RUBUJO_DAYS}d).")
+    typer.echo(f"{len(entries)} eniro(j) en rubujo.")
+    if not entries:
+        return
+    table = Table(
+        show_header=True,
+        header_style="dim",
+        border_style="dim",
+        expand=False,
+    )
+    table.add_column("UUID", style="dim", width=10, no_wrap=True)
+    table.add_column("Teksto", min_width=20)
+    table.add_column("Lingvo", width=8)
+    table.add_column("Tipo", width=18)
+    table.add_column("Forigita", width=13)
+    for e in entries:
+        uid_short = e["uuid"][:8]
+        kategorio = e.get("kategorio") or ""
+        tipo = e.get("tipo") or ""
+        tipo_str = kategorio + ("/" + tipo if tipo else "")
+        forigita = (e.get("forigita_je") or "")[:10]
+        table.add_row(
+            uid_short,
+            e["teksto"],
+            e.get("lingvo") or "",
+            tipo_str,
+            forigita,
+        )
+    console.print(table)
+
+
+@rubujo_app.command("reakiri")
+def rubujo_reakiri(
+    uid: str = typer.Argument(..., help="UUID (or prefix) of the entry to recover."),
+) -> None:
+    """Restore an entry from the recycle bin back to the wordbank."""
+    entries = _load_rubujo()
+    # Try prefix match
+    matches = [e for e in entries if e["uuid"].startswith(uid)]
+    if not matches:
+        typer.echo(f"Ne trovita en rubujo: {uid!r}", err=True)
+        raise typer.Exit(code=1)
+    if len(matches) > 1:
+        typer.echo(
+            f"Ambigua UUID prefikso '{uid}' — {len(matches)} enirojn matĉas.", err=True
+        )
+        raise typer.Exit(code=1)
+    uuid = matches[0]["uuid"]
+    recovered = _recover_from_rubujo(uuid)
+    if recovered:
+        typer.echo(f"Reakivis #{uuid[:8]}  \"{recovered['teksto']}\"")
+    else:
+        typer.echo(f"Ne povis reakiri: {uid!r}", err=True)
+        raise typer.Exit(code=1)
+
+
+@rubujo_app.command("forigi")
+def rubujo_forigi(
+    uid: str = typer.Argument(
+        ..., help="UUID (or prefix) of the entry to permanently delete."
+    ),
+    justa: bool = typer.Option(
+        False, "-j", "--justa", help="Skip confirmation prompt."
+    ),
+) -> None:
+    """Permanently delete one entry from the recycle bin."""
+    entries = _load_rubujo()
+    matches = [e for e in entries if e["uuid"].startswith(uid)]
+    if not matches:
+        typer.echo(f"Ne trovita en rubujo: {uid!r}", err=True)
+        raise typer.Exit(code=1)
+    if len(matches) > 1:
+        typer.echo(
+            f"Ambigua UUID prefikso '{uid}' — {len(matches)} enirojn matĉas.", err=True
+        )
+        raise typer.Exit(code=1)
+    entry = matches[0]
+    if not justa:
+        typer.echo(
+            f"Ĉu definitive forigi #{entry['uuid'][:8]}  \"{entry['teksto']}\"? (y/N)"
+        )
+        ans = typer.prompt("", default="N")
+        if ans.lower() not in ("y", "j"):
+            typer.echo("Nuligita.")
+            return
+    ok = _permanent_delete_from_rubujo(entry["uuid"])
+    if ok:
+        typer.echo(f"Definitive forigis #{entry['uuid'][:8]}  \"{entry['teksto']}\"")
+    else:
+        typer.echo("Ne povis forigi.", err=True)
+        raise typer.Exit(code=1)
+
+
+@rubujo_app.command("vakigi")
+def rubujo_vakigi(
+    justa: bool = typer.Option(
+        False, "-j", "--justa", help="Skip confirmation prompt."
+    ),
+) -> None:
+    """Permanently delete ALL entries in the recycle bin."""
+    entries = _load_rubujo()
+    if not entries:
+        typer.echo("Rubujo estas malplena.")
+        return
+    if not justa:
+        typer.echo(f"Ĉu definitive forigi ĈIUJN {len(entries)} eniro(j)n? (y/N)")
+        ans = typer.prompt("", default="N")
+        if ans.lower() not in ("y", "j"):
+            typer.echo("Nuligita.")
+            return
+    with _get_db() as con:
+        con.execute("DELETE FROM rubujo")
+        con.commit()
+    typer.echo(f"Vakigis rubujon: forigis {len(entries)} eniro(j)n.")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Interactive mode — full-screen curses TUI
+# ──────────────────────────────────────────────────────────────────────────────
 
 
 def _interactive_mode() -> None:
@@ -902,6 +1220,9 @@ def _interactive_mode() -> None:
         raise typer.Exit(code=1)
 
     from autish.commands._vorto_tui import VortoTUI  # noqa: PLC0415
+
+    # Auto-purge old rubujo entries on startup
+    _cleanup_old_rubujo()
 
     tui = VortoTUI(
         load_entries=_load_entries,
@@ -918,6 +1239,10 @@ def _interactive_mode() -> None:
         find_entry=_find_entry,
         now_iso=_now_iso,
         make_uuid=lambda: str(_uuid_mod.uuid4()),
+        load_rubujo=_load_rubujo,
+        render_rubujo_results=_rubujo_entries_to_lines,
+        recover_from_rubujo=_recover_from_rubujo,
+        permanent_delete_from_rubujo=_permanent_delete_from_rubujo,
     )
     tui.run()
 
