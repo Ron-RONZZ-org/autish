@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import curses
 import locale
+import os
 from collections.abc import Callable
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -46,32 +47,25 @@ except AttributeError:
 
 
 def _safe_addstr(win, row: int, col: int, text: str, attr: int = 0) -> None:
-    """Wrapper around win.addstr that silently drops non-encodable characters.
+    """Wrapper around win.addstr that silently absorbs out-of-bounds errors.
 
-    If the locale is not UTF-8 (e.g. ``C``), ``addstr`` will raise
-    ``UnicodeEncodeError`` for accented / Esperanto characters.  We fall back
-    to encoding the string as UTF-8 bytes — curses on Linux forwards raw bytes
-    to the terminal which is almost always UTF-8.  If that still fails we try
-    character-by-character so at least ASCII portions are displayed.
+    When the locale encoding cannot represent a character we encode with
+    replacement characters so the display stays clean (no garbled output).
     """
     try:
         win.addstr(row, col, text, attr)
-    except UnicodeEncodeError:
-        # Locale is not UTF-8; pass pre-encoded bytes so the terminal can
-        # decode them correctly.
-        try:
-            win.addstr(row, col, text.encode("utf-8"), attr)
-        except curses.error:
-            pass
-        except UnicodeEncodeError:
-            # Last resort: write char-by-char, skipping problem chars
-            for i, ch in enumerate(text):
-                try:
-                    win.addstr(row, col + i, ch.encode("utf-8"), attr)
-                except (curses.error, UnicodeEncodeError):
-                    pass
     except curses.error:
         pass
+    except UnicodeEncodeError:
+        # Locale encoding doesn't cover all characters; substitute with ?
+        # rather than sending raw UTF-8 bytes which would appear garbled when
+        # ncurses is not in a UTF-8 locale.
+        try:
+            enc = locale.getpreferredencoding(False) or "ascii"
+            safe = text.encode(enc, errors="replace").decode(enc)
+            win.addstr(row, col, safe, attr)
+        except curses.error:
+            pass
 
 
 def _is_backspace(key: int) -> bool:
@@ -1239,15 +1233,16 @@ _WELCOME_LINES = [
     "",
     "             Mia Vorto  " + _VERSION,
     "",
-    "          ┌─────────────────────────────┐",
+    "          ┌──────────────────────────────┐",
     "          │  a   aldoni    (aldonu)      │",
     "          │  v   vidi      (vidi)        │",
     "          │  m   modifi    (modifi)      │",
     "          │  s   serĉi     (serĉu)       │",
     "          │  f   forigi    (forigu)      │",
+    "          │  r   rubujo    (rubujo)      │",
     "          │  h   helpo     (helpo)       │",
     "          │  q   eliri     (eliru)       │",
-    "          └─────────────────────────────┘",
+    "          └──────────────────────────────┘",
     "",
     "   Unuan fojon?  Tajpu  :tuto  por gvida lernilo.",
     "   (First time?  Type  :tuto  for a tutorial.)",
@@ -1381,15 +1376,20 @@ class VortoTUI:
         self._permanent_delete_from_rubujo = permanent_delete_from_rubujo
 
     def run(self) -> None:
-        # Prefer a UTF-8 locale so that curses encodes Esperanto/accented chars
-        # correctly.  Fall back to the environment locale if none is available.
-        for loc_candidate in ("C.UTF-8", "en_US.UTF-8", ""):
+        # Force a UTF-8 locale so that ncurses handles accented / Esperanto
+        # characters (ĉ ŝ ŭ à ç …) correctly.  Setting os.environ is important
+        # because the ncurses C library reads LANG/LC_ALL at initscr() time;
+        # locale.setlocale() alone is not always sufficient.
+        for loc in ("C.UTF-8", "en_US.UTF-8", "en_GB.UTF-8"):
             try:
-                locale.setlocale(locale.LC_ALL, loc_candidate)
-                if "utf" in locale.getpreferredencoding(False).lower():
-                    break
+                locale.setlocale(locale.LC_ALL, loc)
+                os.environ["LC_ALL"] = loc
+                os.environ["LANG"] = loc
+                break
             except locale.Error:
                 continue
+        else:
+            locale.setlocale(locale.LC_ALL, "")
         curses.wrapper(self._main)
 
     # ── curses entry ─────────────────────────────────────────────────────────
@@ -1445,7 +1445,7 @@ class VortoTUI:
                     self._action_serci()
                 elif ch == "f":
                     self._action_forigi()
-                elif ch == "R":
+                elif ch == "r":
                     self._action_rubujo()
                 elif ch == "h":
                     self._run_pager(_HELP_LINES, title="Helpo")
@@ -1478,7 +1478,7 @@ class VortoTUI:
         else:
             status = (
                 self._status_msg
-                or "NORMAL  a v m s f R h q  |  : komando  |  / serĉi"
+                or "NORMAL  a v m s f r h q  |  : komando  |  / serĉi"
             )
 
         _safe_addstr(stdscr, h - 1, 0, status[:w - 1].ljust(w - 1), curses.A_REVERSE)
