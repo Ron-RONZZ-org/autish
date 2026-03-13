@@ -49,39 +49,24 @@ except AttributeError:
 def _safe_addstr(win, row: int, col: int, text: str, attr: int = 0) -> None:
     """Wrapper around win.addstr that silently absorbs out-of-bounds errors.
 
-    We always encode with a UTF-8-capable codec to avoid mojibake on systems
-    whose default locale is not UTF-8.  If UTF-8 truly is unavailable we fall
-    back to the preferred encoding with replacement to preserve layout.
+    The caller is responsible for setting win.encoding = 'utf-8' before any
+    calls (done once in VortoTUI._main), which makes addstr encode strings as
+    UTF-8 regardless of the system locale.  The fallback replaces any chars
+    that still cannot be encoded so the display stays clean.
     """
     try:
         win.addstr(row, col, text, attr)
-        return
     except curses.error:
-        return
+        pass
     except UnicodeEncodeError:
-        pass
-
-    # Try a wide-character write if available (works even when the locale the
-    # process started with was non-UTF-8 as long as we selected a UTF-8
-    # encoding at runtime).
-    addwstr = getattr(win, "addwstr", None)
-    if addwstr:
+        # Should not happen once win.encoding is 'utf-8', but guard anyway.
         try:
-            addwstr(row, col, text, attr)
-            return
+            safe = text.encode("utf-8", errors="replace").decode(
+                "utf-8", errors="replace"
+            )
+            win.addstr(row, col, safe, attr)
         except curses.error:
-            return
-        except UnicodeEncodeError:
             pass
-
-    # Final fallback: encode with replacement so we never emit raw UTF-8 bytes
-    # into an 8-bit locale (which renders as Ã…-style mojibake).
-    try:
-        enc = locale.getpreferredencoding(False) or "ascii"
-        safe = text.encode(enc, errors="replace").decode(enc, errors="replace")
-        win.addstr(row, col, safe, attr)
-    except curses.error:
-        pass
 
 
 def _is_backspace(key: int) -> bool:
@@ -1470,6 +1455,10 @@ class VortoTUI:
 
     def _main(self, stdscr: curses._CursesWindow) -> None:  # type: ignore[name-defined]
         self.stdscr = stdscr
+        # Force UTF-8 encoding for all addstr calls on this window,
+        # bypassing locale entirely.  This is the canonical fix for mojibake
+        # (à → Ã ) on systems where the process locale is not UTF-8.
+        stdscr.encoding = "utf-8"
         curses.curs_set(0)
         curses.noecho()
         curses.cbreak()
