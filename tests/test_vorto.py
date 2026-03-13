@@ -109,14 +109,19 @@ class TestNormalizeTipo:
 
 class TestNormalizeTono:
     def test_full_name_unchanged(self):
-        assert _normalize_tono("informala") == "informala"
+        assert _normalize_tono("neformala") == "neformala"
         assert _normalize_tono("formala") == "formala"
         assert _normalize_tono("ambaŭ") == "ambaŭ"
 
     def test_abbreviation_expanded(self):
-        assert _normalize_tono("in") == "informala"
+        assert _normalize_tono("nf") == "neformala"
         assert _normalize_tono("fo") == "formala"
         assert _normalize_tono("am") == "ambaŭ"
+
+    def test_legacy_aliases(self):
+        # 'in' and 'informala' are kept for backwards compat → neformala
+        assert _normalize_tono("in") == "neformala"
+        assert _normalize_tono("informala") == "neformala"
 
     def test_none_returns_none(self):
         assert _normalize_tono(None) is None

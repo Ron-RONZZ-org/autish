@@ -173,8 +173,11 @@ _TIPO_MAP: dict[str, str] = {
 }
 
 _TONO_MAP: dict[str, str] = {
-    "in": "informala",
-    "informala": "informala",
+    "nf": "neformala",
+    "neformala": "neformala",
+    # legacy alias kept for backwards-compat
+    "in": "neformala",
+    "informala": "neformala",
     "fo": "formala",
     "formala": "formala",
     "am": "ambaŭ",

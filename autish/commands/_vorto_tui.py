@@ -46,16 +46,32 @@ except AttributeError:
 
 
 def _safe_addstr(win, row: int, col: int, text: str, attr: int = 0) -> None:
-    """Wrapper around win.addstr that silently drops non-encodable characters."""
+    """Wrapper around win.addstr that silently drops non-encodable characters.
+
+    If the locale is not UTF-8 (e.g. ``C``), ``addstr`` will raise
+    ``UnicodeEncodeError`` for accented / Esperanto characters.  We fall back
+    to encoding the string as UTF-8 bytes — curses on Linux forwards raw bytes
+    to the terminal which is almost always UTF-8.  If that still fails we try
+    character-by-character so at least ASCII portions are displayed.
+    """
     try:
         win.addstr(row, col, text, attr)
-    except (curses.error, UnicodeEncodeError):
-        # Try character-by-character so as many chars as possible are shown
-        for i, ch in enumerate(text):
-            try:
-                win.addstr(row, col + i, ch, attr)
-            except (curses.error, UnicodeEncodeError):
-                pass
+    except UnicodeEncodeError:
+        # Locale is not UTF-8; pass pre-encoded bytes so the terminal can
+        # decode them correctly.
+        try:
+            win.addstr(row, col, text.encode("utf-8"), attr)
+        except curses.error:
+            pass
+        except UnicodeEncodeError:
+            # Last resort: write char-by-char, skipping problem chars
+            for i, ch in enumerate(text):
+                try:
+                    win.addstr(row, col + i, ch.encode("utf-8"), attr)
+                except (curses.error, UnicodeEncodeError):
+                    pass
+    except curses.error:
+        pass
 
 
 def _is_backspace(key: int) -> bool:
@@ -415,8 +431,12 @@ class LineEditor:
 
     def render(
         self, win, row: int, col: int, width: int, focused: bool = False
-    ) -> None:
-        """Draw the field text at (row, col) inside *win*."""
+    ) -> tuple[int, int] | None:
+        """Draw the field text at (row, col) inside *win*.
+
+        Returns (row, cursor_col) when focused so callers can restore the
+        hardware cursor after additional drawing (e.g. a status bar).
+        """
         text = self.text
         # Adjust horizontal scroll offset to keep cursor visible
         if self.pos < self._view_start:
@@ -461,6 +481,8 @@ class LineEditor:
                 win.move(row, cursor_col)
             except curses.error:
                 pass
+            return row, cursor_col
+        return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -473,7 +495,7 @@ _FORM_FIELDS = [
     ("difinoj",    "Difino(j) — sep: ;"),
     ("tipo",       "Tipo (su/ve/aj/av/…)"),
     ("temo",       "Temo"),
-    ("tono",       "Tono (in/fo/am)"),
+    ("tono",       "Tono (nf/fo/am)"),
     ("nivelo",     "Nivelo 1–10"),
     ("etikedoj",   "Etikedoj KEY:VAL …"),
     ("ligiloj",    "Ligiloj (UUID …)"),
@@ -672,6 +694,7 @@ class FormEditor:
         border = "─" * label_w + "─┼─" + "─" * value_w
         _safe_addstr(self.stdscr, 1, 0, border[:w - 1], curses.A_DIM)
 
+        focused_cursor: tuple[int, int] | None = None
         for i, ((_key, hint), editor) in enumerate(
             zip(_FORM_FIELDS, self.editors, strict=False)
         ):
@@ -686,8 +709,12 @@ class FormEditor:
             _safe_addstr(self.stdscr, scr_row, 0, label_text, label_attr)
             _safe_addstr(self.stdscr, scr_row, label_w, sep, curses.A_DIM)
 
-            # Value via LineEditor
-            editor.render(self.stdscr, scr_row, label_w + len(sep), value_w, focused)
+            # Value via LineEditor; save cursor pos if this is the focused field
+            cursor = editor.render(
+                self.stdscr, scr_row, label_w + len(sep), value_w, focused
+            )
+            if cursor is not None:
+                focused_cursor = cursor
 
             # Row separator
             if scr_row + 1 < h - 3:
@@ -704,6 +731,14 @@ class FormEditor:
         _safe_addstr(
             self.stdscr, h - 1, 0, status[:w - 1].ljust(w - 1), curses.A_REVERSE
         )
+
+        # Restore the hardware cursor to the focused field after drawing the
+        # status bar (addstr moves the curses position to the end of the bar).
+        if focused_cursor is not None:
+            try:
+                self.stdscr.move(*focused_cursor)
+            except curses.error:
+                pass
 
         self.stdscr.refresh()
 
@@ -737,6 +772,7 @@ class Pager:
         entry: dict | None = None,
         entries: list[dict] | None = None,
         entry_line_offset: int = 2,
+        title_rows: int = 0,
     ) -> None:
         self.stdscr = stdscr
         self._default_lines = lines or [""]
@@ -744,6 +780,7 @@ class Pager:
         self.lines = self._default_lines
         self.title = title
         self._show_detail = False  # p toggles between default and detail
+        self._title_rows = title_rows  # first N content lines rendered in BOLD
 
         # Optional entry context (for m/f actions and search-result Enter)
         self.entry: dict | None = entry
@@ -824,7 +861,8 @@ class Pager:
             vis_row_lo = min(self._visual_start_row, self.row)
             vis_row_hi = max(self._visual_start_row, self.row)
         elif self._mode == "VISUAL_CHAR" and self._visual_start_row == self.row:
-            vis_row_lo = vis_row_hi = self.row
+            # char-level: record selection bounds but do NOT set vis_row_* so
+            # that the whole-line standout attribute is NOT applied
             vis_char_lo = min(self._visual_start_char, self.char_pos)
             vis_char_hi = max(self._visual_start_char, self.char_pos)
 
@@ -855,10 +893,14 @@ class Pager:
             visible = visible.ljust(content_w)[:content_w]
 
             is_current = li == self.row
-            in_visual_line = vis_row_lo <= li <= vis_row_hi
+            # in_visual_line only applies in VISUAL_LINE mode
+            in_visual_line = (
+                self._mode == "VISUAL_LINE" and vis_row_lo <= li <= vis_row_hi
+            )
             has_match = bool(
                 self.search_term and self.search_term.lower() in line.lower()
             )
+            is_title = li < self._title_rows
 
             if in_visual_line:
                 attr = curses.A_STANDOUT
@@ -866,6 +908,8 @@ class Pager:
                 attr = curses.A_UNDERLINE | curses.A_BOLD
             elif has_match:
                 attr = curses.A_STANDOUT
+            elif is_title:
+                attr = curses.A_BOLD
             else:
                 attr = curses.A_NORMAL
 
@@ -890,7 +934,7 @@ class Pager:
                     )
 
             # For VISUAL_CHAR on the same row, highlight the selection range
-            if self._mode == "VISUAL_CHAR" and li == vis_row_lo and vis_char_lo >= 0:
+            if self._mode == "VISUAL_CHAR" and li == self.row and vis_char_lo >= 0:
                 for ci in range(vis_char_lo, vis_char_hi + 1):
                     ci_view = ci - self.col
                     if 0 <= ci_view < content_w:
@@ -1337,7 +1381,15 @@ class VortoTUI:
         self._permanent_delete_from_rubujo = permanent_delete_from_rubujo
 
     def run(self) -> None:
-        locale.setlocale(locale.LC_ALL, "")
+        # Prefer a UTF-8 locale so that curses encodes Esperanto/accented chars
+        # correctly.  Fall back to the environment locale if none is available.
+        for loc_candidate in ("C.UTF-8", "en_US.UTF-8", ""):
+            try:
+                locale.setlocale(locale.LC_ALL, loc_candidate)
+                if "utf" in locale.getpreferredencoding(False).lower():
+                    break
+            except locale.Error:
+                continue
         curses.wrapper(self._main)
 
     # ── curses entry ─────────────────────────────────────────────────────────
@@ -1426,7 +1478,7 @@ class VortoTUI:
         else:
             status = (
                 self._status_msg
-                or "NORMAL  a v m s f h q  |  : komando  |  / serĉi"
+                or "NORMAL  a v m s f R h q  |  : komando  |  / serĉi"
             )
 
         _safe_addstr(stdscr, h - 1, 0, status[:w - 1].ljust(w - 1), curses.A_REVERSE)
@@ -1528,6 +1580,7 @@ class VortoTUI:
                 title=f"Vidi — {entry['teksto'][:40]}",
                 detail_lines=detail_lines,
                 entry=entry,
+                title_rows=1,
             )
             result = pager.run()
             curses.curs_set(0)
@@ -1557,11 +1610,17 @@ class VortoTUI:
                 break
 
     def _render_entry_default(self, entry: dict) -> list[str]:
-        """Compact default view: header, tipo, difinoj, temo, nivelo."""
+        """Compact default view: header, tipo, difinoj, temo, nivelo.
+
+        The first line (teksto) is intentionally kept plain text here;
+        the Pager is opened with title_rows=1 so it renders that line BOLD.
+        """
         lines: list[str] = []
         teksto = entry.get("teksto") or ""
         uid_short = entry["uuid"][:8]
-        lines.append(f"# {teksto}  #{uid_short}")
+        # Two leading spaces align with the body lines; the Pager renders this
+        # line in BOLD (title_rows=1) to give it a "heading" appearance.
+        lines.append(f"  {teksto}  #{uid_short}")
         kategorio = entry.get("kategorio") or ""
         tipo = entry.get("tipo") or ""
         tipo_str = (
@@ -1569,7 +1628,7 @@ class VortoTUI:
             if (kategorio or tipo) else ""
         )
         if tipo_str:
-            lines.append(f"  _{tipo_str}_")
+            lines.append(f"  {tipo_str}")
         lines.append("")
         lines.append("─" * 40)
         lines.append("")
