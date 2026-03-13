@@ -61,6 +61,7 @@ class LineEditor:
         self._pending_op: str | None = None
         self._pending_count: int = 1
         self._dirty: bool = False
+        self._view_start: int = 0  # horizontal scroll offset for render
 
     # ── properties ──────────────────────────────────────────────────────────
 
@@ -380,13 +381,12 @@ class LineEditor:
     ) -> None:
         """Draw the field text at (row, col) inside *win*."""
         text = self.text
-        # Scroll view horizontally to keep cursor visible
-        if self.pos >= col + width:
-            view_start = self.pos - width + 1
-        elif self.pos < col:
-            view_start = self.pos
-        else:
-            view_start = max(0, self.pos - width + 1) if self.pos >= width else 0
+        # Adjust horizontal scroll offset to keep cursor visible
+        if self.pos < self._view_start:
+            self._view_start = self.pos
+        elif self.pos >= self._view_start + width:
+            self._view_start = max(0, self.pos - width + 1)
+        view_start = self._view_start
 
         displayed = text[view_start : view_start + width].ljust(width)[:width]
 
@@ -453,7 +453,8 @@ class FormEditor:
             return str(v)
 
         self.editors: list[LineEditor] = [
-            LineEditor(_init_val(k), insert_on_start=True) for k, _ in _FORM_FIELDS
+            LineEditor(_init_val(k), insert_on_start=(i == 0))
+            for i, (k, _) in enumerate(_FORM_FIELDS)
         ]
         self._cmd_buf: str = ""
         self._mode: str = "FIELD"  # FIELD | CMD
@@ -491,6 +492,20 @@ class FormEditor:
         # Global shortcuts (only in FIELD / NORMAL mode of current editor)
         editor = self.editors[self.current_row]
 
+        # Tab / Shift-Tab: move to next/prev field and enter INSERT mode
+        if key == ord("\t"):
+            self.current_row = min(len(self.editors) - 1, self.current_row + 1)
+            nxt = self.editors[self.current_row]
+            nxt.mode = "INSERT"
+            nxt.pos = len(nxt.buf)
+            return None
+        if key == curses.KEY_BTAB:
+            self.current_row = max(0, self.current_row - 1)
+            nxt = self.editors[self.current_row]
+            nxt.mode = "INSERT"
+            nxt.pos = len(nxt.buf)
+            return None
+
         # Enter cmd mode from any mode via ':'
         if ch == ":" and editor.mode == "NORMAL":
             self._mode = "CMD"
@@ -516,10 +531,11 @@ class FormEditor:
         # Delegate keypress to the current field editor
         res = editor.handle_key(key)
         if res == "done":
-            # Enter pressed in insert mode → move to next field
+            # Enter pressed in insert mode → move to next field (TAB behaviour)
             self.current_row = min(len(self.editors) - 1, self.current_row + 1)
-            self.editors[self.current_row].mode = "INSERT"
-            self.editors[self.current_row].pos = len(self.editors[self.current_row].buf)
+            nxt = self.editors[self.current_row]
+            nxt.mode = "INSERT"
+            nxt.pos = len(nxt.buf)
 
         return None
 
@@ -663,6 +679,7 @@ class Pager:
         self.title = title
         self.row = 0          # cursor line (absolute)
         self.col = 0          # horizontal scroll offset
+        self.char_pos = 0     # cursor column within the current line
         self.scroll_top = 0   # first visible line
         self._count_buf = ""
         self._mode = "NORMAL"   # NORMAL | SEARCH | VISUAL
@@ -671,6 +688,7 @@ class Pager:
         self.search_match_idx = 0
         self._visual_start = 0
         self._status = ""
+        self._yank_status = ""  # transient yank feedback (cleared after next keypress)
 
     # ── run ─────────────────────────────────────────────────────────────────
 
@@ -697,8 +715,19 @@ class Pager:
         self.stdscr.erase()
         h, w, content_h, content_w = self._geom()
 
-        # Clamp
+        # Clamp row
         self.row = max(0, min(self.row, len(self.lines) - 1))
+
+        # Clamp char_pos to current line length
+        cur_line = self.lines[self.row] if self.lines else ""
+        self.char_pos = max(0, min(self.char_pos, max(0, len(cur_line) - 1)))
+
+        # Adjust horizontal scroll to keep char_pos visible
+        if self.char_pos < self.col:
+            self.col = self.char_pos
+        elif self.char_pos >= self.col + content_w:
+            self.col = self.char_pos - content_w + 1
+        self.col = max(0, self.col)
 
         # Adjust vertical scroll
         if self.row < self.scroll_top:
@@ -767,16 +796,35 @@ class Pager:
             except curses.error:
                 pass
 
+            # Draw character cursor on the current line (NORMAL mode)
+            if is_current and self._mode == "NORMAL":
+                char_in_view = self.char_pos - self.col
+                if 0 <= char_in_view < content_w:
+                    rstripped = visible.rstrip()
+                    char = (
+                        visible[char_in_view]
+                        if char_in_view < len(rstripped)
+                        else " "
+                    )
+                    try:
+                        self.stdscr.addstr(
+                            scr_r, self._NUM_W + char_in_view, char, curses.A_STANDOUT
+                        )
+                    except curses.error:
+                        pass
+
         # Status bar
         if self._mode == "SEARCH":
             status = f"/{self.search_term}█"
         elif self._mode == "VISUAL":
-            status = "-- VISUAL --   y:yank   d:forigu   v/Esc: eliri elektan reĝimon"
+            status = "-- VISUAL --   y:yank   v/Esc: eliri elektan reĝimon"
+        elif self._yank_status:
+            status = self._yank_status
         else:
             pfx = self._count_buf or ""
             status = (
                 f"{pfx} [NORMAL]  "
-                f"j/k:↕  h/l:↔  0/$:↔linio  gg/G:⇕  "
+                f"j/k:↕  h/l:↔  0/$:linio  gg/G:⇕  J/K:paĝo  "
                 f"/:serĉi  n/N:sekva  v:elekta  y:yank  q:reen"
             )
 
@@ -799,6 +847,9 @@ class Pager:
         return self._normal_key(key, ch)
 
     def _normal_key(self, key: int, ch: str) -> str | None:
+        # Clear transient yank status on any keypress
+        self._yank_status = ""
+
         # Count accumulation
         if ch.isdigit() and (ch != "0" or self._count_buf):
             self._count_buf += ch
@@ -817,25 +868,42 @@ class Pager:
 
         elif ch == "j" or key == curses.KEY_DOWN:
             self.row = min(n - 1, self.row + count)
+            # clamp char_pos to new line length
+            cur = self.lines[self.row] if self.lines else ""
+            self.char_pos = min(self.char_pos, max(0, len(cur) - 1))
         elif ch == "k" or key == curses.KEY_UP:
             self.row = max(0, self.row - count)
+            cur = self.lines[self.row] if self.lines else ""
+            self.char_pos = min(self.char_pos, max(0, len(cur) - 1))
+        elif ch == "J" or key == curses.KEY_NPAGE:
+            self.row = min(n - 1, self.row + content_h)
+            cur = self.lines[self.row] if self.lines else ""
+            self.char_pos = min(self.char_pos, max(0, len(cur) - 1))
+        elif ch == "K" or key == curses.KEY_PPAGE:
+            self.row = max(0, self.row - content_h)
+            cur = self.lines[self.row] if self.lines else ""
+            self.char_pos = min(self.char_pos, max(0, len(cur) - 1))
         elif ch == "h" or key == curses.KEY_LEFT:
-            self.col = max(0, self.col - count)
+            self.char_pos = max(0, self.char_pos - count)
         elif ch == "l" or key == curses.KEY_RIGHT:
-            self.col += count
+            cur_line = self.lines[self.row] if self.lines else ""
+            self.char_pos = min(max(0, len(cur_line) - 1), self.char_pos + count)
         elif ch == "0" or key == curses.KEY_HOME:
+            self.char_pos = 0
             self.col = 0
         elif ch == "$" or key == curses.KEY_END:
-            max_len = max((len(ln) for ln in self.lines), default=0)
-            self.col = max(0, max_len - content_w)
+            cur_line = self.lines[self.row] if self.lines else ""
+            self.char_pos = max(0, len(cur_line) - 1)
 
         elif ch == "G":
-            if self._count_buf == "" and count == 1:
+            if count == 1 and not self._count_buf:
                 # bare G → bottom
                 self.row = n - 1
             else:
                 # {N}G → go to line N (1-based)
                 self.row = max(0, min(count - 1, n - 1))
+            cur = self.lines[self.row] if self.lines else ""
+            self.char_pos = min(self.char_pos, max(0, len(cur) - 1))
 
         elif ch == "g":
             # Wait for second key to form 'gg'
@@ -843,14 +911,13 @@ class Pager:
             if chr(next_key) == "g":
                 self.row = 0
                 self.scroll_top = 0
+                self.char_pos = 0
 
         elif ch == "d":
             # d = scroll down half page (vi pager convention)
             self.row = min(n - 1, self.row + content_h // 2)
-        elif key == curses.KEY_NPAGE:
-            self.row = min(n - 1, self.row + content_h)
-        elif key == curses.KEY_PPAGE:
-            self.row = max(0, self.row - content_h)
+            cur = self.lines[self.row] if self.lines else ""
+            self.char_pos = min(self.char_pos, max(0, len(cur) - 1))
 
         elif ch == "/":
             self._mode = "SEARCH"
@@ -923,14 +990,16 @@ class Pager:
             before = [m for m in self.search_matches if m < self.row]
             self.row = before[-1] if before else self.search_matches[-1]
 
-    @staticmethod
-    def _yank(lines: list[str]) -> None:
+    def _yank(self, lines: list[str]) -> None:
+        _PREVIEW_LEN = 40
         text = "\n".join(lines)
+        preview = text[:_PREVIEW_LEN]
         try:
             import pyperclip  # noqa: PLC0415
             pyperclip.copy(text)
+            self._yank_status = f"✓ Yankita: {preview!r}"
         except Exception:
-            pass
+            self._yank_status = f"✓ Yankita (tondujo ne disponebla): {preview!r}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1207,9 +1276,17 @@ class VortoTUI:
         elif cmd.startswith("serci") or cmd.startswith("serĉi"):
             query = cmd.split(None, 1)[1].strip() if " " in cmd else ""
             self._do_serci(query)
-        elif cmd.startswith("aldoni "):
-            # :aldoni <teksto> [-l lang] etc. — pass through as CLI args
-            self._status_msg = "Uzu la a-ŝlosilon por aldoni per formularo."
+        elif cmd == "vidi" or cmd.startswith("vidi "):
+            query = cmd[5:].strip() if cmd.startswith("vidi ") else ""
+            self._do_vidi(query)
+        elif cmd == "aldoni" or cmd.startswith("aldoni "):
+            args_str = cmd[7:].strip() if cmd.startswith("aldoni ") else ""
+            if args_str:
+                self._do_aldoni_inline(args_str)
+            else:
+                self._status_msg = (
+                    "Uzu: :aldoni <teksto> [-l lingvo]  aŭ  a  por formularo."
+                )
         elif cmd.startswith("malfari"):
             msg = self._undo()
             self._status_msg = msg
@@ -1355,6 +1432,62 @@ class VortoTUI:
         title = f"Serĉi: {query!r}" if query else "Ĉiuj vortoj (maks 50)"
         self._status_msg = f"{len(found)} rezulto(j)."
         self._run_pager(lines, title=title)
+
+    def _do_vidi(self, query: str) -> None:
+        """Show entry by UUID/text, or show latest 50 when query is empty."""
+        if not query:
+            self._do_serci("")
+            return
+        entries = self._load_entries()
+        entry = self._find_entry(query, entries)
+        if entry is not None:
+            lines = self._render_entry(entry)
+            self._run_pager(lines, title=f"Vidi — {entry['teksto'][:40]}")
+        else:
+            # Fall back to text search
+            self._do_serci(query)
+
+    def _do_aldoni_inline(self, args_str: str) -> None:
+        """Parse ':aldoni <teksto> [-l lingvo]' and save a new entry."""
+        import shlex  # noqa: PLC0415
+
+        try:
+            parts = shlex.split(args_str)
+        except ValueError as exc:
+            self._status_msg = f"Sintaksa eraro: {exc}"
+            return
+        if not parts:
+            self._status_msg = "Uzu: :aldoni <teksto> [-l lingvo]"
+            return
+
+        teksto = parts[0]
+        lingvo: str | None = None
+        i = 1
+        while i < len(parts):
+            if parts[i] in ("-l", "--lingvo") and i + 1 < len(parts):
+                lingvo = parts[i + 1]
+                i += 2
+            else:
+                i += 1
+
+        now = self._now_iso()
+        entry: dict = {
+            "uuid": self._make_uuid(),
+            "teksto": teksto,
+            "lingvo": lingvo,
+            "kategorio": self._detect_kategorio(teksto),
+            "tipo": None,
+            "temo": None,
+            "tono": None,
+            "nivelo": None,
+            "difinoj": [],
+            "etikedoj": {},
+            "ligiloj": [],
+            "kreita_je": now,
+            "modifita_je": now,
+        }
+        self._save_new(entry)
+        self._status_msg = f"Aldonis #{entry['uuid'][:8]}  \"{teksto}\""
 
     def _action_forigi(self) -> None:
         uid = self._prompt_uid("Forigi")
