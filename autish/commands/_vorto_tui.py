@@ -49,23 +49,39 @@ except AttributeError:
 def _safe_addstr(win, row: int, col: int, text: str, attr: int = 0) -> None:
     """Wrapper around win.addstr that silently absorbs out-of-bounds errors.
 
-    When the locale encoding cannot represent a character we encode with
-    replacement characters so the display stays clean (no garbled output).
+    We always encode with a UTF-8-capable codec to avoid mojibake on systems
+    whose default locale is not UTF-8.  If UTF-8 truly is unavailable we fall
+    back to the preferred encoding with replacement to preserve layout.
     """
     try:
         win.addstr(row, col, text, attr)
+        return
+    except curses.error:
+        return
+    except UnicodeEncodeError:
+        pass
+
+    # Try a wide-character write if available (works even when the locale the
+    # process started with was non-UTF-8 as long as we selected a UTF-8
+    # encoding at runtime).
+    addwstr = getattr(win, "addwstr", None)
+    if addwstr:
+        try:
+            addwstr(row, col, text, attr)
+            return
+        except curses.error:
+            return
+        except UnicodeEncodeError:
+            pass
+
+    # Final fallback: encode with replacement so we never emit raw UTF-8 bytes
+    # into an 8-bit locale (which renders as Ã…-style mojibake).
+    try:
+        enc = locale.getpreferredencoding(False) or "ascii"
+        safe = text.encode(enc, errors="replace").decode(enc, errors="replace")
+        win.addstr(row, col, safe, attr)
     except curses.error:
         pass
-    except UnicodeEncodeError:
-        # Locale encoding doesn't cover all characters; substitute with ?
-        # rather than sending raw UTF-8 bytes which would appear garbled when
-        # ncurses is not in a UTF-8 locale.
-        try:
-            enc = locale.getpreferredencoding(False) or "ascii"
-            safe = text.encode(enc, errors="replace").decode(enc)
-            win.addstr(row, col, safe, attr)
-        except curses.error:
-            pass
 
 
 def _is_backspace(key: int) -> bool:
@@ -1376,20 +1392,78 @@ class VortoTUI:
         self._permanent_delete_from_rubujo = permanent_delete_from_rubujo
 
     def run(self) -> None:
-        # Force a UTF-8 locale so that ncurses handles accented / Esperanto
-        # characters (ĉ ŝ ŭ à ç …) correctly.  Setting os.environ is important
-        # because the ncurses C library reads LANG/LC_ALL at initscr() time;
-        # locale.setlocale() alone is not always sufficient.
-        for loc in ("C.UTF-8", "en_US.UTF-8", "en_GB.UTF-8"):
+        """Launch the curses UI with a best-effort UTF-8 locale."""
+
+        def _ensure_utf8_locale() -> None:
+            """Pick a working UTF-8 locale and export it to ncurses."""
+
+            def _is_utf8(enc: str | None) -> bool:
+                if not enc:
+                    return False
+                norm = enc.lower().replace("-", "").replace("_", "")
+                return norm in ("utf8", "utf8mb4")
+
+            # 1) Honour the user's locale if it is already UTF-8.
             try:
-                locale.setlocale(locale.LC_ALL, loc)
-                os.environ["LC_ALL"] = loc
-                os.environ["LANG"] = loc
-                break
+                current = locale.setlocale(locale.LC_ALL, "")
+                if _is_utf8(locale.getpreferredencoding(False)):
+                    os.environ.setdefault("LC_ALL", current)
+                    os.environ.setdefault("LANG", current)
+                    return
             except locale.Error:
-                continue
-        else:
-            locale.setlocale(locale.LC_ALL, "")
+                pass
+
+            # 2) Try a set of reasonable UTF-8 candidates, including the
+            # user's LANG with a UTF-8 suffix if it is missing one.
+            lang_env = os.environ.get("LANG", "")
+            candidates: list[str] = []
+            if _is_utf8(lang_env):
+                candidates.append(lang_env)
+            elif lang_env:
+                candidates.append(f"{lang_env}.UTF-8")
+            candidates.extend(
+                [
+                    "C.UTF-8",
+                    "en_US.UTF-8",
+                    "en_GB.UTF-8",
+                    "fr_FR.UTF-8",
+                    "de_DE.UTF-8",
+                ]
+            )
+            # Add any alias that looks UTF-8 so we work on minimal distros.
+            alias_count = 0
+            for alias in locale.locale_alias.values():
+                if alias_count >= 20:  # avoid an excessively long scan
+                    break
+                if "utf" in alias.lower() and alias not in candidates:
+                    norm = locale.normalize(alias)
+                    if norm not in candidates:
+                        candidates.append(norm)
+                        alias_count += 1
+
+            for loc in candidates:
+                if not loc:
+                    continue
+                try:
+                    locale.setlocale(locale.LC_ALL, loc)
+                except locale.Error:
+                    continue
+                enc = locale.getpreferredencoding(False)
+                if _is_utf8(enc):
+                    os.environ["LC_ALL"] = loc
+                    os.environ["LANG"] = loc
+                    return
+
+            # 3) Last resort: ensure LC_CTYPE is UTF-8 so curses uses wide chars.
+            for loc in ("C.UTF-8", "UTF-8"):
+                try:
+                    locale.setlocale(locale.LC_CTYPE, loc)
+                    os.environ["LC_CTYPE"] = loc
+                    return
+                except locale.Error:
+                    continue
+
+        _ensure_utf8_locale()
         curses.wrapper(self._main)
 
     # ── curses entry ─────────────────────────────────────────────────────────
