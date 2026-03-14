@@ -45,6 +45,8 @@ _CTRL_H = 8
 _TAB = ord("\t")
 _CTRL_R = 18
 _CTRL_S = 19
+_CTRL_F = 6   # page-down (like vim)
+_CTRL_B = 2   # page-up   (like vim)
 
 _CTRL_LEFT_KEYS = {443, 545, 548, 553, 554}
 _CTRL_RIGHT_KEYS = {444, 560, 563, 558, 559, 569}
@@ -664,6 +666,9 @@ class ComposePanel:
 
     def _handle_body_key(self, key: int, ch: str) -> str | None:
         ed = self._body_lines[self._body_row]
+        n_lines = len(self._body_lines)
+        h, _ = self.stdscr.getmaxyx()
+        body_page_h = max(1, h - len(_COMPOSE_FIELDS) - 3)
 
         if key in (_ENTER, _CR):
             if ed.mode == "INSERT":
@@ -693,12 +698,20 @@ class ComposePanel:
             self._dd_pending = False
             self._body_row -= 1
             return None
-        if key == curses.KEY_DOWN and self._body_row < len(self._body_lines) - 1:
+        if key == curses.KEY_DOWN and self._body_row < n_lines - 1:
             self._dd_pending = False
             self._body_row += 1
             return None
+        if key == curses.KEY_PPAGE or key == _CTRL_B:
+            self._dd_pending = False
+            self._body_row = max(self._body_row - body_page_h, 0)
+            return None
+        if key == curses.KEY_NPAGE or key == _CTRL_F:
+            self._dd_pending = False
+            self._body_row = min(self._body_row + body_page_h, n_lines - 1)
+            return None
         if ch == "j" and ed.mode == "NORMAL" and (
-            self._body_row < len(self._body_lines) - 1
+            self._body_row < n_lines - 1
         ):
             self._dd_pending = False
             self._body_row += 1
@@ -707,6 +720,15 @@ class ComposePanel:
             self._dd_pending = False
             self._body_row -= 1
             return None
+
+        # Ctrl+→ cross-line: continue to next line when at end of current
+        if _is_ctrl_right(key) and ed.mode == "INSERT":
+            new_pos = _word_right(ed.value, ed.pos)
+            if new_pos >= len(ed.chars) and self._body_row < n_lines - 1:
+                self._body_row += 1
+                self._body_lines[self._body_row].pos = 0
+                self._dd_pending = False
+                return None
 
         # o/O: open new line below/above (NORMAL mode)
         if ch == "o" and ed.mode == "NORMAL":
@@ -812,10 +834,16 @@ class FolderPanel:
         n = len(self._items)
         if n == 0:
             return None
+        h, _ = self.stdscr.getmaxyx()
+        panel_h = max(1, h - 2)
         if ch == "j" or key == curses.KEY_DOWN:
             self._cursor = min(self._cursor + 1, n - 1)
         elif ch == "k" or key == curses.KEY_UP:
             self._cursor = max(self._cursor - 1, 0)
+        elif key == curses.KEY_NPAGE or key == _CTRL_F:
+            self._cursor = min(self._cursor + panel_h, n - 1)
+        elif key == curses.KEY_PPAGE or key == _CTRL_B:
+            self._cursor = max(self._cursor - panel_h, 0)
         elif ch == "g":
             self._cursor = 0
         elif ch == "G":
@@ -825,8 +853,6 @@ class FolderPanel:
         elif ch == "R":
             self._refresh_items()
         # Adjust scroll
-        h, _ = self.stdscr.getmaxyx()
-        panel_h = h - 2  # rough
         if self._cursor < self._scroll:
             self._scroll = self._cursor
         elif self._cursor >= self._scroll + panel_h:
@@ -971,6 +997,9 @@ class MessagePanel:
         if n == 0:
             return None
 
+        h, _ = self.stdscr.getmaxyx()
+        panel_h = max(1, h - 3)
+
         if ch == "j" or key == curses.KEY_DOWN:
             self._cursor = min(self._cursor + 1, n - 1)
         elif ch == "k" or key == curses.KEY_UP:
@@ -981,15 +1010,12 @@ class MessagePanel:
             self._cursor = n - 1
         elif key in (_ENTER, _CR):
             return "open"
-        elif ch == "J":
-            self._scroll = min(self._scroll + 10, max(0, n - 1))
-            self._cursor = max(self._cursor, self._scroll)
-        elif ch == "K":
-            self._scroll = max(self._scroll - 10, 0)
+        elif ch == "J" or key == curses.KEY_NPAGE or key == _CTRL_F:
+            self._cursor = min(self._cursor + panel_h, n - 1)
+        elif ch == "K" or key == curses.KEY_PPAGE or key == _CTRL_B:
+            self._cursor = max(self._cursor - panel_h, 0)
 
         # Adjust scroll
-        h, _ = self.stdscr.getmaxyx()
-        panel_h = h - 3
         if self._cursor < self._scroll:
             self._scroll = self._cursor
         elif self._cursor >= self._scroll + panel_h:
@@ -1215,6 +1241,12 @@ class MessageReader:
         elif ch == "K":
             self._row = max(self._row - page_h, 0)
             self._clamp_char_col_to_line()
+        elif key == curses.KEY_NPAGE or key == _CTRL_F:
+            self._row = min(self._row + page_h, max(0, n - 1))
+            self._clamp_char_col_to_line()
+        elif key == curses.KEY_PPAGE or key == _CTRL_B:
+            self._row = max(self._row - page_h, 0)
+            self._clamp_char_col_to_line()
         elif ch == "h" or key == curses.KEY_LEFT:
             self._char_col = max(0, self._char_col - count)
         elif ch == "l" or key == curses.KEY_RIGHT:
@@ -1225,7 +1257,13 @@ class MessageReader:
             self._char_col = _word_left(cur_line, self._char_col)
         elif _is_ctrl_right(key) or ch == "w":
             cur_line = self._lines[self._row] if self._lines else ""
-            self._char_col = _word_right(cur_line, self._char_col)
+            new_col = _word_right(cur_line, self._char_col)
+            if new_col >= len(cur_line) and self._row < n - 1:
+                # wrap to the start of the next line
+                self._row += 1
+                self._char_col = 0
+            else:
+                self._char_col = new_col
         elif ch == "0":
             self._char_col = 0
         elif ch == "$":
@@ -1358,6 +1396,10 @@ class RetpostoTUI:
         ensure_folder: Callable[..., int],
         save_account: Callable[[dict], int] | None = None,
         set_password: Callable[[int, str], None] | None = None,
+        load_spam_blocks: Callable[[], list[dict]] | None = None,
+        remove_spam_block: Callable[[str], None] | None = None,
+        update_account: Callable[[int, dict], None] | None = None,
+        load_messages_spam: Callable[..., list[dict]] | None = None,
     ) -> None:
         self.stdscr = stdscr
         self._load_accounts = load_accounts
@@ -1377,6 +1419,10 @@ class RetpostoTUI:
         self._ensure_folder = ensure_folder
         self._save_account = save_account
         self._set_password = set_password
+        self._load_spam_blocks = load_spam_blocks
+        self._remove_spam_block = remove_spam_block
+        self._update_account = update_account
+        self._load_messages_spam = load_messages_spam
 
         # Panels
         self._folder_panel = FolderPanel(stdscr, load_accounts, load_folders)
@@ -1446,6 +1492,8 @@ class RetpostoTUI:
         except Exception:
             old_termios = None
 
+        # Half-second tick so transient status messages expire automatically
+        self.stdscr.timeout(500)
         try:
             while True:
                 self._draw()
@@ -1611,6 +1659,9 @@ class RetpostoTUI:
         elif ch == "s":
             self._action_spam()
             return False
+        elif ch == "S":
+            self._show_spam_pane()
+            return False
         elif ch == "*":
             self._action_star()
             return False
@@ -1678,14 +1729,26 @@ class RetpostoTUI:
             self._show_accounts()
         elif cmd == "kontakto" or cmd.startswith("kontaktoj"):
             self._show_contacts()
+        elif cmd == "spamo":
+            self._show_spam_pane()
         elif cmd.startswith("bloki "):
             rule = cmd[6:].strip()
             self._add_spam_block(rule)
             self._status_msg = f"Blokita: {rule}"
         elif cmd.startswith("malbloki "):
             rule = cmd[9:].strip()
-            # We'd need a remove_spam_block callback; for now show hint
-            self._status_msg = f"Uzu CLI: retposto malbloki {rule}"
+            if self._remove_spam_block is not None:
+                self._remove_spam_block(rule)
+                self._status_msg = f"Malblokita: {rule}"
+            else:
+                self._status_msg = f"Uzu CLI: retposto malbloki {rule}"
+        elif cmd.startswith("novdos"):
+            # :novdos FolderName
+            parts = cmd.split(None, 1)
+            if len(parts) < 2 or not parts[1].strip():
+                self._status_msg = "Uzu: :novdos <nomo-de-dosierujo>"
+            else:
+                self._action_create_folder(parts[1].strip())
         else:
             self._status_msg = f"Nekonata komando: :{cmd}"
         return False
@@ -1760,13 +1823,15 @@ class RetpostoTUI:
         if not msg:
             self._status_msg = "Neniu elektita mesaĝo."
             return
+        accounts = self._load_accounts()
+        sig = self._load_signature(accounts[0]) if accounts else ""
         body_quote = "\n".join(
             "> " + line for line in (msg.get("korpo") or "").split("\n")
         )
         self._run_compose({
             "al": msg.get("de") or "",
             "subjekto": "Re: " + (msg.get("subjekto") or ""),
-            "korpo": f"\n\n--- Originala mesaĝo ---\n{body_quote}",
+            "korpo": f"{sig}\n\n--- Originala mesaĝo ---\n{body_quote}",
         })
 
     def _compose_forward(self, msg: dict | None = None) -> None:
@@ -1783,6 +1848,26 @@ class RetpostoTUI:
             "korpo": f"\n\n--- Plusendita mesaĝo ---\n{body_fwd}",
         })
 
+    def _load_signature(self, acc: dict) -> str:
+        """Load signature text for the given account (file path or URL)."""
+        import urllib.request
+        from pathlib import Path
+
+        sig_src = acc.get("subskribo") or ""
+        if not sig_src:
+            return ""
+        sig_src = sig_src.strip()
+        try:
+            if sig_src.startswith(("http://", "https://")):
+                with urllib.request.urlopen(sig_src, timeout=5) as resp:  # noqa: S310
+                    return "\n\n-- \n" + resp.read().decode("utf-8", errors="replace")
+            p = Path(sig_src).expanduser()
+            if p.exists():
+                return "\n\n-- \n" + p.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+        return ""
+
     def _run_compose(self, initial: dict[str, str]) -> None:
         accounts = self._load_accounts()
         if not accounts:
@@ -1790,6 +1875,12 @@ class RetpostoTUI:
             return
 
         acc = accounts[0]
+
+        # Prepend signature if configured
+        if "korpo" not in initial or not initial.get("korpo", "").strip():
+            sig = self._load_signature(acc)
+            if sig:
+                initial = {**initial, "korpo": (initial.get("korpo") or "") + sig}
 
         def _completer(partial: str) -> list[str]:
             return [
@@ -1890,6 +1981,11 @@ class RetpostoTUI:
             self._status_msg = "Neniu elektita mesaĝo."
             return
         sender = msg.get("de") or ""
+        if not self._prompt_confirm_inline(
+            f"Marki kiel spamon kaj bloki '{sender}'? (j/N)"
+        ):
+            self._status_msg = "Nuligita."
+            return
         self._add_spam_block(sender)
         self._update_message_field(msg["id"], spamo=1)
         msg["spamo"] = 1
@@ -1898,8 +1994,14 @@ class RetpostoTUI:
 
     def _mark_spam(self, msg: dict) -> None:
         sender = msg.get("de") or ""
+        if not self._prompt_confirm_inline(
+            f"Marki kiel spamon kaj bloki '{sender}'? (j/N)"
+        ):
+            self._status_msg = "Nuligita."
+            return
         self._add_spam_block(sender)
         self._update_message_field(msg["id"], spamo=1)
+        msg["spamo"] = 1
         self._status_msg = f"Markita kiel spamo: {sender}"
         self._refresh_list()
 
@@ -2004,6 +2106,24 @@ class RetpostoTUI:
         except Exception as exc:
             self._status_msg = f"[!] Eraro: {exc}"
 
+    def _action_create_folder(self, folder_name: str) -> None:
+        """Create a new folder under the currently selected account."""
+        sel = self._folder_panel.selected()
+        if not sel:
+            accounts = self._load_accounts()
+            if not accounts:
+                self._status_msg = "[!] Neniuj kontoj konfiguritaj."
+                return
+            acc_id = accounts[0]["id"]
+        else:
+            acc_id = sel["acc_id"]
+        try:
+            folder_id = self._ensure_folder(acc_id, folder_name, folder_name)
+            self._status_msg = f"[✓] Dosierujo kreita: {folder_name} (id={folder_id})"
+            self._folder_panel._refresh_items()
+        except Exception as exc:
+            self._status_msg = f"[!] Eraro kreante dosierujon: {exc}"
+
     def _refresh_list(self) -> None:
         sel = self._folder_panel.selected()
         if sel:
@@ -2021,14 +2141,228 @@ class RetpostoTUI:
         accounts = self._load_accounts()
         if not accounts:
             lines = ["  Neniuj kontoj konfiguritaj."]
-        else:
-            lines = ["  ID  Retpoŝto                    IMAP                SMTP", ""]
-            for a in accounts:
-                lines.append(
-                    f"  {a['id']:<3} {a['retposto']:<30} "
-                    f"{a['imap_servilo']:<20} {a['smtp_servilo']}"
+            self._run_pager_lines(lines, "Kontoj")
+            return
+        # Interactive account view with edit support
+        self._show_account_management()
+
+    def _show_account_management(self) -> None:
+        """Interactive account list; 'e' edits selected account credentials."""
+        cursor = 0
+        while True:
+            accounts = self._load_accounts()
+            h, w = self.stdscr.getmaxyx()
+            self.stdscr.erase()
+            _safe_addstr(
+                self.stdscr, 0, 0,
+                " Kontoj — e:redakti  s:subskribo  q:reen ".ljust(w - 1),
+                curses.A_REVERSE,
+            )
+            for i, acc in enumerate(accounts):
+                is_cur = i == cursor
+                sub = acc.get("subskribo") or ""
+                sub_hint = f"  [{sub[:20]}]" if sub else ""
+                line = (
+                    f"  {acc['id']:<3} {acc['retposto']:<30} "
+                    f"{acc.get('imap_servilo', ''):<20} "
+                    f"{acc.get('smtp_servilo', '')}{sub_hint}"
                 )
-        self._run_pager_lines(lines, "Kontoj")
+                attr = curses.A_STANDOUT if is_cur else curses.A_NORMAL
+                _safe_addstr(self.stdscr, i + 1, 0, line[:w - 1].ljust(w - 1), attr)
+            _safe_addstr(
+                self.stdscr, h - 1, 0,
+                " j/k:↕  e:redakti  s:subskribo  q:reen ".ljust(w - 1),
+                curses.A_REVERSE,
+            )
+            self.stdscr.refresh()
+            if not accounts:
+                break
+            n = len(accounts)
+            key = _getch_unicode(self.stdscr)
+            if key == -1:
+                continue
+            ch = chr(key) if 0 < key < 256 else ""
+            if ch == "q" or key in (_ESC, _CTRL_C, _CTRL_D):
+                break
+            if ch == "j" or key == curses.KEY_DOWN:
+                cursor = min(cursor + 1, n - 1)
+            elif ch == "k" or key == curses.KEY_UP:
+                cursor = max(cursor - 1, 0)
+            elif ch == "e":
+                acc = accounts[cursor]
+                self._edit_account(acc)
+            elif ch == "s":
+                acc = accounts[cursor]
+                self._edit_account_signature(acc)
+
+    def _edit_account(self, acc: dict) -> None:
+        """Let the user update IMAP/SMTP credentials for an account."""
+        if self._update_account is None:
+            self._status_msg = "[!] Ĝisdatigi konton ne eblas: mankas subtenon."
+            return
+        fields = [
+            ("nomo", "Nomo"),
+            ("imap_servilo", "IMAP servilo"),
+            ("imap_haveno", "IMAP haveno"),
+            ("smtp_servilo", "SMTP servilo"),
+            ("smtp_haveno", "SMTP haveno"),
+        ]
+        updates: dict[str, Any] = {}
+        for key_name, label in fields:
+            current = str(acc.get(key_name) or "")
+            new_val = self._prompt_inline(f"{label} [{current}]")
+            if new_val == "":
+                continue  # keep existing
+            updates[key_name] = new_val
+        # Optionally update password
+        new_pw = self._prompt_inline(
+            "Nova pasvorto (lasu malplena por konservi)", secret=True
+        )
+        if updates:
+            try:
+                self._update_account(acc["id"], updates)
+                self._status_msg = "[✓] Konto ĝisdatigita."
+            except Exception as exc:
+                self._status_msg = f"[!] Eraro: {exc}"
+        if new_pw and self._set_password is not None:
+            try:
+                self._set_password(acc["id"], new_pw)
+                self._status_msg = "[✓] Pasvorto ĝisdatigita."
+            except Exception as exc:
+                self._status_msg = f"[!] Eraro pasvorto: {exc}"
+
+    def _edit_account_signature(self, acc: dict) -> None:
+        """Set or clear the signature for an account."""
+        if self._update_account is None:
+            self._status_msg = "[!] Ĝisdatigi konton ne eblas: mankas subtenon."
+            return
+        current = acc.get("subskribo") or ""
+        new_val = self._prompt_inline(
+            f"Subskribo dosiero/URL [{current}] (lasu malplena por forigi)"
+        )
+        try:
+            self._update_account(acc["id"], {"subskribo": new_val})
+            if new_val:
+                self._status_msg = f"[✓] Subskribo agordita: {new_val}"
+            else:
+                self._status_msg = "[✓] Subskribo forigita."
+        except Exception as exc:
+            self._status_msg = f"[!] Eraro: {exc}"
+
+    def _show_spam_pane(self) -> None:
+        """Show blocked senders and spam messages; allow restoring them."""
+        cursor = 0
+        section = 0  # 0=blocks, 1=spam messages
+
+        while True:
+            h, w = self.stdscr.getmaxyx()
+            self.stdscr.erase()
+
+            _safe_addstr(
+                self.stdscr, 0, 0,
+                " Spamo — Tab:sekcio  u:malbloki/restarigi  q:reen ".ljust(w - 1),
+                curses.A_REVERSE,
+            )
+
+            blocks: list[dict] = []
+            if self._load_spam_blocks is not None:
+                blocks = self._load_spam_blocks()
+
+            spam_msgs: list[dict] = []
+            if self._load_messages_spam is not None:
+                spam_msgs = self._load_messages_spam(spamo=True)
+            else:
+                spam_msgs = self._load_messages(spamo=True)
+
+            # Layout: top half = blocks, bottom half = spam messages
+            mid = (h - 2) // 2
+            row = 1
+            _safe_addstr(
+                self.stdscr, row, 0,
+                f" ── Blokitaj adresoj ({len(blocks)}) ".ljust(w - 1),
+                curses.A_BOLD if section == 0 else curses.A_DIM,
+            )
+            row += 1
+            for i, blk in enumerate(blocks):
+                is_cur = section == 0 and i == cursor
+                attr = curses.A_STANDOUT if is_cur else curses.A_NORMAL
+                line = f"  {blk.get('regulo', '')}"
+                added = blk.get("kreita_je", "")[:10]
+                if added:
+                    line += f"  ({added})"
+                _safe_addstr(self.stdscr, row, 0, line[:w - 1].ljust(w - 1), attr)
+                row += 1
+                if row >= mid:
+                    break
+
+            row = mid + 1
+            _safe_addstr(
+                self.stdscr, mid, 0,
+                f" ── Spamaj mesaĝoj ({len(spam_msgs)}) ".ljust(w - 1),
+                curses.A_BOLD if section == 1 else curses.A_DIM,
+            )
+            for i, msg in enumerate(spam_msgs):
+                is_cur = section == 1 and i == cursor
+                attr = curses.A_STANDOUT if is_cur else curses.A_NORMAL
+                sender = (msg.get("de") or "")[:25]
+                subj = (msg.get("subjekto") or "")[:30]
+                line = f"  {sender:<25}  {subj}"
+                _safe_addstr(self.stdscr, row, 0, line[:w - 1].ljust(w - 1), attr)
+                row += 1
+                if row >= h - 1:
+                    break
+
+            _safe_addstr(
+                self.stdscr, h - 1, 0,
+                " j/k:↕  Tab:sekcio  u:malbloki/restarigi  q:reen ".ljust(w - 1),
+                curses.A_REVERSE,
+            )
+            self.stdscr.refresh()
+
+            key = _getch_unicode(self.stdscr)
+            if key == -1:
+                continue
+            ch = chr(key) if 0 < key < 256 else ""
+
+            if ch == "q" or key in (_ESC, _CTRL_C, _CTRL_D):
+                break
+            if key == _TAB:
+                section = 1 - section
+                cursor = 0
+            elif ch == "j" or key == curses.KEY_DOWN:
+                n = len(blocks) if section == 0 else len(spam_msgs)
+                cursor = min(cursor + 1, max(0, n - 1))
+            elif ch == "k" or key == curses.KEY_UP:
+                cursor = max(cursor - 1, 0)
+            elif key == curses.KEY_NPAGE or key == _CTRL_F:
+                n = len(blocks) if section == 0 else len(spam_msgs)
+                cursor = min(cursor + (h // 4), max(0, n - 1))
+            elif key == curses.KEY_PPAGE or key == _CTRL_B:
+                cursor = max(cursor - (h // 4), 0)
+            elif ch == "u":
+                if section == 0:
+                    # Unblock selected address
+                    if blocks and cursor < len(blocks):
+                        rule = blocks[cursor]["regulo"]
+                        if self._remove_spam_block is not None:
+                            if self._prompt_confirm_inline(
+                                f"Malbloki '{rule}'? (j/N)"
+                            ):
+                                self._remove_spam_block(rule)
+                                self._status_msg = f"Malblokita: {rule}"
+                                cursor = max(0, cursor - 1)
+                        else:
+                            self._status_msg = f"Uzu CLI: retposto malbloki {rule}"
+                else:
+                    # Restore spam message (un-spam)
+                    if spam_msgs and cursor < len(spam_msgs):
+                        msg = spam_msgs[cursor]
+                        if self._prompt_confirm_inline(
+                            f"Restarigi '{msg.get('subjekto', '')}' el spamo? (j/N)"
+                        ):
+                            self._update_message_field(msg["id"], spamo=0)
+                            self._status_msg = "Restarigita el spamo."
+                            cursor = max(0, cursor - 1)
 
     def _show_contacts(self) -> None:
         contacts = self._load_contacts()
@@ -2047,6 +2381,7 @@ class RetpostoTUI:
         row = 0
         while True:
             h, w = self.stdscr.getmaxyx()
+            page_h = max(1, h - 2)
             self.stdscr.erase()
             _safe_addstr(
                 self.stdscr, 0, 0,
@@ -2062,10 +2397,12 @@ class RetpostoTUI:
                 )
             _safe_addstr(
                 self.stdscr, h - 1, 0,
-                " j/k:↕  q:reen ".ljust(w - 1), curses.A_REVERSE
+                " j/k:↕  PgDn/PgUp:paĝo  q:reen ".ljust(w - 1), curses.A_REVERSE
             )
             self.stdscr.refresh()
             key = _getch_unicode(self.stdscr)
+            if key == -1:
+                continue
             ch = chr(key) if 0 < key < 256 else ""
             if ch == "q" or key in (_ESC, _CTRL_C, _CTRL_D):
                 break
@@ -2073,6 +2410,10 @@ class RetpostoTUI:
                 row = min(row + 1, max(0, len(lines) - h + 2))
             elif ch == "k" or key == curses.KEY_UP:
                 row = max(row - 1, 0)
+            elif key == curses.KEY_NPAGE or key == _CTRL_F:
+                row = min(row + page_h, max(0, len(lines) - h + 2))
+            elif key == curses.KEY_PPAGE or key == _CTRL_B:
+                row = max(row - page_h, 0)
             elif ch == "G":
                 row = max(0, len(lines) - h + 2)
             elif ch == "g":
