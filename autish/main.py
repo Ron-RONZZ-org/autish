@@ -2,7 +2,7 @@
 
 import typer
 
-from autish.commands import bluetooth, kp, shelo, sistemo, tempo, vorto, wifi
+from autish.commands import bluetooth, kp, retposto, shelo, sistemo, tempo, vorto, wifi
 
 app = typer.Typer(
     name="autish",
@@ -19,6 +19,7 @@ app.add_typer(sistemo.app, name="sistemo")
 app.add_typer(kp.app, name="kp")
 app.add_typer(shelo.app, name="shelo")
 app.add_typer(vorto.app, name="vorto")
+app.add_typer(retposto.app, name="retposto")
 
 
 @app.command("help")
