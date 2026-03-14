@@ -461,6 +461,22 @@ class TestSerci:
         assert result.exit_code == 0
         assert "0 rezulto" in result.output
 
+    def test_fuzzy_fallback_enabled_by_default(self):
+        entries = [_make_entry(teksto="saluton")]
+        with patch(_LOAD, return_value=entries):
+            result = runner.invoke(app, ["vorto", "serci", "saluotn"])
+        assert result.exit_code == 0
+        assert "similajn kongruojn" in result.output
+        assert "saluton" in result.output
+
+    def test_preciza_flag_disables_fuzzy_fallback(self):
+        entries = [_make_entry(teksto="saluton")]
+        with patch(_LOAD, return_value=entries):
+            result = runner.invoke(app, ["vorto", "serci", "saluotn", "--preciza"])
+        assert result.exit_code == 0
+        assert "similajn kongruojn" not in result.output
+        assert "0 rezulto" in result.output
+
 
 class TestForigi:
     def test_deletes_entry(self):

@@ -21,6 +21,7 @@ import sqlite3
 import sys
 import uuid as _uuid_mod
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import typer
@@ -402,6 +403,23 @@ def _find_entry(uid_or_teksto: str, entries: list[dict]) -> dict | None:
     return None
 
 
+def _fuzzy_text_matches(entries: list[dict], query: str, limit: int = 50) -> list[dict]:
+    """Return entries whose teksto is close to query, sorted by similarity."""
+    q = query.strip().lower()
+    if not q:
+        return []
+    scored: list[tuple[float, dict]] = []
+    for entry in entries:
+        text = (entry.get("teksto") or "").lower()
+        if not text:
+            continue
+        ratio = SequenceMatcher(None, q, text).ratio()
+        if ratio >= 0.62:
+            scored.append((ratio, entry))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [entry for _, entry in scored[:limit]]
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Display helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -726,6 +744,9 @@ def serci(
     regex: bool = typer.Option(
         False, "-r", "--regex", help="Interpret teksto as a POSIX regex."
     ),
+    preciza: bool = typer.Option(
+        False, "-p", "--preciza", help="Disable fuzzy fallback matching."
+    ),
     limo: int = typer.Option(50, "--limo", help="Max number of results (default 50)."),
     ordo: str = typer.Option(
         "graveco",
@@ -737,6 +758,7 @@ def serci(
     """Search the wordbank. No filters → list all entries up to --limo."""
     entries = _load_entries()
     results = list(entries)
+    fuzzy_used = False
 
     # Text filter
     if teksto:
@@ -750,6 +772,9 @@ def serci(
         else:
             low = teksto.lower()
             results = [e for e in results if low in e["teksto"].lower()]
+            if not results and not preciza:
+                fuzzy_used = True
+                results = _fuzzy_text_matches(entries=entries, query=teksto, limit=limo)
 
     # Property filters
     if lingvo:
@@ -788,6 +813,8 @@ def serci(
     if limo > 0:
         results = results[:limo]
 
+    if fuzzy_used:
+        typer.echo("Neniu preciza rezulto; montrante similajn kongruojn.")
     typer.echo(f"{len(results)} rezulto(j) trovita(j).")
     _display_results(results)
 

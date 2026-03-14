@@ -125,7 +125,7 @@ Instead of prefixing every command with `poetry run`, you can activate the
 virtualenv directly:
 
 ```bash
-poetry shell          # spawns a subshell with the venv active
+eval $(poetry env activate) # spawns a subshell with the venv active
 autish --help         # works without the prefix
 exit                  # return to your normal shell
 ```

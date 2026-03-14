@@ -19,6 +19,7 @@ from __future__ import annotations
 import curses
 import locale
 from collections.abc import Callable
+from difflib import SequenceMatcher
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Key constants
@@ -1769,14 +1770,36 @@ class VortoTUI:
 
     def _do_serci(self, query: str) -> None:
         entries = self._load_entries()
+        query = query.strip()
+        precise = False
+        if query.lower().endswith("/p"):
+            query = query[:-2].rstrip()
+            precise = True
+
+        fuzzy_used = False
         if query:
             low = query.lower()
             found = [e for e in entries if low in e["teksto"].lower()][:50]
+            if not found and not precise:
+                fuzzy_used = True
+                scored: list[tuple[float, dict]] = []
+                for entry in entries:
+                    text = (entry.get("teksto") or "").lower()
+                    if not text:
+                        continue
+                    ratio = SequenceMatcher(None, low, text).ratio()
+                    if ratio >= 0.62:
+                        scored.append((ratio, entry))
+                scored.sort(key=lambda item: item[0], reverse=True)
+                found = [entry for _, entry in scored[:50]]
         else:
             found = entries[:50]
         lines = self._render_results(found)
         title = f"Serĉi: {query!r}" if query else "Ĉiuj vortoj (maks 50)"
-        self._status_msg = f"{len(found)} rezulto(j)."
+        if fuzzy_used:
+            self._status_msg = f"{len(found)} similaj rezultoj (fuzzy)."
+        else:
+            self._status_msg = f"{len(found)} rezulto(j)."
         # entry_line_offset=2: header + separator rows before data rows
         while True:
             pager = Pager(
