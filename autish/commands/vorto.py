@@ -372,6 +372,8 @@ def _parse_etikedo(items: list[str] | None) -> dict[str, str]:
 
 def _find_entry(uid_or_teksto: str, entries: list[dict]) -> dict | None:
     """Locate an entry by exact UUID, UUID prefix, or case-insensitive exact text."""
+    # Tolerate a leading '#' (e.g. '#ee8212a9')
+    uid_or_teksto = uid_or_teksto.strip().lstrip("#")
     # Exact UUID match
     for e in entries:
         if e["uuid"] == uid_or_teksto:
@@ -561,7 +563,7 @@ def aldoni(
         help="Custom tag KEY:VALUE. Repeat flag for multiple.",
     ),
     ligilo: list[str] | None = typer.Option(
-        None, "--ligilo", help="Linked entry UUID(s). Repeat flag for multiple."
+        None, "-L", "--ligilo", help="Linked entry UUID(s). Repeat flag for multiple."
     ),
 ) -> None:
     """Add a new word, phrase, or sentence to the wordbank."""
@@ -572,16 +574,18 @@ def aldoni(
     now = _now_iso()
     entry: dict = {
         "uuid": str(_uuid_mod.uuid4()),
-        "teksto": teksto,
-        "lingvo": lingvo,
-        "kategorio": _detect_kategorio(teksto),
-        "tipo": _normalize_tipo(tipo),
-        "temo": temo,
-        "tono": _normalize_tono(tono),
+        "teksto": teksto.strip(),
+        "lingvo": lingvo.strip() if lingvo else lingvo,
+        "kategorio": _detect_kategorio(teksto.strip()),
+        "tipo": _normalize_tipo(tipo.strip() if tipo else tipo),
+        "temo": temo.strip() if temo else temo,
+        "tono": _normalize_tono(tono.strip() if tono else tono),
         "nivelo": nivelo,
-        "difinoj": difino or [],
+        "difinoj": [t for s in difino if (t := s.strip())] if difino else [],
         "etikedoj": _parse_etikedo(etikedo),
-        "ligiloj": ligilo or [],
+        "ligiloj": (
+            [t.lstrip("#") for s in ligilo if (t := s.strip())] if ligilo else []
+        ),
         "kreita_je": now,
         "modifita_je": now,
     }
@@ -647,7 +651,7 @@ def modifi(
         None, "-e", "--etikedo", help="New tags KEY:VALUE (replaces existing)."
     ),
     ligilo: list[str] | None = typer.Option(
-        None, "--ligilo", help="New linked UUIDs (replaces existing)."
+        None, "-L", "--ligilo", help="New linked UUIDs (replaces existing)."
     ),
 ) -> None:
     """Modify a wordbank entry. Pass at least one option to update."""
@@ -669,24 +673,25 @@ def modifi(
     old_entry = dict(entry)
 
     if teksto is not None:
+        teksto = teksto.strip()
         entry["teksto"] = teksto
         entry["kategorio"] = _detect_kategorio(teksto)
     if lingvo is not None:
-        entry["lingvo"] = lingvo
+        entry["lingvo"] = lingvo.strip()
     if tipo is not None:
-        entry["tipo"] = _normalize_tipo(tipo)
+        entry["tipo"] = _normalize_tipo(tipo.strip())
     if temo is not None:
-        entry["temo"] = temo
+        entry["temo"] = temo.strip()
     if tono is not None:
-        entry["tono"] = _normalize_tono(tono)
+        entry["tono"] = _normalize_tono(tono.strip())
     if nivelo is not None:
         entry["nivelo"] = nivelo
     if difino is not None:
-        entry["difinoj"] = difino
+        entry["difinoj"] = [t for s in difino if (t := s.strip())]
     if etikedo is not None:
         entry["etikedoj"] = _parse_etikedo(etikedo)
     if ligilo is not None:
-        entry["ligiloj"] = ligilo
+        entry["ligiloj"] = [t.lstrip("#") for s in ligilo if (t := s.strip())]
     entry["modifita_je"] = _now_iso()
 
     if not _show_diff_confirmation("modifi", entry, old_entry):
