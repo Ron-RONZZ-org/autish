@@ -507,7 +507,7 @@ _FORM_FIELDS = [
     ("tono",       "Tono (nf/fo/am)"),
     ("nivelo",     "Nivelo 1–10"),
     ("etikedoj",   "Etikedoj KEY:VAL …"),
-    ("ligiloj",    "Ligiloj (UUID …)"),
+    ("ligiloj",    "Ligiloj (UUID — sep: ;)"),
 ]
 
 
@@ -553,8 +553,10 @@ class FormEditor:
 
         Returns values dict or None.
         """
-        curses.curs_set(1)
         while True:
+            # Show cursor only when the focused field is in INSERT mode.
+            current_mode = self.editors[self.current_row].mode
+            curses.curs_set(1 if current_mode == "INSERT" else 0)
             self._render()
             key = _getch_unicode(self.stdscr)
             result = self._handle_key(key)
@@ -674,7 +676,11 @@ class FormEditor:
                     d[k.strip()] = v.strip()
                 vals[key] = d
             elif key == "ligiloj":
-                vals[key] = [s.strip() for s in raw.split() if s.strip()]
+                vals[key] = [
+                    t.lstrip("#")
+                    for s in raw.split(";")
+                    if (t := s.strip())
+                ]
             elif key == "nivelo":
                 try:
                     vals[key] = float(raw) if raw else None
@@ -1978,7 +1984,7 @@ class VortoTUI:
             ch = chr(key) if 0 < key < 256 else ""
             if key in (_ENTER, _CR):
                 curses.curs_set(0)
-                return buf.strip()
+                return buf.strip().lstrip("#")
             if key == _ESC or key in (_CTRL_C, _CTRL_D):
                 curses.curs_set(0)
                 return ""
