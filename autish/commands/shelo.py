@@ -29,6 +29,9 @@ _EXIT_WORDS = frozenset({"eliru", "exit", "q", "quit"})
 _HISTORY_FILE = Path.home() / ".local" / "share" / "autish" / "shelo_history"
 _MAX_HISTORY = 500
 
+# Last /query results — lets the user type a number to execute one
+_last_query_results: list[str] = []
+
 # readline is optional — not available on all platforms/environments
 try:
     import readline as _readline
@@ -72,8 +75,10 @@ def _save_history() -> None:
 
 def _search_history(query: str) -> None:
     """Print the last 5 history entries that contain *query*."""
+    global _last_query_results
     if not _HAS_READLINE:
         typer.echo("Historio ne disponebla en ĉi tiu medio.")
+        _last_query_results = []
         return
     try:
         found: list[str] = []
@@ -85,12 +90,15 @@ def _search_history(query: str) -> None:
                 if len(found) >= 5:
                     break
         if found:
+            _last_query_results = found
             typer.echo("Trovita en historio:")
             for j, cmd in enumerate(found, 1):
                 typer.echo(f"  {j}) {cmd}")
         else:
+            _last_query_results = []
             typer.echo(f"Neniu historio trovita por: {query!r}")
     except Exception:
+        _last_query_results = []
         typer.echo("Historio ne disponebla en ĉi tiu medio.")
 
 
@@ -124,6 +132,24 @@ def shelo(ctx: typer.Context) -> None:
             if line.startswith("/") and len(line) > 1:
                 _search_history(line[1:])
                 continue
+
+            # Numeric selection from the last /query results
+            if _last_query_results and line.isdigit():
+                idx = int(line) - 1
+                if 0 <= idx < len(_last_query_results):
+                    line = _last_query_results[idx]
+                    typer.echo(f"Ekzekutas: {line}")
+                else:
+                    typer.echo(
+                        f"Nevalida elekto: {line!r}  "
+                        f"(valida: 1–{len(_last_query_results)})",
+                        err=True,
+                    )
+                    _last_query_results.clear()
+                    continue
+                _last_query_results.clear()
+            else:
+                _last_query_results.clear()
 
             try:
                 args = shlex.split(line)
