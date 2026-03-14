@@ -724,7 +724,7 @@ class ComposePanel:
         # Ctrl+→ cross-line: continue to next line when at end of current
         if _is_ctrl_right(key) and ed.mode == "INSERT":
             new_pos = _word_right(ed.value, ed.pos)
-            if new_pos >= len(ed.chars) and self._body_row < n_lines - 1:
+            if new_pos >= len(ed.value) and self._body_row < n_lines - 1:
                 self._body_row += 1
                 self._body_lines[self._body_row].pos = 0
                 self._dd_pending = False
@@ -1831,7 +1831,7 @@ class RetpostoTUI:
         self._run_compose({
             "al": msg.get("de") or "",
             "subjekto": "Re: " + (msg.get("subjekto") or ""),
-            "korpo": f"{sig}\n\n--- Originala mesaĝo ---\n{body_quote}",
+            "korpo": f"--- Originala mesaĝo ---\n{body_quote}\n{sig}",
         })
 
     def _compose_forward(self, msg: dict | None = None) -> None:
@@ -1858,9 +1858,12 @@ class RetpostoTUI:
             return ""
         sig_src = sig_src.strip()
         try:
-            if sig_src.startswith(("http://", "https://")):
+            if sig_src.startswith("https://"):
                 with urllib.request.urlopen(sig_src, timeout=5) as resp:  # noqa: S310
                     return "\n\n-- \n" + resp.read().decode("utf-8", errors="replace")
+            if sig_src.startswith("http://"):
+                # HTTP (non-TLS) signatures are intentionally rejected for security.
+                return ""
             p = Path(sig_src).expanduser()
             if p.exists():
                 return "\n\n-- \n" + p.read_text(encoding="utf-8", errors="replace")

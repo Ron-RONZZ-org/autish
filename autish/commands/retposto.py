@@ -289,6 +289,8 @@ def _update_account(account_id: int, fields: dict) -> None:
                 pass
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [account_id]
+    # Column names come exclusively from _KONTO_UPDATABLE_COLS (checked above),
+    # so the f-string interpolation is safe from SQL injection.
     with _get_db() as con:
         con.execute(f"UPDATE konto SET {set_clause} WHERE id = ?", values)
 
