@@ -25,7 +25,10 @@ Modes (RetpostoTUI level)
 from __future__ import annotations
 
 import curses
+import sys
+import termios
 import textwrap
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -41,6 +44,16 @@ _CTRL_D = 4
 _CTRL_H = 8
 _TAB = ord("\t")
 _CTRL_R = 18
+_CTRL_S = 19
+
+_CTRL_LEFT_KEYS = {443, 545, 548, 553, 554}
+_CTRL_RIGHT_KEYS = {444, 560, 563, 558, 559, 569}
+_CURSES_SLEFT = getattr(curses, "KEY_SLEFT", -1)
+_CURSES_SRIGHT = getattr(curses, "KEY_SRIGHT", -1)
+if _CURSES_SLEFT != -1:
+    _CTRL_LEFT_KEYS.add(_CURSES_SLEFT)
+if _CURSES_SRIGHT != -1:
+    _CTRL_RIGHT_KEYS.add(_CURSES_SRIGHT)
 
 
 def _safe_addstr(win: Any, row: int, col: int, text: str, attr: int = 0) -> None:
@@ -72,6 +85,48 @@ def _getch_unicode(win: Any) -> int:
 
 def _is_backspace(key: int) -> bool:
     return key in (curses.KEY_BACKSPACE, 127, _CTRL_H)
+
+
+def _key_to_char(key: int) -> str:
+    """Convert an integer key code to a Unicode character if possible."""
+    if key <= 0:
+        return ""
+    if _is_ctrl_left(key) or _is_ctrl_right(key):
+        return ""
+    try:
+        ch = chr(key)
+    except ValueError:
+        return ""
+    if ch == "\x00":
+        return ""
+    return ch
+
+
+def _is_ctrl_left(key: int) -> bool:
+    return key in _CTRL_LEFT_KEYS
+
+
+def _is_ctrl_right(key: int) -> bool:
+    return key in _CTRL_RIGHT_KEYS
+
+
+def _word_left(text: str, pos: int) -> int:
+    i = max(0, min(pos, len(text)))
+    while i > 0 and text[i - 1].isspace():
+        i -= 1
+    while i > 0 and not text[i - 1].isspace():
+        i -= 1
+    return i
+
+
+def _word_right(text: str, pos: int) -> int:
+    n = len(text)
+    i = max(0, min(pos, n))
+    while i < n and not text[i].isspace():
+        i += 1
+    while i < n and text[i].isspace():
+        i += 1
+    return i
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -153,6 +208,7 @@ class LineEditor:
         self.pos: int = len(self.chars)
         self.mode: str = "INSERT" if insert_mode else "NORMAL"
         self._view_start: int = 0
+        self._visual_anchor: int = self.pos
 
     @property
     def value(self) -> str:
@@ -174,17 +230,56 @@ class LineEditor:
             self._view_start = self.pos - width + 1
 
         visible = "".join(self.chars)[self._view_start: self._view_start + width]
-        attr = curses.A_BOLD if focused else curses.A_NORMAL
+        if focused:
+            if self.mode == "INSERT":
+                attr = curses.A_UNDERLINE
+            elif self.mode in ("VISUAL_CHAR", "VISUAL_LINE"):
+                attr = curses.A_STANDOUT
+            else:
+                attr = curses.A_BOLD
+        else:
+            attr = curses.A_NORMAL
         _safe_addstr(win, row, col, visible.ljust(width)[:width], attr)
 
-        if focused and self.mode == "INSERT":
+        if focused:
             cursor_col = col + self.pos - self._view_start
-            return (row, min(cursor_col, col + width - 1))
+            cursor_col = min(cursor_col, col + width - 1)
+            # Visual range highlight.
+            if self.mode == "VISUAL_CHAR":
+                s = min(self._visual_anchor, self.pos)
+                e = max(self._visual_anchor, self.pos)
+                for idx in range(s, e + 1):
+                    vi = idx - self._view_start
+                    if 0 <= vi < width:
+                        char = visible[vi] if vi < len(visible.rstrip()) else " "
+                        _safe_addstr(win, row, col + vi, char, curses.A_STANDOUT)
+            elif self.mode == "VISUAL_LINE":
+                _safe_addstr(
+                    win, row, col, visible.ljust(width)[:width], curses.A_STANDOUT
+                )
+
+            # Cursor model:
+            # - INSERT: static vertical bar
+            # - NORMAL/VISUAL: highlighted current character
+            if self.mode == "INSERT":
+                bar_col = min(max(0, self.pos - self._view_start), width - 1)
+                _safe_addstr(win, row, col + bar_col, "|", curses.A_BOLD)
+            elif self.mode in ("NORMAL", "VISUAL_CHAR", "VISUAL_LINE"):
+                char_in_view = self.pos - self._view_start
+                if 0 <= char_in_view < width:
+                    rstrip_len = len(visible.rstrip())
+                    char = visible[char_in_view] if char_in_view < rstrip_len else " "
+                    _safe_addstr(win, row, col + char_in_view, char, curses.A_STANDOUT)
+            try:
+                win.move(row, cursor_col)
+            except curses.error:
+                pass
+            return (row, cursor_col)
         return None
 
     def handle_key(self, key: int) -> bool:
         """Handle a key press. Returns True if key was consumed."""
-        ch = chr(key) if 0 < key < 256 else ""
+        ch = _key_to_char(key)
         if self.mode == "INSERT":
             if key in (_ENTER, _CR):
                 return False  # let caller handle
@@ -192,6 +287,10 @@ class LineEditor:
                 if self.pos > 0:
                     del self.chars[self.pos - 1]
                     self.pos -= 1
+            elif _is_ctrl_left(key):
+                self.pos = _word_left(self.value, self.pos)
+            elif _is_ctrl_right(key):
+                self.pos = _word_right(self.value, self.pos)
             elif key == curses.KEY_LEFT:
                 self.pos = max(0, self.pos - 1)
             elif key == curses.KEY_RIGHT:
@@ -206,6 +305,29 @@ class LineEditor:
                 self.chars.insert(self.pos, ch)
                 self.pos += 1
             return True
+        if self.mode in ("VISUAL_CHAR", "VISUAL_LINE"):
+            if key == _ESC:
+                self.mode = "NORMAL"
+                return True
+            if ch == "v" and self.mode == "VISUAL_CHAR":
+                self.mode = "NORMAL"
+                return True
+            if ch == "V" and self.mode == "VISUAL_LINE":
+                self.mode = "NORMAL"
+                return True
+            if ch == "h" or key == curses.KEY_LEFT:
+                self.pos = max(0, self.pos - 1)
+            elif ch == "l" or key == curses.KEY_RIGHT:
+                self.pos = min(len(self.chars), self.pos + 1)
+            elif _is_ctrl_left(key) or ch == "b":
+                self.pos = _word_left(self.value, self.pos)
+            elif _is_ctrl_right(key) or ch == "w":
+                self.pos = _word_right(self.value, self.pos)
+            elif ch == "0":
+                self.pos = 0
+            elif ch == "$":
+                self.pos = len(self.chars)
+            return True
         else:  # NORMAL
             if ch == "i":
                 self.mode = "INSERT"
@@ -215,10 +337,20 @@ class LineEditor:
             elif ch == "A":
                 self.mode = "INSERT"
                 self.pos = len(self.chars)
+            elif ch == "v":
+                self.mode = "VISUAL_CHAR"
+                self._visual_anchor = self.pos
+            elif ch == "V":
+                self.mode = "VISUAL_LINE"
+                self._visual_anchor = self.pos
             elif ch == "h" or key == curses.KEY_LEFT:
                 self.pos = max(0, self.pos - 1)
             elif ch == "l" or key == curses.KEY_RIGHT:
                 self.pos = min(len(self.chars), self.pos + 1)
+            elif _is_ctrl_left(key) or ch == "b":
+                self.pos = _word_left(self.value, self.pos)
+            elif _is_ctrl_right(key) or ch == "w":
+                self.pos = _word_right(self.value, self.pos)
             elif ch == "0":
                 self.pos = 0
             elif ch == "$":
@@ -270,9 +402,15 @@ class ComposePanel:
         self._current_field: int = 0  # index into _COMPOSE_FIELDS
         self._body_row: int = 0
         self._completer = contact_completer
-        self._status: str = "Ctrl+S:sendi  Esc:nuligi  Tab:sekva kampo"
+        self._status: str = (
+            "Tab/Shift+Tab:kampo  v/V:VIDA  :wq sendi  :w skizo  :q nuligi  Ctrl+S"
+        )
         self._complete_list: list[str] = []
         self._complete_idx: int = -1
+        self._dd_pending: bool = False
+        self._body_scroll: int = 0
+        self._mode: str = "FIELD"  # FIELD | CMD
+        self._cmd_buf: str = ""
 
     def _field_names(self) -> list[str]:
         return [k for k, _ in _COMPOSE_FIELDS]
@@ -299,7 +437,7 @@ class ComposePanel:
         h, w = self.stdscr.getmaxyx()
         self.stdscr.erase()
 
-        header = " ✉  Komponi — Ctrl+S:sendi  Tab:sekva kampo  Esc:nuligi "
+        header = " ✉  Komponi — Ctrl+S:sendi  :w skizo  :q nuligi "
         _safe_addstr(self.stdscr, 0, 0, header[:w - 1].ljust(w - 1), curses.A_REVERSE)
 
         label_w = 10
@@ -340,8 +478,15 @@ class ComposePanel:
         body_height = h - body_start_row - 2
         body_focused = self._is_body()
 
+        # Keep body_scroll so cursor line is visible
+        if body_focused:
+            if self._body_row < self._body_scroll:
+                self._body_scroll = self._body_row
+            elif self._body_row >= self._body_scroll + body_height:
+                self._body_scroll = self._body_row - body_height + 1
+
         for bi in range(body_height):
-            li = bi  # simple, no scroll for now
+            li = bi + self._body_scroll
             scr_row = body_start_row + bi
             if scr_row >= h - 2:
                 break
@@ -363,10 +508,22 @@ class ComposePanel:
                 hint[:w - 1].ljust(w - 1), curses.A_DIM
             )
 
-        # Status bar
+        # Status bar — show command line or current editor mode
+        if self._mode == "CMD":
+            status_line = f":{self._cmd_buf}█"
+        else:
+            ed = self._current_editor()
+            if ed is not None and ed.mode == "INSERT":
+                mode_pfx = "-- INSERT --  "
+            elif ed is not None and ed.mode == "NORMAL":
+                mode_pfx = "-- NORMAL --  "
+            else:
+                mode_pfx = ""
+            status_line = mode_pfx + self._status
+        status_line = status_line[:w - 1].ljust(w - 1)
         _safe_addstr(
             self.stdscr, h - 1, 0,
-            self._status[:w - 1].ljust(w - 1), curses.A_REVERSE
+            status_line, curses.A_REVERSE
         )
 
         if focused_cursor:
@@ -379,15 +536,33 @@ class ComposePanel:
 
     def handle_key(self, key: int) -> str | None:
         """Returns 'send', 'cancel', or None to keep composing."""
-        ch = chr(key) if 0 < key < 256 else ""
+        ch = _key_to_char(key)
+        ed = self._current_editor()
+
+        if self._mode == "CMD":
+            return self._cmd_key(key, ch)
 
         # Global shortcuts
         if key == _CTRL_C or key == _CTRL_D:
             return "cancel"
-        if key == _ESC:
-            return "cancel"
-        if key == 19:  # Ctrl+S
+        if key == _CTRL_S:
             return "send"
+
+        # Enter command mode (vim-style) from NORMAL mode.
+        if ch == ":" and ed is not None and ed.mode == "NORMAL":
+            self._mode = "CMD"
+            self._cmd_buf = ""
+            return None
+
+        # Esc should behave like vim: leave INSERT, do not cancel form.
+        if key == _ESC:
+            if ed is not None and ed.mode == "INSERT":
+                ed.handle_key(key)
+            else:
+                self._status = "Uzu :wq por sendi aŭ :q por nuligi."
+            self._complete_list = []
+            self._dd_pending = False
+            return None
 
         # Tab / Shift+Tab — next / previous field
         if key == _TAB:
@@ -404,9 +579,33 @@ class ComposePanel:
             return self._handle_body_key(key, ch)
 
         # Header field handling
-        ed = self._current_editor()
         if ed is None:
             return None
+        if ed.mode == "NORMAL":
+            if ch == "j" or key == curses.KEY_DOWN:
+                self._current_field = min(
+                    len(_COMPOSE_FIELDS) - 1, self._current_field + 1
+                )
+                return None
+            if ch == "k" or key == curses.KEY_UP:
+                self._current_field = max(0, self._current_field - 1)
+                return None
+            if ch == "o":
+                self._current_field = min(
+                    len(_COMPOSE_FIELDS) - 1, self._current_field + 1
+                )
+                nxt = self._current_editor()
+                if nxt is not None:
+                    nxt.mode = "INSERT"
+                    nxt.pos = len(nxt.chars)
+                return None
+            if ch == "O":
+                self._current_field = max(0, self._current_field - 1)
+                nxt = self._current_editor()
+                if nxt is not None:
+                    nxt.mode = "INSERT"
+                    nxt.pos = len(nxt.chars)
+                return None
         if key in (_ENTER, _CR):
             # Tab to next field
             self._current_field = (self._current_field + 1) % len(_COMPOSE_FIELDS)
@@ -436,46 +635,109 @@ class ComposePanel:
         ed.handle_key(key)
         return None
 
+    def _cmd_key(self, key: int, ch: str) -> str | None:
+        if key in (_ENTER, _CR):
+            cmd = self._cmd_buf.strip()
+            self._mode = "FIELD"
+            self._cmd_buf = ""
+            if cmd in ("wq", "send"):
+                return "send"
+            if cmd in ("w", "draft", "skizo"):
+                return "draft"
+            if cmd in ("q", "q!", "quit", "cancel"):
+                return "cancel"
+            self._status = f"Nekonata komando: :{cmd} (uzu :wq, :w aŭ :q)"
+            return None
+        if _is_backspace(key):
+            if self._cmd_buf:
+                self._cmd_buf = self._cmd_buf[:-1]
+            else:
+                self._mode = "FIELD"
+            return None
+        if key == _ESC:
+            self._mode = "FIELD"
+            self._cmd_buf = ""
+            return None
+        if ch and ch.isprintable():
+            self._cmd_buf += ch
+        return None
+
     def _handle_body_key(self, key: int, ch: str) -> str | None:
         ed = self._body_lines[self._body_row]
 
         if key in (_ENTER, _CR):
-            # Split line at cursor
-            left = ed.chars[: ed.pos]
-            right = ed.chars[ed.pos :]
-            ed.chars = left
-            ed.pos = len(left)
-            new_line = LineEditor("".join(right))
-            new_line.pos = 0
-            self._body_lines.insert(self._body_row + 1, new_line)
-            self._body_row += 1
+            if ed.mode == "INSERT":
+                # Split line at cursor
+                left = ed.chars[: ed.pos]
+                right = ed.chars[ed.pos :]
+                ed.chars = left
+                ed.pos = len(left)
+                new_line = LineEditor("".join(right))
+                new_line.pos = 0
+                self._body_lines.insert(self._body_row + 1, new_line)
+                self._body_row += 1
             return None
 
-        if _is_backspace(key) and ed.pos == 0 and self._body_row > 0:
-            # Merge with previous line
-            prev = self._body_lines[self._body_row - 1]
-            merge_pos = len(prev.chars)
-            prev.chars.extend(ed.chars)
-            prev.pos = merge_pos
-            del self._body_lines[self._body_row]
-            self._body_row -= 1
-            return None
+        if _is_backspace(key) and ed.mode == "INSERT":
+            if ed.pos == 0 and self._body_row > 0:
+                # Merge with previous line
+                prev = self._body_lines[self._body_row - 1]
+                merge_pos = len(prev.chars)
+                prev.chars.extend(ed.chars)
+                prev.pos = merge_pos
+                del self._body_lines[self._body_row]
+                self._body_row -= 1
+                return None
 
         if key == curses.KEY_UP and self._body_row > 0:
+            self._dd_pending = False
             self._body_row -= 1
             return None
         if key == curses.KEY_DOWN and self._body_row < len(self._body_lines) - 1:
+            self._dd_pending = False
             self._body_row += 1
             return None
         if ch == "j" and ed.mode == "NORMAL" and (
             self._body_row < len(self._body_lines) - 1
         ):
+            self._dd_pending = False
             self._body_row += 1
             return None
         if ch == "k" and ed.mode == "NORMAL" and self._body_row > 0:
+            self._dd_pending = False
             self._body_row -= 1
             return None
 
+        # o/O: open new line below/above (NORMAL mode)
+        if ch == "o" and ed.mode == "NORMAL":
+            new_line = LineEditor("")
+            new_line.mode = "INSERT"
+            self._body_lines.insert(self._body_row + 1, new_line)
+            self._body_row += 1
+            self._dd_pending = False
+            return None
+        if ch == "O" and ed.mode == "NORMAL":
+            new_line = LineEditor("")
+            new_line.mode = "INSERT"
+            self._body_lines.insert(self._body_row, new_line)
+            self._dd_pending = False
+            return None
+
+        # dd: delete current line (NORMAL mode)
+        if ch == "d" and ed.mode == "NORMAL":
+            if self._dd_pending:
+                if len(self._body_lines) > 1:
+                    del self._body_lines[self._body_row]
+                    self._body_row = min(self._body_row, len(self._body_lines) - 1)
+                else:
+                    self._body_lines[0].chars = []
+                    self._body_lines[0].pos = 0
+                self._dd_pending = False
+            else:
+                self._dd_pending = True
+            return None
+
+        self._dd_pending = False
         ed.handle_key(key)
         return None
 
@@ -777,13 +1039,17 @@ class MessageReader:
         self.msg = msg
         self._lines = _message_to_lines(msg)
         self._row: int = 0
-        self._col: int = 0
+        self._view_row: int = 0
+        self._col: int = 0       # horizontal scroll offset
+        self._char_col: int = 0  # cursor column within line
         self._search_term: str = ""
         self._mode: str = "NORMAL"
         self._search_buf: str = ""
-        self._count_buf: str = ""
         self._prev_ch: str = ""  # for gg detection
         self._action: str | None = None  # 'reply', 'forward', 'delete', etc.
+        self._visual_mode: str = ""  # "", "char", "line"
+        self._visual_anchor_row: int = 0
+        self._visual_anchor_col: int = 0
 
     def draw(self) -> None:
         h, w = self.stdscr.getmaxyx()
@@ -794,16 +1060,28 @@ class MessageReader:
         subj = (self.msg.get("subjekto") or "")[:w - 4]
         _safe_addstr(self.stdscr, 0, 0, f" {subj} ".ljust(w - 1), curses.A_REVERSE)
 
+        # Auto-scroll so char_col is visible
+        if self._char_col < self._col:
+            self._col = self._char_col
+        elif self._char_col >= self._col + w - 1:
+            self._col = self._char_col - w + 2
+
+        # Keep viewport stable; scroll only when cursor reaches edges.
+        if self._row < self._view_row:
+            self._view_row = self._row
+        elif self._row >= self._view_row + content_h:
+            self._view_row = self._row - content_h + 1
+
         # Content
         content_w = w - 1
-        num_w = 4
+        focused_cursor: tuple[int, int] | None = None
         for i in range(content_h):
-            li = i + self._row
+            li = i + self._view_row
             scr_row = i + 1
             if li >= len(self._lines):
                 break
             line = self._lines[li]
-            visible = line[self._col: self._col + content_w - num_w]
+            visible = line[self._col: self._col + content_w]
 
             is_match = bool(
                 self._search_term
@@ -811,88 +1089,162 @@ class MessageReader:
             )
             if li == self._row and self._mode == "NORMAL":
                 attr = curses.A_UNDERLINE
+            elif self._visual_mode == "line" and self._is_visual_row(li):
+                attr = curses.A_STANDOUT
+            elif self._visual_mode == "char" and self._is_visual_row(li):
+                attr = curses.A_NORMAL
             elif is_match:
                 attr = curses.A_STANDOUT
             elif li < 8:  # header lines bold
                 attr = curses.A_BOLD
             else:
                 attr = curses.A_NORMAL
-            _safe_addstr(self.stdscr, scr_row, num_w, visible[:content_w - num_w], attr)
+            _safe_addstr(
+                self.stdscr, scr_row, 0, visible[:content_w].ljust(content_w), attr
+            )
+
+            if self._visual_mode == "char" and self._is_visual_row(li):
+                start_col, end_col = self._visual_bounds_for_row(li, len(line))
+                if start_col <= end_col:
+                    for ci in range(start_col, end_col + 1):
+                        vx = ci - self._col
+                        if 0 <= vx < content_w:
+                            char = visible[vx] if vx < len(visible) else " "
+                            _safe_addstr(
+                                self.stdscr, scr_row, vx, char, curses.A_STANDOUT
+                            )
+
+            # Block cursor on current line
+            if li == self._row and self._mode == "NORMAL":
+                cx = self._char_col - self._col
+                if 0 <= cx < content_w:
+                    char = visible[cx] if cx < len(visible) else " "
+                    _safe_addstr(self.stdscr, scr_row, cx, char, curses.A_STANDOUT)
+                    focused_cursor = (scr_row, cx)
 
         # Status bar
         if self._mode == "SEARCH":
             status = f"/{self._search_buf}█"
         else:
-            pfx = self._count_buf
+            if self._visual_mode == "char":
+                mode_label = "[VISUAL-CHAR]"
+            elif self._visual_mode == "line":
+                mode_label = "[VISUAL-LINE]"
+            else:
+                mode_label = "[NORMAL]"
             status = (
-                f"{pfx} [NORMAL]  j/k:↕  gg/G:⇕  r:respondi  f:plusendi  "
-                f"d:forigi  s:spamo  *:stelo  1-9:prioritato  q:reen"
+                f"{mode_label}  j/k:↕  gg/G:⇕  h/l:↔  v/V:VIDA  Ctrl+←/→:vorto  "
+                f"d:forigi  s:spamo  *:stelo  q:reen"
             )
         _safe_addstr(
             self.stdscr, h - 1, 0, status[:w - 1].ljust(w - 1), curses.A_REVERSE
         )
 
-        self.stdscr.refresh()
+        if focused_cursor:
+            try:
+                self.stdscr.move(*focused_cursor)
+            except curses.error:
+                pass
+
+        self.stdscr.noutrefresh()
+        curses.doupdate()
 
     def run(self) -> str | None:
         """Run pager loop. Returns action string or None."""
-        while True:
-            self.draw()
-            key = _getch_unicode(self.stdscr)
-            result = self._handle_key(key)
-            if result is not None:
-                return result
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        try:
+            while True:
+                self.draw()
+                key = _getch_unicode(self.stdscr)
+                result = self._handle_key(key)
+                if result is not None:
+                    return result
+        finally:
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
+
+    def _clamp_char_col_to_line(self) -> None:
+        cur_line = self._lines[self._row] if self._lines else ""
+        self._char_col = min(self._char_col, max(0, len(cur_line) - 1))
 
     def _handle_key(self, key: int) -> str | None:
-        ch = chr(key) if 0 < key < 256 else ""
+        ch = _key_to_char(key)
 
         if self._mode == "SEARCH":
             return self._search_key(key, ch)
 
-        # Count prefix
-        if ch.isdigit() and ch != "0" and not self._count_buf:
-            self._count_buf += ch
-            return None
-        if ch.isdigit() and self._count_buf:
-            self._count_buf += ch
-            return None
-
-        count = int(self._count_buf) if self._count_buf else 1
-        self._count_buf = ""
+        count = 1
 
         n = len(self._lines)
         h, w = self.stdscr.getmaxyx()
         page_h = h - 2
+        if n:
+            self._row = min(self._row, n - 1)
 
         if ch == "q" or key in (_CTRL_C, _CTRL_D):
             self._prev_ch = ""
             return "quit"
         if key == _ESC:
+            if self._visual_mode:
+                self._visual_mode = ""
+                return None
             self._prev_ch = ""
             return None
         if ch == "j" or key == curses.KEY_DOWN:
             self._row = min(self._row + count, max(0, n - 1))
+            self._clamp_char_col_to_line()
         elif ch == "k" or key == curses.KEY_UP:
             self._row = max(self._row - count, 0)
+            self._clamp_char_col_to_line()
         elif ch == "g":
             if self._prev_ch == "g":
                 self._row = 0  # gg — go to top
+                self._clamp_char_col_to_line()
             # else: wait for second 'g'
         elif ch == "G":
             self._row = max(0, n - 1)
+            self._clamp_char_col_to_line()
         elif ch == "J":
             self._row = min(self._row + page_h, max(0, n - 1))
+            self._clamp_char_col_to_line()
         elif ch == "K":
             self._row = max(self._row - page_h, 0)
+            self._clamp_char_col_to_line()
         elif ch == "h" or key == curses.KEY_LEFT:
-            self._col = max(0, self._col - count)
+            self._char_col = max(0, self._char_col - count)
         elif ch == "l" or key == curses.KEY_RIGHT:
-            self._col += count
+            cur_line = self._lines[self._row] if self._lines else ""
+            self._char_col = min(self._char_col + count, max(0, len(cur_line) - 1))
+        elif _is_ctrl_left(key) or ch == "b":
+            cur_line = self._lines[self._row] if self._lines else ""
+            self._char_col = _word_left(cur_line, self._char_col)
+        elif _is_ctrl_right(key) or ch == "w":
+            cur_line = self._lines[self._row] if self._lines else ""
+            self._char_col = _word_right(cur_line, self._char_col)
         elif ch == "0":
-            self._col = 0
+            self._char_col = 0
         elif ch == "$":
-            max_len = max((len(ln) for ln in self._lines), default=0)
-            self._col = max(0, max_len - w + 5)
+            cur_line = self._lines[self._row] if self._lines else ""
+            self._char_col = max(0, len(cur_line) - 1)
+        elif ch == "v":
+            if self._visual_mode == "char":
+                self._visual_mode = ""
+            else:
+                self._visual_mode = "char"
+                self._visual_anchor_row = self._row
+                self._visual_anchor_col = self._char_col
+        elif ch == "V":
+            if self._visual_mode == "line":
+                self._visual_mode = ""
+            else:
+                self._visual_mode = "line"
+                self._visual_anchor_row = self._row
+                self._visual_anchor_col = 0
         elif ch == "/":
             self._mode = "SEARCH"
             self._search_buf = ""
@@ -918,7 +1270,7 @@ class MessageReader:
         elif ch == "*":
             self._prev_ch = ""
             return "star"
-        elif ch in "123456789":
+        elif ch and ch in "123456789":
             self._prev_ch = ""
             return f"priority:{ch}"
         elif ch == "m":
@@ -927,6 +1279,26 @@ class MessageReader:
 
         self._prev_ch = ch
         return None
+
+    def _is_visual_row(self, row: int) -> bool:
+        top = min(self._visual_anchor_row, self._row)
+        bot = max(self._visual_anchor_row, self._row)
+        return top <= row <= bot
+
+    def _visual_bounds_for_row(self, row: int, line_len: int) -> tuple[int, int]:
+        a_row, c_row = self._visual_anchor_row, self._row
+        a_col, c_col = self._visual_anchor_col, self._char_col
+        if a_row == c_row:
+            return min(a_col, c_col), max(a_col, c_col)
+        top = min(a_row, c_row)
+        bottom = max(a_row, c_row)
+        if row == top:
+            if a_row == top:
+                return a_col, max(0, line_len - 1)
+            return c_col, max(0, line_len - 1)
+        if row == bottom:
+            return (0, c_col) if c_row == bottom else (0, a_col)
+        return (0, max(0, line_len - 1))
 
     def _search_key(self, key: int, ch: str) -> str | None:
         if key in (_ENTER, _CR):
@@ -953,6 +1325,7 @@ class MessageReader:
             idx = (start + i * direction) % n
             if self._search_term.lower() in self._lines[idx].lower():
                 self._row = idx
+                self._clamp_char_col_to_line()
                 return
 
 
@@ -1014,9 +1387,12 @@ class RetpostoTUI:
         self._mode: str = "NORMAL"
         self._cmd_buf: str = ""
         self._status_msg: str = ""
+        self._status_deadline: float | None = None
+        self._status_transient_value: str = ""
 
         # Layout proportions
         self._folder_w: int = 30
+        self._fetching: bool = False
 
         # Initial load
         self._load_initial()
@@ -1031,23 +1407,60 @@ class RetpostoTUI:
         else:
             self._message_panel.load()
 
+    def _set_status(self, message: str, *, transient: bool = False) -> None:
+        self._status_msg = message
+        if transient:
+            self._status_transient_value = message
+            self._status_deadline = time.monotonic() + 3.0
+        else:
+            self._status_deadline = None
+            self._status_transient_value = ""
+
+    def _current_status(self) -> str:
+        if (
+            self._status_deadline is not None
+            and time.monotonic() >= self._status_deadline
+            and self._status_msg == self._status_transient_value
+        ):
+            self._status_msg = ""
+            self._status_deadline = None
+            self._status_transient_value = ""
+        return self._status_msg
+
     def run(self) -> None:
         """Main event loop."""
+        old_termios: list[Any] | None = None
+        fd = -1
         curses.curs_set(0)
         try:
             import locale
             locale.setlocale(locale.LC_ALL, "")
         except Exception:
             pass
+        try:
+            fd = sys.stdin.fileno()
+            old_termios = termios.tcgetattr(fd)
+            new_termios = termios.tcgetattr(fd)
+            new_termios[0] = new_termios[0] & ~termios.IXON
+            termios.tcsetattr(fd, termios.TCSANOW, new_termios)
+        except Exception:
+            old_termios = None
 
-        while True:
-            self._draw()
-            key = _getch_unicode(self.stdscr)
-            if key == -1:
-                continue
-            done = self._handle_key(key)
-            if done:
-                break
+        try:
+            while True:
+                self._draw()
+                key = _getch_unicode(self.stdscr)
+                if key == -1:
+                    continue
+                done = self._handle_key(key)
+                if done:
+                    break
+        finally:
+            if old_termios is not None and fd >= 0:
+                try:
+                    termios.tcsetattr(fd, termios.TCSANOW, old_termios)
+                except Exception:
+                    pass
 
     def _draw(self) -> None:
         h, w = self.stdscr.getmaxyx()
@@ -1091,7 +1504,7 @@ class RetpostoTUI:
             status = f"/{self._cmd_buf}█"
         else:
             status = (
-                self._status_msg
+                self._current_status()
                 or (
                     "Tab:paŝi  c:komponi  p:preni  r:respondi  "
                     "d:forigi  s:spamo  /:serĉi  h:helpo  q:eliri"
@@ -1101,6 +1514,7 @@ class RetpostoTUI:
             self.stdscr, h - 1, 0, status[:w - 1].ljust(w - 1), curses.A_REVERSE
         )
 
+        self.stdscr.noutrefresh()
         curses.doupdate()
 
     def _draw_welcome(self) -> None:
@@ -1125,7 +1539,7 @@ class RetpostoTUI:
         else:
             accounts = self._load_accounts()
             status = (
-                self._status_msg
+                self._current_status()
                 or (
                     "NORMAL  a:aldoni-konton  h:helpo  q:eliri  |  : komando"
                     if not accounts
@@ -1150,7 +1564,7 @@ class RetpostoTUI:
         if ch == "q" or key in (_CTRL_C, _CTRL_D):
             return True
         if key == _ESC:
-            self._status_msg = "Premu q por eliri."
+            self._set_status("Premu q por eliri.", transient=True)
             return False
         if ch == ":":
             self._mode = "COMMAND"
@@ -1166,6 +1580,9 @@ class RetpostoTUI:
         if ch == "a" and not self._load_accounts():
             self._action_aldoni_konton()
             return False
+        if self._fetching and ch == "p":
+            self._status_msg = "[!] Preno jam en progreso..."
+            return False
 
         if key == _TAB:
             self._focus = "list" if self._focus == "folder" else "folder"
@@ -1173,6 +1590,38 @@ class RetpostoTUI:
             return False
 
         if key == curses.KEY_RESIZE:
+            return False
+
+        # Global action keys (work regardless of focus)
+        if ch == "c":
+            self._compose_new()
+            return False
+        elif ch == "r":
+            self._compose_reply()
+            return False
+        elif ch == "f":
+            self._compose_forward()
+            return False
+        elif ch == "d":
+            self._action_delete()
+            return False
+        elif ch == "D":
+            self._action_delete(permanent=True)
+            return False
+        elif ch == "s":
+            self._action_spam()
+            return False
+        elif ch == "*":
+            self._action_star()
+            return False
+        elif ch == "p":
+            self._action_fetch()
+            return False
+        elif ch == "m":
+            self._action_move()
+            return False
+        elif ch and ch in "123456789":
+            self._action_priority(int(ch))
             return False
 
         # Panel-specific keys
@@ -1195,28 +1644,6 @@ class RetpostoTUI:
             if result == "open":
                 self._open_message()
                 return False
-
-            # Action keys in list mode
-            if ch == "c":
-                self._compose_new()
-            elif ch == "r":
-                self._compose_reply()
-            elif ch == "f":
-                self._compose_forward()
-            elif ch == "d":
-                self._action_delete()
-            elif ch == "D":
-                self._action_delete(permanent=True)
-            elif ch == "s":
-                self._action_spam()
-            elif ch == "*":
-                self._action_star()
-            elif ch == "p":
-                self._action_fetch()
-            elif ch == "m":
-                self._action_move()
-            elif ch and ch in "123456789":
-                self._action_priority(int(ch))
 
         return False
 
@@ -1295,7 +1722,10 @@ class RetpostoTUI:
 
         reader = MessageReader(self.stdscr, msg)
         result = reader.run()
-        curses.curs_set(0)
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
 
         if result == "reply":
             self._compose_reply(msg)
@@ -1314,10 +1744,12 @@ class RetpostoTUI:
         elif result == "star":
             self._toggle_star(msg)
         elif result and result.startswith("priority:"):
-            p = int(result.split(":")[1])
-            self._update_message_field(msg["id"], prioritato=p)
-            self._status_msg = f"Prioritato: {p}"
-            self._refresh_list()
+            p_str = result.split(":", 1)[1].strip()
+            if p_str and p_str.isdigit():
+                p = int(p_str)
+                self._update_message_field(msg["id"], prioritato=p)
+                self._status_msg = f"Prioritato: {p}"
+                self._refresh_list()
 
     def _compose_new(self) -> None:
         self._run_compose({})
@@ -1365,35 +1797,80 @@ class RetpostoTUI:
             ]
 
         panel = ComposePanel(self.stdscr, initial, _completer)
-        while True:
-            panel.draw()
-            key = _getch_unicode(self.stdscr)
-            result = panel.handle_key(key)
-            if result == "cancel":
-                self._status_msg = "Nuligita."
-                return
-            if result == "send":
-                vals = panel.get_values()
-                al_list = [a.strip() for a in vals["al"].split(",") if a.strip()]
-                cc_list = [a.strip() for a in vals["cc"].split(",") if a.strip()]
-                bcc_list = [a.strip() for a in vals["bcc"].split(",") if a.strip()]
-                if not al_list:
-                    panel._status = "[!] Aldonu ricevonton (campo 'Al')"
-                    continue
-                if not vals["subjekto"]:
-                    if not self._prompt_confirm_inline(
-                        "Neniu subjekto. Ĉu sendi? (j/N)"
-                    ):
+        sending = False
+        try:
+            curses.curs_set(0)
+        except curses.error:
+            pass
+        try:
+            while True:
+                panel.draw()
+                key = _getch_unicode(self.stdscr)
+                result = panel.handle_key(key)
+                if result == "cancel":
+                    self._status_msg = "Nuligita."
+                    return
+                if result == "draft":
+                    vals = panel.get_values()
+                    al_list = [a.strip() for a in vals["al"].split(",") if a.strip()]
+                    cc_list = [a.strip() for a in vals["cc"].split(",") if a.strip()]
+                    bcc_list = [a.strip() for a in vals["bcc"].split(",") if a.strip()]
+                    folder_id = self._ensure_folder(acc["id"], "Malnetoj", "Drafts")
+                    msg_id = self._save_message(
+                        {
+                            "konto_id": acc["id"],
+                            "dosierujo_id": folder_id,
+                            "de": acc.get("retposto") or "",
+                            "al": al_list,
+                            "cc": cc_list,
+                            "bcc": bcc_list,
+                            "subjekto": vals["subjekto"],
+                            "korpo": vals["korpo"],
+                            "legita": 1,
+                            "stelo": 0,
+                            "spamo": 0,
+                            "forigita": 0,
+                            "prioritato": 5,
+                        }
+                    )
+                    self._status_msg = f"Konservita kiel skizo (id={msg_id})."
+                    self._folder_panel._refresh_items()
+                    self._refresh_list()
+                    return
+                if result == "send":
+                    if sending:
+                        panel._status = "[!] Sendado jam en progreso..."
                         continue
-                ok = self._send_message(
-                    acc, al_list, vals["subjekto"],
-                    vals["korpo"], cc_list, bcc_list
-                )
-                if ok:
-                    self._status_msg = f"Sendita al: {', '.join(al_list)}"
-                else:
-                    self._status_msg = "[!] Eraro dum sendado."
-                return
+                    vals = panel.get_values()
+                    al_list = [a.strip() for a in vals["al"].split(",") if a.strip()]
+                    cc_list = [a.strip() for a in vals["cc"].split(",") if a.strip()]
+                    bcc_list = [a.strip() for a in vals["bcc"].split(",") if a.strip()]
+                    if not al_list:
+                        panel._status = "[!] Aldonu ricevonton (campo 'Al')"
+                        continue
+                    if not vals["subjekto"]:
+                        if not self._prompt_confirm_inline(
+                            "Neniu subjekto. Ĉu sendi? (j/N)"
+                        ):
+                            continue
+                    sending = True
+                    panel._status = "Sendante..."
+                    panel.draw()
+                    ok = self._send_message(
+                        acc, al_list, vals["subjekto"],
+                        vals["korpo"], cc_list, bcc_list
+                    )
+                    sending = False
+                    if ok:
+                        self._status_msg = f"Sendita al: {', '.join(al_list)}"
+                    else:
+                        self._status_msg = "[!] Eraro dum sendado."
+                    return
+        finally:
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
 
     def _action_delete(self, permanent: bool = False) -> None:
         msg = self._message_panel.selected()
@@ -1410,6 +1887,7 @@ class RetpostoTUI:
     def _action_spam(self) -> None:
         msg = self._message_panel.selected()
         if not msg:
+            self._status_msg = "Neniu elektita mesaĝo."
             return
         sender = msg.get("de") or ""
         self._add_spam_block(sender)
@@ -1461,20 +1939,26 @@ class RetpostoTUI:
         self._refresh_list()
 
     def _action_fetch(self) -> None:
+        if self._fetching:
+            self._status_msg = "[!] Preno jam en progreso..."
+            return
         accounts = self._load_accounts()
         if not accounts:
             self._status_msg = "[!] Neniuj kontoj konfiguritaj."
             return
-        self._status_msg = "Prenante poŝton…"
-        self._draw()
-        total = 0
-        for acc in accounts:
-            f, _ = self._fetch_account_mail(acc, 100)
-            total += f
-        self._status_msg = f"[✓] {total} nova(j) mesaĝo(j)."
-        self._folder_panel._refresh_items()
-        self._refresh_list()
-
+        self._fetching = True
+        try:
+            self._status_msg = "Prenante poŝton..."
+            self._draw()
+            total = 0
+            for acc in accounts:
+                f, _ = self._fetch_account_mail(acc, 100)
+                total += f
+            self._status_msg = f"[✓] {total} nova(j) mesaĝo(j)."
+            self._folder_panel._refresh_items()
+            self._refresh_list()
+        finally:
+            self._fetching = False
     def _action_aldoni_konton(self) -> None:
         """Add a new email account interactively from within the TUI."""
         if self._save_account is None or self._set_password is None:

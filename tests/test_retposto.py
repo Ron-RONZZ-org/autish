@@ -27,6 +27,12 @@ from autish.commands.retposto import (
     _remove_spam_block,
     _upsert_contact,
 )
+from autish.commands._retposto_tui import (
+    ComposePanel,
+    LineEditor,
+    MessageReader,
+    RetpostoTUI,
+)
 from autish.main import app
 
 runner = CliRunner()
@@ -598,3 +604,174 @@ class TestCliFiltro:
         result = runner.invoke(app, ["retposto", "filtro", "forigi", "del-filter"])
         assert result.exit_code == 0
         assert "forigita" in result.output.lower()
+
+
+class _FakeStdScr:
+    def getmaxyx(self):
+        return (24, 80)
+
+
+class TestRetpostoTuiReader:
+    def test_hl_moves_cursor_column_not_row(self):
+        msg = {"de": "a@b.com", "al": ["x@y.com"], "subjekto": "S", "korpo": "abc"}
+        reader = MessageReader(_FakeStdScr(), msg)
+        start_row = reader._row
+        reader._handle_key(ord("l"))
+        assert reader._row == start_row
+        assert reader._char_col == 1
+        reader._handle_key(ord("h"))
+        assert reader._row == start_row
+        assert reader._char_col == 0
+
+    def test_vertical_move_clamps_cursor_column(self):
+        msg = {
+            "de": "a@b.com",
+            "al": ["x@y.com"],
+            "subjekto": "S",
+            "korpo": "long-line-here\nx",
+        }
+        reader = MessageReader(_FakeStdScr(), msg)
+        reader._row = len(reader._lines) - 2
+        reader._char_col = 6
+        reader._handle_key(ord("j"))
+        assert reader._row == len(reader._lines) - 1
+        assert reader._char_col <= len(reader._lines[reader._row]) - 1
+
+    def test_ctrl_right_moves_by_word(self):
+        msg = {"de": "a@b.com", "al": ["x@y.com"], "subjekto": "S", "korpo": "unu du"}
+        reader = MessageReader(_FakeStdScr(), msg)
+        reader._row = len(reader._lines) - 1
+        reader._char_col = 0
+        reader._handle_key(560)  # common Ctrl+Right keycode
+        assert reader._char_col > 0
+
+    def test_scroll_moves_only_at_bottom_edge(self):
+        body = "\n".join(f"line {i}" for i in range(50))
+        msg = {"de": "a@b.com", "al": ["x@y.com"], "subjekto": "S", "korpo": body}
+        reader = MessageReader(_FakeStdScr(), msg)
+        reader._row = 0
+        reader._view_row = 0
+        for _ in range(5):
+            reader._handle_key(ord("j"))
+        assert reader._view_row == 0
+
+
+class TestRetpostoTuiComposePanel:
+    def test_esc_in_insert_switches_to_normal(self):
+        panel = ComposePanel(_FakeStdScr(), {"al": "user@example.com"})
+        assert panel._current_editor() is not None
+        assert panel._current_editor().mode == "INSERT"
+        assert panel.handle_key(27) is None
+        assert panel._current_editor().mode == "NORMAL"
+
+    def test_vim_command_mode_send_and_cancel(self):
+        panel_send = ComposePanel(_FakeStdScr(), {"al": "user@example.com"})
+        panel_send.handle_key(27)  # INSERT -> NORMAL
+        panel_send.handle_key(ord(":"))
+        panel_send.handle_key(ord("w"))
+        panel_send.handle_key(ord("q"))
+        assert panel_send.handle_key(ord("\n")) == "send"
+
+        panel_cancel = ComposePanel(_FakeStdScr(), {"al": "user@example.com"})
+        panel_cancel.handle_key(27)  # INSERT -> NORMAL
+        panel_cancel.handle_key(ord(":"))
+        panel_cancel.handle_key(ord("q"))
+        assert panel_cancel.handle_key(ord("\n")) == "cancel"
+
+    def test_vim_command_mode_draft(self):
+        panel = ComposePanel(_FakeStdScr(), {"al": "user@example.com"})
+        panel.handle_key(27)  # INSERT -> NORMAL
+        panel.handle_key(ord(":"))
+        panel.handle_key(ord("w"))
+        assert panel.handle_key(ord("\n")) == "draft"
+
+    def test_unicode_character_can_be_typed(self):
+        panel = ComposePanel(_FakeStdScr(), {})
+        panel.handle_key(ord("ŝ"))
+        assert panel.get_values()["al"] == "ŝ"
+
+
+class TestRetpostoLineEditor:
+    def test_ctrl_right_moves_word_in_insert(self):
+        ed = LineEditor("unu du tri")
+        ed.pos = 0
+        ed.handle_key(560)  # common Ctrl+Right keycode
+        assert ed.pos > 0
+
+    def test_ctrl_right_alt_code_does_not_insert_weird_char(self):
+        ed = LineEditor("unu du tri")
+        ed.pos = 0
+        before = ed.value
+        ed.handle_key(569)  # seen as weird glyph on some terminals
+        assert ed.value == before
+        assert ed.pos > 0
+
+    def test_visual_modes_toggle(self):
+        ed = LineEditor("abc", insert_mode=False)
+        ed.handle_key(ord("v"))
+        assert ed.mode == "VISUAL_CHAR"
+        ed.handle_key(27)
+        assert ed.mode == "NORMAL"
+        ed.handle_key(ord("V"))
+        assert ed.mode == "VISUAL_LINE"
+
+
+def _make_tui_for_keys() -> RetpostoTUI:
+    stdscr = _FakeStdScr()
+    return RetpostoTUI(
+        stdscr,
+        load_accounts=lambda: [{"id": 1, "retposto": "me@example.com"}],
+        load_messages=lambda **_: [],
+        load_folders=lambda _acc_id: [{"id": 10, "nomo": "Inbox"}],
+        fetch_account_mail=lambda _acc, _max: (0, 0),
+        send_message=lambda *_a, **_k: True,
+        save_message=lambda _m: 1,
+        update_message_field=lambda *_a, **_k: None,
+        delete_message=lambda *_a, **_k: None,
+        load_contacts=lambda: [],
+        find_contact=lambda _p: [],
+        upsert_contact=lambda *_a, **_k: None,
+        load_filters=lambda: [],
+        add_spam_block=lambda _r: None,
+        is_spam=lambda _s: False,
+        ensure_folder=lambda *_a, **_k: 1,
+    )
+
+
+class TestRetpostoTuiGlobalKeys:
+    def test_access_key_c_opens_compose(self):
+        tui = _make_tui_for_keys()
+        tui._compose_new = MagicMock()  # type: ignore[method-assign]
+        assert tui._handle_key(ord("c")) is False
+        tui._compose_new.assert_called_once()
+
+    def test_access_key_s_calls_spam_action(self):
+        tui = _make_tui_for_keys()
+        tui._action_spam = MagicMock()  # type: ignore[method-assign]
+        assert tui._handle_key(ord("s")) is False
+        tui._action_spam.assert_called_once()
+
+    def test_fetch_guard_blocks_duplicate_attempt(self):
+        tui = _make_tui_for_keys()
+        tui._fetching = True
+        tui._action_fetch()
+        assert "progreso" in tui._status_msg.lower()
+
+    def test_open_message_ignores_empty_priority_action(self):
+        tui = _make_tui_for_keys()
+        tui._message_panel._messages = [{"id": 1, "legita": 1}]
+        tui._message_panel._cursor = 0
+        with patch(
+            "autish.commands._retposto_tui.MessageReader.run",
+            return_value="priority:",
+        ):
+            tui._open_message()
+
+    def test_transient_status_expires_after_three_seconds(self):
+        tui = _make_tui_for_keys()
+        with patch("autish.commands._retposto_tui.time.monotonic", return_value=10.0):
+            tui._set_status("Premu q por eliri.", transient=True)
+        with patch("autish.commands._retposto_tui.time.monotonic", return_value=12.0):
+            assert tui._current_status() == "Premu q por eliri."
+        with patch("autish.commands._retposto_tui.time.monotonic", return_value=13.5):
+            assert tui._current_status() == ""
