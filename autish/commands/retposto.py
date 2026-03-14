@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS konto (
     smtp_haveno  INTEGER NOT NULL DEFAULT 587,
     smtp_tls     INTEGER NOT NULL DEFAULT 1,
     uzantonomo   TEXT,
+    subskribo    TEXT,
     kreita_je    TEXT NOT NULL
 );
 """
@@ -193,7 +194,20 @@ def _get_db() -> sqlite3.Connection:
         + _CREATE_SPAMO_BLOKO
         + _CREATE_FILTRO
     )
+    # Migrations for existing databases
+    _migrate_db(con)
     return con
+
+
+def _migrate_db(con: sqlite3.Connection) -> None:
+    """Apply forward-only schema migrations to existing databases."""
+    existing_cols = {
+        row[1]
+        for row in con.execute("PRAGMA table_info(konto)").fetchall()
+    }
+    if "subskribo" not in existing_cols:
+        con.execute("ALTER TABLE konto ADD COLUMN subskribo TEXT")
+        con.commit()
 
 
 def _now_iso() -> str:
@@ -251,6 +265,34 @@ def _save_account(acc: dict) -> int:
             ),
         )
         return cur.lastrowid  # type: ignore[return-value]
+
+
+_KONTO_UPDATABLE_COLS: frozenset[str] = frozenset({
+    "nomo", "imap_servilo", "imap_haveno", "imap_ssl",
+    "smtp_servilo", "smtp_haveno", "smtp_tls", "uzantonomo", "subskribo",
+})
+
+
+def _update_account(account_id: int, fields: dict) -> None:
+    """Update selected fields of an existing account."""
+    if not fields:
+        return
+    invalid = set(fields) - _KONTO_UPDATABLE_COLS
+    if invalid:
+        raise ValueError(f"Disallowed column(s) in _update_account: {invalid}")
+    # Coerce port values to int when present
+    for port_col in ("imap_haveno", "smtp_haveno"):
+        if port_col in fields:
+            try:
+                fields[port_col] = int(fields[port_col])
+            except (ValueError, TypeError):
+                pass
+    set_clause = ", ".join(f"{k} = ?" for k in fields)
+    values = list(fields.values()) + [account_id]
+    # Column names come exclusively from _KONTO_UPDATABLE_COLS (checked above),
+    # so the f-string interpolation is safe from SQL injection.
+    with _get_db() as con:
+        con.execute(f"UPDATE konto SET {set_clause} WHERE id = ?", values)
 
 
 def _delete_account(account_id: int) -> None:
@@ -1115,6 +1157,10 @@ def _launch_tui() -> None:
             ensure_folder=_ensure_folder,
             save_account=_save_account,
             set_password=_set_password,
+            load_spam_blocks=_load_spam_blocks,
+            remove_spam_block=_remove_spam_block,
+            update_account=_update_account,
+            load_messages_spam=_load_messages,
         )
         tui.run()
 
@@ -1497,3 +1543,199 @@ def blok_listo() -> None:
     for b in blocks:
         table.add_row(str(b["id"]), b["regulo"], (b["kreita_je"] or "")[:19])
     console.print(table)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Account update and signature CLI subcommands
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@app.command("ĝisdatigi-konton")
+def gisdatigi_konton(
+    id_adr: str = typer.Argument(..., help="Account id or email address."),
+    nomo: str | None = typer.Option(None, "-n", "--nomo", help="Display name."),
+    imap_servilo: str | None = typer.Option(None, "--imap", help="IMAP server."),
+    imap_haveno: int | None = typer.Option(None, "--imap-haveno"),
+    smtp_servilo: str | None = typer.Option(None, "--smtp", help="SMTP server."),
+    smtp_haveno: int | None = typer.Option(None, "--smtp-haveno"),
+    pasvorto: bool = typer.Option(
+        False, "-p", "--pasvorto", help="Prompt for new password."
+    ),
+) -> None:
+    """Update IMAP/SMTP credentials for an existing account."""
+    acc = _find_account(id_adr)
+    if not acc:
+        typer.echo(f"[!] Konto ne trovita: {id_adr}", err=True)
+        raise typer.Exit(1)
+
+    updates: dict[str, object] = {}
+    if nomo is not None:
+        updates["nomo"] = nomo
+    if imap_servilo is not None:
+        updates["imap_servilo"] = imap_servilo
+    if imap_haveno is not None:
+        updates["imap_haveno"] = imap_haveno
+    if smtp_servilo is not None:
+        updates["smtp_servilo"] = smtp_servilo
+    if smtp_haveno is not None:
+        updates["smtp_haveno"] = smtp_haveno
+
+    if updates:
+        _update_account(acc["id"], updates)
+        typer.echo(f"[✓] Konto ĝisdatigita (id={acc['id']}).")
+
+    if pasvorto:
+        new_pw = typer.prompt(
+            "Nova pasvorto", hide_input=True, confirmation_prompt=True
+        )
+        _set_password(acc["id"], new_pw)
+        typer.echo("[✓] Pasvorto ĝisdatigita.")
+
+    if not updates and not pasvorto:
+        typer.echo("Neniu ŝanĝo specifita. Uzu --help por vidi la eblojn.")
+
+
+@app.command("subskribo")
+def subskribo_cmd(
+    id_adr: str = typer.Argument(..., help="Account id or email address."),
+    agordi: str | None = typer.Option(
+        None, "-a", "--agordi",
+        help="Set signature: local file path or URL (http/https).",
+    ),
+    forigi: bool = typer.Option(
+        False, "-f", "--forigi", help="Remove the signature."
+    ),
+) -> None:
+    """View or set the email signature for an account.
+
+    The signature can be a local plain-text/HTML file path or an http(s) URL.
+    It is automatically appended to new messages and replies in the TUI.
+    """
+    acc = _find_account(id_adr)
+    if not acc:
+        typer.echo(f"[!] Konto ne trovita: {id_adr}", err=True)
+        raise typer.Exit(1)
+
+    if forigi:
+        _update_account(acc["id"], {"subskribo": None})
+        typer.echo("[✓] Subskribo forigita.")
+        return
+
+    if agordi is not None:
+        _update_account(acc["id"], {"subskribo": agordi.strip()})
+        typer.echo(f"[✓] Subskribo agordita: {agordi.strip()}")
+        return
+
+    # Display current signature setting
+    current = acc.get("subskribo") or ""
+    if current:
+        typer.echo(f"Subskribo: {current}")
+    else:
+        typer.echo("Neniu subskribo agordita.")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Folder management CLI subcommands
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@app.command("novdos")
+def novdos(
+    nomo: str = typer.Argument(..., help="Folder name to create."),
+    konto: str | None = typer.Option(
+        None, "-k", "--konto", help="Account id or email (default: first account)."
+    ),
+    patro: str | None = typer.Option(
+        None, "-p", "--patro", help="Parent folder name (for sub-folders)."
+    ),
+) -> None:
+    """Create a new folder (or sub-folder) under an account."""
+    accounts = _load_accounts()
+    if not accounts:
+        typer.echo("[!] Neniuj kontoj konfiguritaj.", err=True)
+        raise typer.Exit(1)
+
+    if konto:
+        acc = _find_account(konto)
+        if not acc:
+            typer.echo(f"[!] Konto ne trovita: {konto}", err=True)
+            raise typer.Exit(1)
+    else:
+        acc = accounts[0]
+
+    patro_id: int | None = None
+    if patro:
+        folders = _load_folders(acc["id"])
+        match = next((f for f in folders if f["nomo"] == patro), None)
+        if not match:
+            typer.echo(f"[!] Patra dosierujo ne trovita: {patro}", err=True)
+            raise typer.Exit(1)
+        patro_id = match["id"]
+
+    folder_id = _ensure_folder(acc["id"], nomo, nomo, patro_id)
+    parent_info = f" (patro: {patro})" if patro else ""
+    typer.echo(
+        f"[✓] Dosierujo kreita{parent_info}: {nomo} "
+        f"(id={folder_id}) por {acc['retposto']}"
+    )
+
+
+@app.command("listigi-dosierujojn")
+def listigi_dosierujojn(
+    konto: str | None = typer.Option(
+        None, "-k", "--konto", help="Account id or email (default: all)."
+    )
+) -> None:
+    """List folders for one or all accounts."""
+    accounts = _load_accounts()
+    if not accounts:
+        typer.echo("Neniuj kontoj konfiguritaj.")
+        return
+
+    if konto:
+        acc = _find_account(konto)
+        if not acc:
+            typer.echo(f"[!] Konto ne trovita: {konto}", err=True)
+            raise typer.Exit(1)
+        accounts = [acc]
+
+    for acc in accounts:
+        typer.echo(f"\n{acc['retposto']}:")
+        folders = _load_folders(acc["id"])
+        if not folders:
+            typer.echo("  (neniuj dosierujoj)")
+            continue
+        for f in folders:
+            indent = "  "
+            if f.get("patro_id") is not None:
+                indent = "    "
+            typer.echo(f"{indent}{f['nomo']}  (id={f['id']})")
+
+
+@app.command("movi-mesagon")
+def movi_mesagon(
+    mesago_id: int = typer.Argument(..., help="Message id."),
+    dosierujo: str = typer.Argument(..., help="Destination folder name."),
+    konto: str | None = typer.Option(
+        None, "-k", "--konto", help="Account id or email."
+    ),
+) -> None:
+    """Move a message to a different folder."""
+    with _get_db() as con:
+        row = con.execute(
+            "SELECT * FROM mesago WHERE id = ?", (mesago_id,)
+        ).fetchone()
+    if not row:
+        typer.echo(f"[!] Mesaĝo ne trovita: {mesago_id}", err=True)
+        raise typer.Exit(1)
+    msg = dict(row)
+    acc_id = msg["konto_id"]
+
+    if konto:
+        acc = _find_account(konto)
+        if acc:
+            acc_id = acc["id"]
+
+    folder_id = _ensure_folder(acc_id, dosierujo, dosierujo)
+    _update_message_field(mesago_id, dosierujo_id=folder_id)
+    typer.echo(f"[✓] Mesaĝo {mesago_id} movita al: {dosierujo} (id={folder_id})")
