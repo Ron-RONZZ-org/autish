@@ -808,8 +808,8 @@ class TestPager:
         from autish.commands._vorto_tui import Pager
         stdscr = MagicMock()
         stdscr.getmaxyx.return_value = (24, 80)
-        # Simulate 'g' followed by 'g'
-        stdscr.getch.return_value = ord("g")
+        # Simulate 'g' followed by 'g' — _getch_unicode uses get_wch()
+        stdscr.get_wch.return_value = ord("g")
         p = Pager(stdscr, ["l1", "l2", "l3"], title="test")
         p.row = 2
         p._normal_key(ord("g"), "g")
