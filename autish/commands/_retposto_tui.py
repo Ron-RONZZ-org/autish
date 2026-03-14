@@ -80,14 +80,17 @@ def _is_backspace(key: int) -> bool:
 
 _WELCOME_LINES = [
     "",
-    "  ┌─────────────────────────────────────────┐",
-    "  │          ✉  Retpoŝto  ✉                 │",
-    "  │   TUI email for autish                  │",
-    "  └─────────────────────────────────────────┘",
+    "             ✉  Retpoŝto",
     "",
-    "  [Tab]  ŝanĝi panelon   [c]  komponi    [r]  respondi",
-    "  [p]    preni (fetch)   [/]  serĉi      [q]  eliri",
-    "  [h]    helpo           [:]  komando",
+    "          ┌──────────────────────────────────┐",
+    "          │  a   aldoni konton               │",
+    "          │  Tab ŝanĝi panelon               │",
+    "          │  c   komponi mesaĝon             │",
+    "          │  r   respondi                    │",
+    "          │  p   preni poŝton (fetch)        │",
+    "          │  h   helpo                       │",
+    "          │  q   eliri                       │",
+    "          └──────────────────────────────────┘",
     "",
 ]
 
@@ -980,6 +983,8 @@ class RetpostoTUI:
         add_spam_block: Callable[[str], None],
         is_spam: Callable[[str], bool],
         ensure_folder: Callable[..., int],
+        save_account: Callable[[dict], int] | None = None,
+        set_password: Callable[[int, str], None] | None = None,
     ) -> None:
         self.stdscr = stdscr
         self._load_accounts = load_accounts
@@ -997,6 +1002,8 @@ class RetpostoTUI:
         self._add_spam_block = add_spam_block
         self._is_spam = is_spam
         self._ensure_folder = ensure_folder
+        self._save_account = save_account
+        self._set_password = set_password
 
         # Panels
         self._folder_panel = FolderPanel(stdscr, load_accounts, load_folders)
@@ -1099,8 +1106,13 @@ class RetpostoTUI:
     def _draw_welcome(self) -> None:
         h, w = self.stdscr.getmaxyx()
         self.stdscr.erase()
+
+        # Centre the welcome art vertically (leave room for status bar)
+        art_h = len(_WELCOME_LINES)
+        top = max(0, (h - art_h - 2) // 2)
+
         for i, line in enumerate(_WELCOME_LINES):
-            row = max(0, (h - len(_WELCOME_LINES)) // 2) + i
+            row = top + i
             if row >= h - 1:
                 break
             col = max(0, (w - len(line)) // 2)
@@ -1111,9 +1123,14 @@ class RetpostoTUI:
         elif self._mode == "SEARCH":
             status = f"/{self._cmd_buf}█"
         else:
+            accounts = self._load_accounts()
             status = (
                 self._status_msg
-                or "Neniuj kontoj. Uzu: retposto aldoni-konton  |  h:helpo  q:eliri"
+                or (
+                    "NORMAL  a:aldoni-konton  h:helpo  q:eliri  |  : komando"
+                    if not accounts
+                    else "NORMAL  a v m s f r h q  |  : komando  |  / serĉi"
+                )
             )
         _safe_addstr(
             self.stdscr, h - 1, 0, status[:w - 1].ljust(w - 1), curses.A_REVERSE
@@ -1145,6 +1162,9 @@ class RetpostoTUI:
             return False
         if ch == "h":
             self._show_help()
+            return False
+        if ch == "a" and not self._load_accounts():
+            self._action_aldoni_konton()
             return False
 
         if key == _TAB:
@@ -1195,7 +1215,7 @@ class RetpostoTUI:
                 self._action_fetch()
             elif ch == "m":
                 self._action_move()
-            elif ch in "123456789":
+            elif ch and ch in "123456789":
                 self._action_priority(int(ch))
 
         return False
@@ -1455,6 +1475,51 @@ class RetpostoTUI:
         self._folder_panel._refresh_items()
         self._refresh_list()
 
+    def _action_aldoni_konton(self) -> None:
+        """Add a new email account interactively from within the TUI."""
+        if self._save_account is None or self._set_password is None:
+            self._status_msg = "[!] Uzu: retposto aldoni-konton"
+            return
+        nomo = self._prompt_inline("Nomo (display name)")
+        if not nomo:
+            self._status_msg = "Nuligita."
+            return
+        retposto = self._prompt_inline("Retpoŝtadreso (email)")
+        if not retposto:
+            self._status_msg = "Nuligita."
+            return
+        imap = self._prompt_inline("IMAP servilo (ex: imap.example.com)")
+        if not imap:
+            self._status_msg = "Nuligita."
+            return
+        smtp = self._prompt_inline("SMTP servilo (ex: smtp.example.com)")
+        if not smtp:
+            self._status_msg = "Nuligita."
+            return
+        password = self._prompt_inline("Pasvorto", secret=True)
+        if not password:
+            self._status_msg = "Nuligita."
+            return
+        acc = {
+            "nomo": nomo,
+            "retposto": retposto.lower().strip(),
+            "imap_servilo": imap.strip(),
+            "imap_haveno": 993,
+            "imap_ssl": True,
+            "smtp_servilo": smtp.strip(),
+            "smtp_haveno": 587,
+            "smtp_tls": True,
+            "uzantonomo": retposto.lower().strip(),
+        }
+        try:
+            acc_id = self._save_account(acc)
+            self._set_password(acc_id, password)
+            self._status_msg = f"[✓] Konto aldonis: {retposto}"
+            self._folder_panel._refresh_items()
+            self._load_initial()
+        except Exception as exc:
+            self._status_msg = f"[!] Eraro: {exc}"
+
     def _refresh_list(self) -> None:
         sel = self._folder_panel.selected()
         if sel:
@@ -1531,13 +1596,14 @@ class RetpostoTUI:
 
     # ── inline prompts ────────────────────────────────────────────────────────
 
-    def _prompt_inline(self, prompt: str) -> str:
+    def _prompt_inline(self, prompt: str, secret: bool = False) -> str:
         buf = ""
         curses.curs_set(1)
         while True:
             self._draw()
             h, w = self.stdscr.getmaxyx()
-            line = f"{prompt}: {buf}█"
+            display = "*" * len(buf) if secret else buf
+            line = f"{prompt}: {display}█"
             _safe_addstr(
                 self.stdscr, h - 1, 0, line[:w - 1].ljust(w - 1), curses.A_REVERSE
             )

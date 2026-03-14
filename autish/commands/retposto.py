@@ -239,14 +239,14 @@ def _save_account(acc: dict) -> int:
                VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (
                 acc["nomo"],
-                acc["retposto"],
-                acc["imap_servilo"],
+                acc["retposto"].strip(),
+                acc["imap_servilo"].strip(),
                 acc.get("imap_haveno", 993),
                 int(acc.get("imap_ssl", True)),
-                acc["smtp_servilo"],
+                acc["smtp_servilo"].strip(),
                 acc.get("smtp_haveno", 587),
                 int(acc.get("smtp_tls", True)),
-                acc.get("uzantonomo") or acc["retposto"],
+                (acc.get("uzantonomo") or acc["retposto"]).strip(),
                 acc.get("kreita_je") or _now_iso(),
             ),
         )
@@ -1113,6 +1113,8 @@ def _launch_tui() -> None:
             add_spam_block=_add_spam_block,
             is_spam=_is_spam,
             ensure_folder=_ensure_folder,
+            save_account=_save_account,
+            set_password=_set_password,
         )
         tui.run()
 
