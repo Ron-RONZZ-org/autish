@@ -10,6 +10,7 @@ from autish.commands import (
     shelo,
     sistemo,
     tempo,
+    uzanto,
     vorto,
     wifi,
 )
@@ -31,6 +32,7 @@ app.add_typer(shelo.app, name="shelo")
 app.add_typer(vorto.app, name="vorto")
 app.add_typer(retposto.app, name="retposto")
 app.add_typer(sekurkopio.app, name="sekurkopio")
+app.add_typer(uzanto.app, name="uzanto")
 
 
 @app.command("help")

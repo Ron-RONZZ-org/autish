@@ -460,7 +460,7 @@ def auto(
     )
 
     # Offer to trigger one backup now
-    if _confirm_esperante("Ĉu fari sekurkopion nun?", default_yes=True):
+    if _confirm_esperante("Cu fari sekurkopion nun?", default_yes=True):
         pasvorto = typer.prompt("Pasvorto", hide_input=True, confirmation_prompt=True)
         from autish.commands._crypto import validate_strong_password  # noqa: PLC0415
 
@@ -470,7 +470,40 @@ def auto(
             raise typer.Exit(1)
         out = _do_auto_backup(Path(new_dir), pasvorto, new_nombro)
         _push_history("auto", {"dosiero": str(out)})
-        typer.echo(f"[✓] Sekurkopio kreita: {out}")
+        typer.echo(f"[v] Sekurkopio kreita: {out}")
+
+        # Prompt user to save the recovery key for restoration in case of
+        # crash > complete reinstall of autish
+        typer.echo(
+            "\n[!] Grava: Konservu vian cif-pasvorton en sekura loko"
+            " (ekz. pasvorta administranto)."
+        )
+        typer.echo(
+            "    Vi bezonos gin por restarigi viajn datumojn post kompleta reinstalo."
+        )
+        if _confirm_esperante(
+            "Cu konservi pasvortan gvidon en dosiero?", default_yes=False
+        ):
+            default_hint = str(Path.home() / "autish_recovery_hint.txt")
+            hint_file = typer.prompt(
+                "Dosiero por konservi gvidon", default=default_hint
+            ).strip()
+            hint_path = Path(hint_file)
+            hint_path.write_text(
+                "autish sekurkopio — ciferlanda restarigado\n"
+                f"Sekurkopio-dosierujo : {new_dir}\n"
+                f"Skribita             : {datetime.now(timezone.utc).isoformat()}\n\n"
+                "Instrukcioj:\n"
+                "  1. Instaladu autish denove.\n"
+                "  2. Rulu: autish sekurkopio reveni\n"
+                "  3. Enigu la cifran pasvorton kiun vi uzis por krei"
+                " la sekurkopion.\n\n"
+                "AVERTO: Cifi la cifran pasvorton en tiu cifi dosiero"
+                " nur se vi stokos\n"
+                "        gin en sekura loko (ekz. en cif-sako, cif-ujo, ktp.).\n",
+                encoding="utf-8",
+            )
+            typer.echo(f"[v] Gvido konservita al: {hint_path}")
 
 
 @app.command("historio")
@@ -491,3 +524,103 @@ def historio_cmd() -> None:
         detail_str = ", ".join(f"{k}={v}" for k, v in detaloj.items())
         table.add_row(str(i), ts, entry["ago"], detail_str)
     console.print(table)
+
+
+@app.command("reveni")
+def reveni(
+    tempo: int | None = typer.Option(
+        None,
+        "-t",
+        "--tempo",
+        help=(
+            "Specify a time offset from now in minutes. "
+            "The two closest backup candidates will be proposed."
+        ),
+    ),
+) -> None:
+    """Restore autish data from a specific auto backup.
+
+    Without arguments: list available backups and ask you to select one.
+    With --tempo/-t MINUTES: propose the two closest backups in time.
+    In both cases a j/N confirmation is required before restoring.
+    """
+    strategy = _load_auto_strategy()
+    if not strategy:
+        typer.echo(
+            "[!] Neniu automata sekurkopio konfigurita. Uzu: sekurkopio auto",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    dosierujo = Path(strategy["dosierujo"])
+    if not dosierujo.exists():
+        typer.echo(f"[!] Dosierujo ne trovita: {dosierujo}", err=True)
+        raise typer.Exit(1)
+
+    # Collect available backup files sorted newest-first
+    files = sorted(
+        dosierujo.glob("autish_backup_*.aut"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not files:
+        typer.echo("[!] Neniuj sekurkopidosieroj trovitaj.", err=True)
+        raise typer.Exit(1)
+
+    selected: Path | None = None
+
+    if tempo is not None:
+        # Find the two backups closest to (now - tempo minutes)
+        target_ts = datetime.now(timezone.utc).timestamp() - tempo * 60
+        sorted_by_diff = sorted(
+            files, key=lambda p: abs(p.stat().st_mtime - target_ts)
+        )
+        candidates = sorted_by_diff[:2]
+
+        typer.echo(f"\nPlej proksimaj sekurkopidosieroj al -{tempo} minutoj:\n")
+        for i, fp in enumerate(candidates, 1):
+            mtime = datetime.fromtimestamp(fp.stat().st_mtime, tz=timezone.utc)
+            typer.echo(
+                f"  {i}. {fp.name}  —  {mtime.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+            )
+
+        while True:
+            choice = typer.prompt(f"Elektu (1-{len(candidates)})", default="1").strip()
+            if choice.isdigit() and 1 <= int(choice) <= len(candidates):
+                selected = candidates[int(choice) - 1]
+                break
+            typer.echo(f"[!] Bonvolu tajpi nombron inter 1 kaj {len(candidates)}.")
+    else:
+        # Full interactive list
+        typer.echo("\nDisponibleaj sekurkopidosieroj:\n")
+        for i, fp in enumerate(files, 1):
+            mtime = datetime.fromtimestamp(fp.stat().st_mtime, tz=timezone.utc)
+            typer.echo(
+                f"  {i:2d}. {fp.name}  —  {mtime.strftime('%Y-%m-%d %H:%M:%S')} UTC"
+            )
+
+        while True:
+            choice = typer.prompt(f"Elektu (1-{len(files)})").strip()
+            if choice.isdigit() and 1 <= int(choice) <= len(files):
+                selected = files[int(choice) - 1]
+                break
+            typer.echo(f"[!] Bonvolu tajpi nombron inter 1 kaj {len(files)}.")
+
+    if not _confirm_esperante(
+        f"\nRestarigi el: {selected.name}?", default_yes=False
+    ):
+        typer.echo("Nuligita.")
+        return
+
+    pasvorto = typer.prompt("Pasvorto", hide_input=True)
+
+    try:
+        count = _import_from_archive(
+            selected, pasvorto, formato="7z", overwrite=True
+        )
+    except Exception as exc:
+        typer.echo(f"[!] Restarigado malsukcesis: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    _push_history("reveni", {"dosiero": str(selected)})
+    typer.echo(f"[v] Restarigis {count} dosiero(j)n el {selected.name}.")

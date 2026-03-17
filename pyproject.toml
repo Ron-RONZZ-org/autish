@@ -52,6 +52,7 @@ tempo = "autish.commands.tempo:app"
 kp = "autish.commands.kp:app"
 shelo = "autish.commands.shelo:app"
 sekurkopio = "autish.commands.sekurkopio:app"
+uzanto = "autish.commands.uzanto:app"
 
 [tool.ruff]
 line-length = 88
