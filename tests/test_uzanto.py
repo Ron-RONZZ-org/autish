@@ -141,7 +141,7 @@ class TestProfiloModifi:
     def test_invalid_custom_field_format(self, isolated_profile):
         with patch(_NO_MASTER, return_value=None):
             result = runner.invoke(
-                app, ["uzanto", "profilo", "modifi", "-k", "NOCORONVALUE"]
+                app, ["uzanto", "profilo", "modifi", "-k", "NOCOLONVALUE"]
             )
         assert result.exit_code != 0
 

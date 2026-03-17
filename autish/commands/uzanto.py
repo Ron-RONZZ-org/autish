@@ -404,7 +404,7 @@ def profilo_importi(
         typed = typer.prompt(
             "Ekzistanta profilo trovita. Tajpu 'anstatauigi' por konfirmi anstatauxigon"
         ).strip()
-        if typed not in ("anstatauigi", "anstatauigi"):
+        if typed not in ("anstatauigi", "anstata\u016digi"):
             typer.echo("Nuligita.")
             return
 
