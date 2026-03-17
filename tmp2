@@ -1,0 +1,26 @@
+# feature enhancements
+
+## vorto
+
+### CLI: 
+
+- for `aldoni` `J` for `jes` is not accepted as confirmation ! fix it !
+- `--tipo`- change `suf` to `sui`(ina), `sum` to `suv`(vira) for consistent esperanto locale. Continue to accept `suf/sum` as aliases to preserve userspace.
+### add an `uzo` field for saving usage examples for words/expressions
+  - the `uzo` usage examples are inputted with the `difinio`
+  - with syntax `{difinio}:*{uzo}*`
+  - be mindful there are already `{difinio}:*{uzo}*` stored in the database in the field difinio, so backward compatibilité is important
+  - in `vidi`, `uzo` is rendered in non-bold italic, and difinio in bold as usual (CLI/interactive mode)
+
+## wifi
+
+- CLI: add a single function to restart network card and related drivers, etc. in case of connection problem.
+- bug fix
+```
+autish> wifi ls Livebox-FCE0
+Error: Livebox-FCE0 - no such connection profile.
+
+```
+- Also, add a -k option in `ls` to list saved connection profiles, even when they are not available for connection
+- also ensure `ls {SSID}` works for saved network profiles not available for connection
+

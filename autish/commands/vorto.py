@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS vorto (
     tono        TEXT,
     nivelo      REAL,
     difinoj     TEXT NOT NULL DEFAULT '[]',
+    uzoj        TEXT NOT NULL DEFAULT '[]',
     etikedoj    TEXT NOT NULL DEFAULT '{}',
     ligiloj     TEXT NOT NULL DEFAULT '[]',
     kreita_je   TEXT NOT NULL,
@@ -84,6 +85,7 @@ CREATE TABLE IF NOT EXISTS rubujo (
     tono        TEXT,
     nivelo      REAL,
     difinoj     TEXT NOT NULL DEFAULT '[]',
+    uzoj        TEXT NOT NULL DEFAULT '[]',
     etikedoj    TEXT NOT NULL DEFAULT '{}',
     ligiloj     TEXT NOT NULL DEFAULT '[]',
     kreita_je   TEXT NOT NULL,
@@ -108,18 +110,41 @@ def _get_db() -> sqlite3.Connection:
     con.execute("PRAGMA journal_mode=WAL;")
     con.execute("PRAGMA foreign_keys=ON;")
     con.executescript(_CREATE_VORTO + _CREATE_RUBUJO + _CREATE_UNDO)
+    _migrate_db(con)
     return con
+
+
+def _migrate_db(con: sqlite3.Connection) -> None:
+    for table in ("vorto", "rubujo"):
+        cols = {
+            row[1]
+            for row in con.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if "uzoj" not in cols:
+            con.execute(
+                f"ALTER TABLE {table} ADD COLUMN uzoj TEXT NOT NULL DEFAULT '[]'"
+            )
+    con.commit()
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
     """Convert a *vorto* table row to a plain dict, parsing JSON columns."""
     d = dict(row)
-    for col, default in (("difinoj", "[]"), ("etikedoj", "{}"), ("ligiloj", "[]")):
+    for col, default in (
+        ("difinoj", "[]"),
+        ("uzoj", "[]"),
+        ("etikedoj", "{}"),
+        ("ligiloj", "[]"),
+    ):
         raw = d.get(col) or default
         try:
             d[col] = json.loads(raw)
         except json.JSONDecodeError:
             d[col] = json.loads(default)
+    d["difinoj"], d["uzoj"] = _normalize_difinoj_uzoj(
+        d.get("difinoj") or [],
+        d.get("uzoj") or [],
+    )
     return d
 
 
@@ -135,6 +160,7 @@ def _dict_to_params(entry: dict) -> tuple:
         entry.get("tono"),
         entry.get("nivelo"),
         json.dumps(entry.get("difinoj") or [], ensure_ascii=False),
+        json.dumps(entry.get("uzoj") or [], ensure_ascii=False),
         json.dumps(entry.get("etikedoj") or {}, ensure_ascii=False),
         json.dumps(entry.get("ligiloj") or [], ensure_ascii=False),
         entry["kreita_je"],
@@ -147,8 +173,15 @@ def _dict_to_params(entry: dict) -> tuple:
 
 _TIPO_MAP: dict[str, str] = {
     # word subtypes
-    "su": "substantivo",
-    "substantivo": "substantivo",
+    "su": "substantivo-neŭtra",
+    "substantivo": "substantivo-neŭtra",
+    "substantivo-neŭtra": "substantivo-neŭtra",
+    "sui": "substantivo-ina",
+    "suf": "substantivo-ina",
+    "substantivo-ina": "substantivo-ina",
+    "suv": "substantivo-vira",
+    "sum": "substantivo-vira",
+    "substantivo-vira": "substantivo-vira",
     "ve": "verbo",
     "verbo": "verbo",
     "aj": "adjektivo",
@@ -212,8 +245,8 @@ def _save_entries(entries: list[dict]) -> None:
             """
             INSERT INTO vorto
                 (uuid, teksto, lingvo, kategorio, tipo, temo, tono,
-                 nivelo, difinoj, etikedoj, ligiloj, kreita_je, modifita_je)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 nivelo, difinoj, uzoj, etikedoj, ligiloj, kreita_je, modifita_je)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [_dict_to_params(e) for e in entries],
         )
@@ -256,8 +289,8 @@ def _push_undo(operation: dict) -> None:
 _RUBUJO_INSERT = """
 INSERT INTO rubujo
     (uuid, teksto, lingvo, kategorio, tipo, temo, tono, nivelo,
-     difinoj, etikedoj, ligiloj, kreita_je, modifita_je, forigita_je)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     difinoj, uzoj, etikedoj, ligiloj, kreita_je, modifita_je, forigita_je)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _RUBUJO_DAYS = 30  # entries older than this are auto-purged
@@ -299,8 +332,8 @@ def _recover_from_rubujo(uuid: str) -> dict | None:
             """
             INSERT OR REPLACE INTO vorto
                 (uuid, teksto, lingvo, kategorio, tipo, temo, tono, nivelo,
-                 difinoj, etikedoj, ligiloj, kreita_je, modifita_je)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 difinoj, uzoj, etikedoj, ligiloj, kreita_je, modifita_je)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             _dict_to_params(entry),
         )
@@ -371,6 +404,97 @@ def _parse_etikedo(items: list[str] | None) -> dict[str, str]:
     return result
 
 
+def _split_difino_uzo(raw: str) -> tuple[str, str]:
+    """Split `difino:*uzo*` input while preserving backward compatibility."""
+    m = re.match(r"^(.*?):\*(.+)\*$", raw.strip())
+    if not m:
+        return raw.strip(), ""
+    return m.group(1).strip(), m.group(2).strip()
+
+
+def _normalize_difinoj_uzoj(
+    difinoj: list[str], uzoj: list[str] | None = None
+) -> tuple[list[str], list[str]]:
+    clean_difinoj: list[str] = []
+    clean_uzoj: list[str] = []
+    existing_uzoj = list(uzoj or [])
+    for i, raw in enumerate(difinoj):
+        d, parsed_u = _split_difino_uzo(raw)
+        fallback_u = existing_uzoj[i].strip() if i < len(existing_uzoj) else ""
+        clean_difinoj.append(d)
+        clean_uzoj.append(parsed_u or fallback_u)
+    return clean_difinoj, clean_uzoj
+
+
+def _sync_bidirectional_links(
+    entries: list[dict],
+    source_uuid: str,
+    requested_links: list[str],
+    *,
+    previous_links: list[str] | None = None,
+) -> None:
+    """Keep links symmetric: if A links to B, B links back to A."""
+    source = next((e for e in entries if e["uuid"] == source_uuid), None)
+    if source is None:
+        return
+
+    now = _now_iso()
+
+    normalized_links: list[str] = []
+    seen: set[str] = set()
+    for raw in requested_links:
+        target = _find_entry(raw, entries)
+        target_uuid = target["uuid"] if target is not None else raw
+        if target_uuid == source_uuid or target_uuid in seen:
+            continue
+        seen.add(target_uuid)
+        normalized_links.append(target_uuid)
+
+    raw_previous = (
+        previous_links
+        if previous_links is not None
+        else (source.get("ligiloj") or [])
+    )
+    previous_link_set = {
+        target["uuid"]
+        for raw in raw_previous
+        for target in [_find_entry(raw, entries)]
+        if target is not None and target["uuid"] != source_uuid
+    }
+    current_links = {
+        target["uuid"]
+        for raw in normalized_links
+        for target in [_find_entry(raw, entries)]
+        if target is not None and target["uuid"] != source_uuid
+    }
+
+    source["ligiloj"] = normalized_links
+    source["modifita_je"] = now
+
+    for removed_uuid in previous_link_set - current_links:
+        linked = next((e for e in entries if e["uuid"] == removed_uuid), None)
+        if linked is None:
+            continue
+        updated_links = [
+            item
+            for item in (linked.get("ligiloj") or [])
+            if _find_entry(item, entries) is None
+            or _find_entry(item, entries)["uuid"] != source_uuid
+        ]
+        if updated_links != (linked.get("ligiloj") or []):
+            linked["ligiloj"] = updated_links
+            linked["modifita_je"] = now
+
+    for added_uuid in current_links - previous_link_set:
+        linked = next((e for e in entries if e["uuid"] == added_uuid), None)
+        if linked is None:
+            continue
+        linked_links = linked.get("ligiloj") or []
+        if source_uuid not in linked_links:
+            linked["ligiloj"] = [*linked_links, source_uuid]
+            linked["modifita_je"] = now
+
+
 def _find_entry(uid_or_teksto: str, entries: list[dict]) -> dict | None:
     """Locate an entry by exact UUID, UUID prefix, or case-insensitive exact text."""
     # Exact UUID match
@@ -425,7 +549,7 @@ def _fuzzy_text_matches(entries: list[dict], query: str, limit: int = 50) -> lis
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _display_entry(entry: dict) -> None:
+def _display_entry(entry: dict, all_entries: list[dict] | None = None) -> None:
     """Render one entry using a Rich panel."""
     uid_short = entry["uuid"][:8]
     lines: list[str] = [
@@ -448,10 +572,13 @@ def _display_entry(entry: dict) -> None:
     _row("nivelo:", f"{nivelo:.1f}" if nivelo is not None else "")
 
     difinoj: list[str] = entry.get("difinoj") or []
+    uzoj: list[str] = entry.get("uzoj") or []
     if difinoj:
         lines.append(f"  [dim]{'difinoj:':<12}[/dim]")
         for i, d in enumerate(difinoj, 1):
-            lines.append(f"    {i}. {d}")
+            lines.append(f"    [bold]{i}. {d}[/bold]")
+            if i - 1 < len(uzoj) and uzoj[i - 1]:
+                lines.append(f"       [italic dim]{uzoj[i - 1]}[/italic dim]")
 
     etikedoj: dict[str, str] = entry.get("etikedoj") or {}
     if etikedoj:
@@ -461,7 +588,22 @@ def _display_entry(entry: dict) -> None:
 
     ligiloj: list[str] = entry.get("ligiloj") or []
     if ligiloj:
-        _row("ligiloj:", ", ".join(ligiloj))
+        linked_parts: list[str] = []
+        if all_entries is None:
+            linked_parts = ligiloj
+        else:
+            for lid in ligiloj:
+                linked = _find_entry(lid, all_entries)
+                if linked is None:
+                    linked_parts.append(lid)
+                    continue
+                text = linked.get("teksto") or ""
+                defs = linked.get("difinoj") or []
+                detail = f"{text}: {defs[0]}" if defs else text
+                if len(detail) > 42:
+                    detail = detail[:39] + "..."
+                linked_parts.append(detail)
+        _row("ligiloj:", " | ".join(linked_parts))
 
     lines.append("")
     _row("kreita:", (entry.get("kreita_je") or "")[:19])
@@ -521,11 +663,14 @@ def _show_diff_confirmation(
         "tono",
         "nivelo",
         "difinoj",
+        "uzoj",
         "etikedoj",
         "ligiloj",
     )
+    title = entry.get("teksto") or action_label
+    uuid_short = (entry.get("uuid") or "")[:8]
     typer.echo("")
-    typer.echo(f"── Konfirmo : {action_label} ──────────────────────────")
+    typer.echo(f"── **{title}** #{uuid_short} ──────────────────────────")
     if old_entry:
         for f in _FIELDS:
             old_v = old_entry.get(f)
@@ -538,7 +683,20 @@ def _show_diff_confirmation(
             if v:
                 typer.echo(f"  {f}: {v!r}")
     typer.echo("──────────────────────────────────────────────────────────")
-    return typer.confirm("Daŭrigi? (Continue?)", default=True)
+    return _confirm_esperante("Daŭrigi?", default_yes=True)
+
+
+def _confirm_esperante(prompt: str, *, default_yes: bool) -> bool:
+    suffix = "(J/n)" if default_yes else "(j/N)"
+    ans = typer.prompt(f"{prompt} {suffix}", default=("J" if default_yes else "N"))
+    first = ans.strip()[:1].lower() if ans is not None else ""
+    if not first:
+        return default_yes
+    if first in ("j", "y"):
+        return True
+    if first == "n":
+        return False
+    return default_yes
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -556,7 +714,8 @@ def aldoni(
         None,
         "-t",
         "--tipo",
-        help="Subtype: substantivo/su, verbo/ve, adjektivo/aj, adverbo/av, "
+        help="Subtype: substantivo-neŭtra/su, substantivo-ina/sui, "
+        "substantivo-vira/suv, verbo/ve, adjektivo/aj, adverbo/av, "
         "parola/pa, skriba/sk, citaĵo/ci, ŝerco/ŝe, proverbo/pr, poemo/po, "
         "ekzemplo/ek.",
     ),
@@ -579,13 +738,14 @@ def aldoni(
         help="Custom tag KEY:VALUE. Repeat flag for multiple.",
     ),
     ligilo: list[str] | None = typer.Option(
-        None, "--ligilo", help="Linked entry UUID(s). Repeat flag for multiple."
+        None, "-L", "--ligilo", help="Linked entry UUID(s). Repeat flag for multiple."
     ),
 ) -> None:
     """Add a new word, phrase, or sentence to the wordbank."""
     if nivelo is not None and not (1.0 <= nivelo <= 10.0):
         typer.echo("Error: nivelo must be between 1 and 10.", err=True)
         raise typer.Exit(code=1)
+    difinoj, uzoj = _normalize_difinoj_uzoj(difino or [], [])
 
     now = _now_iso()
     entry: dict = {
@@ -597,7 +757,8 @@ def aldoni(
         "temo": temo,
         "tono": _normalize_tono(tono),
         "nivelo": nivelo,
-        "difinoj": difino or [],
+        "difinoj": difinoj,
+        "uzoj": uzoj,
         "etikedoj": _parse_etikedo(etikedo),
         "ligiloj": ligilo or [],
         "kreita_je": now,
@@ -610,6 +771,12 @@ def aldoni(
 
     entries = _load_entries()
     entries.append(entry)
+    _sync_bidirectional_links(
+        entries,
+        entry["uuid"],
+        entry.get("ligiloj") or [],
+        previous_links=[],
+    )
     _save_entries(entries)
     _push_undo({"op": "aldoni", "uuid": entry["uuid"]})
     typer.echo(f"Aldonis #{entry['uuid'][:8]}  \"{entry['teksto']}\"")
@@ -641,7 +808,7 @@ def vidi(
     if entry is None:
         typer.echo(f"Eniro ne trovita: {uid!r}", err=True)
         raise typer.Exit(code=1)
-    _display_entry(entry)
+    _display_entry(entry, entries)
 
 
 @app.command("modifi")
@@ -665,7 +832,7 @@ def modifi(
         None, "-e", "--etikedo", help="New tags KEY:VALUE (replaces existing)."
     ),
     ligilo: list[str] | None = typer.Option(
-        None, "--ligilo", help="New linked UUIDs (replaces existing)."
+        None, "-L", "--ligilo", help="New linked UUIDs (replaces existing)."
     ),
 ) -> None:
     """Modify a wordbank entry. Pass at least one option to update."""
@@ -700,7 +867,9 @@ def modifi(
     if nivelo is not None:
         entry["nivelo"] = nivelo
     if difino is not None:
-        entry["difinoj"] = difino
+        difinoj, uzoj = _normalize_difinoj_uzoj(difino, entry.get("uzoj") or [])
+        entry["difinoj"] = difinoj
+        entry["uzoj"] = uzoj
     if etikedo is not None:
         entry["etikedoj"] = _parse_etikedo(etikedo)
     if ligilo is not None:
@@ -713,6 +882,12 @@ def modifi(
 
     idx = next(i for i, e in enumerate(entries) if e["uuid"] == entry["uuid"])
     entries[idx] = entry
+    _sync_bidirectional_links(
+        entries,
+        entry["uuid"],
+        entry.get("ligiloj") or [],
+        previous_links=old_entry.get("ligiloj") or [],
+    )
     _save_entries(entries)
     _push_undo({"op": "modifi", "old": old_entry})
     typer.echo(f"Modifis #{entry['uuid'][:8]}  \"{entry['teksto']}\"")
@@ -933,10 +1108,13 @@ def _entry_to_lines(entry: dict) -> list[str]:
     _row("nivelo:", f"{nivelo:.1f}" if nivelo is not None else "")
 
     difinoj: list[str] = entry.get("difinoj") or []
+    uzoj: list[str] = entry.get("uzoj") or []
     if difinoj:
         lines.append(f"  {'difinoj:':<14}")
         for i, d in enumerate(difinoj, 1):
             lines.append(f"    {i}. {d}")
+            if i - 1 < len(uzoj) and uzoj[i - 1]:
+                lines.append(f"       /{uzoj[i - 1]}/")
 
     etikedoj: dict[str, str] = entry.get("etikedoj") or {}
     if etikedoj:
@@ -1045,19 +1223,37 @@ def _undo_action() -> str:
 
 
 def _tui_save_new(entry: dict) -> None:
+    entry["difinoj"], entry["uzoj"] = _normalize_difinoj_uzoj(
+        entry.get("difinoj") or [], entry.get("uzoj") or []
+    )
     all_entries = _load_entries()
     all_entries.append(entry)
+    _sync_bidirectional_links(
+        all_entries,
+        entry["uuid"],
+        entry.get("ligiloj") or [],
+        previous_links=[],
+    )
     _save_entries(all_entries)
     _push_undo({"op": "aldoni", "uuid": entry["uuid"]})
 
 
 def _tui_save_modified(entry: dict, old_entry: dict) -> None:
+    entry["difinoj"], entry["uzoj"] = _normalize_difinoj_uzoj(
+        entry.get("difinoj") or [], entry.get("uzoj") or []
+    )
     all_entries = _load_entries()
     idx = next(
         (i for i, e in enumerate(all_entries) if e["uuid"] == entry["uuid"]), None
     )
     if idx is not None:
         all_entries[idx] = entry
+    _sync_bidirectional_links(
+        all_entries,
+        entry["uuid"],
+        entry.get("ligiloj") or [],
+        previous_links=old_entry.get("ligiloj") or [],
+    )
     _save_entries(all_entries)
     _push_undo({"op": "modifi", "old": old_entry})
 
@@ -1197,11 +1393,10 @@ def rubujo_forigi(
         raise typer.Exit(code=1)
     entry = matches[0]
     if not justa:
-        typer.echo(
-            f"Ĉu definitive forigi #{entry['uuid'][:8]}  \"{entry['teksto']}\"? (y/N)"
-        )
-        ans = typer.prompt("", default="N")
-        if ans.lower() not in ("y", "j"):
+        if not _confirm_esperante(
+            f"Ĉu definitive forigi #{entry['uuid'][:8]}  \"{entry['teksto']}\"?",
+            default_yes=False,
+        ):
             typer.echo("Nuligita.")
             return
     ok = _permanent_delete_from_rubujo(entry["uuid"])
@@ -1224,9 +1419,10 @@ def rubujo_vakigi(
         typer.echo("Rubujo estas malplena.")
         return
     if not justa:
-        typer.echo(f"Ĉu definitive forigi ĈIUJN {len(entries)} eniro(j)n? (y/N)")
-        ans = typer.prompt("", default="N")
-        if ans.lower() not in ("y", "j"):
+        if not _confirm_esperante(
+            f"Ĉu definitive forigi ĈIUJN {len(entries)} eniro(j)n?",
+            default_yes=False,
+        ):
             typer.echo("Nuligita.")
             return
     with _get_db() as con:

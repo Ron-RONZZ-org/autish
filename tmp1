@@ -1,0 +1,22 @@
+À TESTE
+# global bugs
+  
+- esperanto locale confirmation is "J/n", not "Y/n".
+    - Since `J` is the capitalised (default), no input should lead to confirmation
+  - search entire CLI/interactive mode implementation across Autish to replace non-esperanto confirmations with esperanto style ones (J/n) or (j/N)
+
+## retposto problems
+
+- conversation view: 
+  - only showing parts of the conversation older than currently viewed messages, but not newer replies
+  - enhance detection so entire conversation history is always shown
+- message composition view
+  - the `m` markdown mode toggle only works when message body is focused
+   - should work regardless of focus
+  - for replies, automatically start writing on the line above --- Originala mesaĝo ---, not the line itself on focus.
+  - `:html` should open a preview of the current message, including signature in browser, like in message read view.
+- common problems
+  - in some screen, including the composition view for example, in NORMAL mode, `i` does not enter INSERT mode,`y` does not yank(copy) selection and `d` does not cut selection
+    - fix it !
+
+

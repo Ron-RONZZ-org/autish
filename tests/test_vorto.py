@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 
 from autish.commands.vorto import (
     _detect_kategorio,
+    _display_entry,
     _entries_to_lines,
     _entry_to_lines,
     _find_entry,
@@ -34,7 +35,7 @@ def _make_entry(**kwargs) -> dict:
         "teksto": "hello",
         "lingvo": "en",
         "kategorio": "vorto",
-        "tipo": "substantivo",
+        "tipo": "substantivo-neŭtra",
         "temo": "salutations",
         "tono": "informala",
         "nivelo": 1.0,
@@ -82,10 +83,16 @@ class TestDetectKategorio:
 
 class TestNormalizeTipo:
     def test_full_name_unchanged(self):
-        assert _normalize_tipo("substantivo") == "substantivo"
+        assert _normalize_tipo("substantivo") == "substantivo-neŭtra"
+        assert _normalize_tipo("substantivo-ina") == "substantivo-ina"
+        assert _normalize_tipo("substantivo-vira") == "substantivo-vira"
 
     def test_abbreviation_expanded(self):
-        assert _normalize_tipo("su") == "substantivo"
+        assert _normalize_tipo("su") == "substantivo-neŭtra"
+        assert _normalize_tipo("sui") == "substantivo-ina"
+        assert _normalize_tipo("suv") == "substantivo-vira"
+        assert _normalize_tipo("suf") == "substantivo-ina"
+        assert _normalize_tipo("sum") == "substantivo-vira"
         assert _normalize_tipo("ve") == "verbo"
         assert _normalize_tipo("aj") == "adjektivo"
         assert _normalize_tipo("av") == "adverbo"
@@ -103,7 +110,7 @@ class TestNormalizeTipo:
         assert _normalize_tipo("custom") == "custom"
 
     def test_case_insensitive(self):
-        assert _normalize_tipo("SU") == "substantivo"
+        assert _normalize_tipo("SU") == "substantivo-neŭtra"
         assert _normalize_tipo("Verbo") == "verbo"
 
 
@@ -186,7 +193,7 @@ _LOAD = "autish.commands.vorto._load_entries"
 _SAVE = "autish.commands.vorto._save_entries"
 _LOAD_UNDO = "autish.commands.vorto._load_undo_stack"
 _SAVE_UNDO = "autish.commands.vorto._save_undo_stack"
-_CONFIRM = "autish.commands.vorto.typer.confirm"
+_CONFIRM = "autish.commands.vorto._confirm_esperante"
 _MOVE_TO_RUBUJO = "autish.commands.vorto._move_to_rubujo"
 _RECOVER_FROM_RUBUJO = "autish.commands.vorto._recover_from_rubujo"
 
@@ -254,9 +261,60 @@ class TestAldoni:
             )
         entry = mock_save.call_args[0][0][0]
         assert entry["lingvo"] == "en"
-        assert entry["tipo"] == "substantivo"
+        assert entry["tipo"] == "substantivo-neŭtra"
         assert entry["nivelo"] == 3.0
         assert "a greeting" in entry["difinoj"]
+
+    def test_ligilo_short_alias_L(self):
+        with (
+            patch(_LOAD, return_value=[]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            runner.invoke(
+                app,
+                ["vorto", "aldoni", "hello", "-L", SAMPLE_UUID2],
+            )
+        entry = mock_save.call_args[0][0][0]
+        assert entry["ligiloj"] == [SAMPLE_UUID2]
+
+    def test_difino_with_uzo_syntax_is_split(self):
+        with (
+            patch(_LOAD, return_value=[]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            runner.invoke(
+                app,
+                ["vorto", "aldoni", "hello", "-d", "saluto:*mi uzas tion*"],
+            )
+        entry = mock_save.call_args[0][0][0]
+        assert entry["difinoj"] == ["saluto"]
+        assert entry["uzoj"] == ["mi uzas tion"]
+
+    def test_ligilo_adds_reciprocal_link(self):
+        linked = _make_entry(uuid=SAMPLE_UUID2, teksto="world", ligiloj=[])
+        with (
+            patch(_LOAD, return_value=[linked]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+            patch(
+                "autish.commands.vorto._uuid_mod.uuid4",
+                return_value=uuid.UUID(SAMPLE_UUID),
+            ),
+        ):
+            runner.invoke(app, ["vorto", "aldoni", "hello", "-L", SAMPLE_UUID2])
+        saved_entries = mock_save.call_args[0][0]
+        entry_a = next(e for e in saved_entries if e["uuid"] == SAMPLE_UUID)
+        entry_b = next(e for e in saved_entries if e["uuid"] == SAMPLE_UUID2)
+        assert entry_a["ligiloj"] == [SAMPLE_UUID2]
+        assert entry_b["ligiloj"] == [SAMPLE_UUID]
 
     def test_cancelled_does_not_save(self):
         with (
@@ -306,6 +364,21 @@ class TestVidi:
         with patch(_LOAD, return_value=[]):
             result = runner.invoke(app, ["vorto", "vidi", "notfound"])
         assert result.exit_code != 0
+
+    def test_display_entry_formats_linked_content_and_bold_definitions(self):
+        linked = _make_entry(
+            uuid=SAMPLE_UUID2,
+            teksto="bonjour",
+            difinoj=["a very long description that should be abbreviated for display"],
+        )
+        entry = _make_entry(ligiloj=[SAMPLE_UUID2], difinoj=["short def"])
+        with patch("autish.commands.vorto.console.print") as mock_print:
+            _display_entry(entry, [entry, linked])
+        panel = mock_print.call_args[0][0]
+        rendered = panel.renderable
+        assert "[bold]1. short def[/bold]" in rendered
+        assert "bonjour:" in rendered
+        assert "..." in rendered
 
 
 class TestModifi:
@@ -364,6 +437,43 @@ class TestModifi:
         saved_stack = mock_save_undo.call_args[0][0]
         assert saved_stack[-1]["op"] == "modifi"
         assert saved_stack[-1]["old"]["lingvo"] == "en"
+
+    def test_ligilo_update_keeps_links_symmetric(self):
+        entry_a = _make_entry(uuid=SAMPLE_UUID, ligiloj=[SAMPLE_UUID2])
+        entry_b = _make_entry(uuid=SAMPLE_UUID2, teksto="b", ligiloj=[SAMPLE_UUID])
+        entry_c = _make_entry(
+            uuid="99999999-2222-3333-4444-555555555555",
+            teksto="c",
+            ligiloj=[],
+        )
+        with (
+            patch(_LOAD, return_value=[entry_a, entry_b, entry_c]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            runner.invoke(
+                app,
+                [
+                    "vorto",
+                    "modifi",
+                    SAMPLE_UUID,
+                    "-L",
+                    "99999999-2222-3333-4444-555555555555",
+                ],
+            )
+        saved_entries = mock_save.call_args[0][0]
+        saved_a = next(e for e in saved_entries if e["uuid"] == SAMPLE_UUID)
+        saved_b = next(e for e in saved_entries if e["uuid"] == SAMPLE_UUID2)
+        saved_c = next(
+            e
+            for e in saved_entries
+            if e["uuid"] == "99999999-2222-3333-4444-555555555555"
+        )
+        assert saved_a["ligiloj"] == ["99999999-2222-3333-4444-555555555555"]
+        assert SAMPLE_UUID not in saved_b["ligiloj"]
+        assert SAMPLE_UUID in saved_c["ligiloj"]
 
 
 class TestSerci:
