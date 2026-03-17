@@ -404,6 +404,20 @@ def _parse_etikedo(items: list[str] | None) -> dict[str, str]:
     return result
 
 
+def _apply_french_ligatures(text: str) -> str:
+    """Replace digraph 'oe'/'OE' with the proper French ligature œ/Œ."""
+    # Replace upper-case first (OE → Œ), then mixed (Oe → Œ), then lower (oe → œ)
+    text = re.sub(r"OE", "Œ", text)
+    text = re.sub(r"Oe", "Œ", text)
+    text = re.sub(r"oe", "œ", text)
+    return text
+
+
+def _normalize_oe(text: str) -> str:
+    """Fold œ/Œ → oe/OE for case-insensitive search comparisons."""
+    return text.replace("œ", "oe").replace("Œ", "OE")
+
+
 def _split_difino_uzo(raw: str) -> tuple[str, str]:
     """Split `difino:*uzo*` input while preserving backward compatibility."""
     m = re.match(r"^(.*?):\*(.+)\*$", raw.strip())
@@ -528,13 +542,16 @@ def _find_entry(uid_or_teksto: str, entries: list[dict]) -> dict | None:
 
 
 def _fuzzy_text_matches(entries: list[dict], query: str, limit: int = 50) -> list[dict]:
-    """Return entries whose teksto is close to query, sorted by similarity."""
-    q = query.strip().lower()
+    """Return entries whose teksto is close to query, sorted by similarity.
+
+    Treats 'oe' and 'œ' as equivalent and ignores letter case.
+    """
+    q = _normalize_oe(query.strip().lower())
     if not q:
         return []
     scored: list[tuple[float, dict]] = []
     for entry in entries:
-        text = (entry.get("teksto") or "").lower()
+        text = _normalize_oe((entry.get("teksto") or "").lower())
         if not text:
             continue
         ratio = SequenceMatcher(None, q, text).ratio()
@@ -745,6 +762,12 @@ def aldoni(
     if nivelo is not None and not (1.0 <= nivelo <= 10.0):
         typer.echo("Error: nivelo must be between 1 and 10.", err=True)
         raise typer.Exit(code=1)
+
+    # Apply French ligature normalization when language is French
+    if (lingvo or "").lower() == "fr":
+        teksto = _apply_french_ligatures(teksto)
+        difino = [_apply_french_ligatures(d) for d in (difino or [])]
+
     difinoj, uzoj = _normalize_difinoj_uzoj(difino or [], [])
 
     now = _now_iso()
@@ -806,8 +829,42 @@ def vidi(
         return
     entry = _find_entry(uid, entries)
     if entry is None:
-        typer.echo(f"Eniro ne trovita: {uid!r}", err=True)
-        raise typer.Exit(code=1)
+        # No exact match — try fuzzy/closest matches (max 5)
+        closest = _fuzzy_text_matches(entries, uid, limit=5)
+        if not closest:
+            typer.echo(f"Eniro ne trovita: {uid!r}", err=True)
+            raise typer.Exit(code=1)
+        if len(closest) == 1:
+            typer.echo(
+                f"Ekzakta kongruo ne trovita. Montras plej proksiman: "
+                f"\"{closest[0]['teksto']}\""
+            )
+            _display_entry(closest[0], entries)
+            return
+        # Multiple approximate matches — ask user to pick one
+        typer.echo(f"Ekzakta kongruo ne trovita por {uid!r}. Proksimaj rezultoj:")
+        for i, match in enumerate(closest, 1):
+            typer.echo(
+                f"  {i}. [{match['uuid'][:8]}] {match['teksto']}"
+                + (f"  ({match.get('lingvo') or ''})" if match.get("lingvo") else "")
+            )
+        raw = typer.prompt(
+            f"Elektu numeron (1-{len(closest)}) aŭ premu Enter por nuligi",
+            default="",
+        )
+        raw = raw.strip()
+        if not raw:
+            typer.echo("Nuligita.")
+            return
+        try:
+            idx = int(raw) - 1
+            if not (0 <= idx < len(closest)):
+                raise ValueError
+        except ValueError:
+            typer.echo("Nevalida elekto.", err=True)
+            raise typer.Exit(code=1) from None
+        _display_entry(closest[idx], entries)
+        return
     _display_entry(entry, entries)
 
 
@@ -875,6 +932,14 @@ def modifi(
     if ligilo is not None:
         entry["ligiloj"] = ligilo
     entry["modifita_je"] = _now_iso()
+
+    # Apply French ligature normalization using the effective language
+    effective_lingvo = (entry.get("lingvo") or "").lower()
+    if effective_lingvo == "fr":
+        entry["teksto"] = _apply_french_ligatures(entry["teksto"])
+        entry["difinoj"] = [
+            _apply_french_ligatures(d) for d in entry.get("difinoj") or []
+        ]
 
     if not _show_diff_confirmation("modifi", entry, old_entry):
         typer.echo("Nuligita. (Cancelled.)")

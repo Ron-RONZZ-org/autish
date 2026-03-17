@@ -45,12 +45,14 @@ autish/
 │       ├── bluetooth.py   # Bluetooth subcommands
 │       ├── sistemo.py     # system info
 │       ├── kp.py          # clipboard copy
+│       ├── md.py          # Markdown utilities (view, export, import)
 │       └── vorto.py       # Mia Vorto wordbook microapp (SQLite)
 ├── tests/
 │   ├── __init__.py
 │   ├── test_tempo.py
 │   ├── test_kp.py
-│   └── test_vorto.py
+│   ├── test_vorto.py
+│   └── test_md.py
 ├── pyproject.toml
 ├── README.md
 ├── CONTRIBUTING.md
@@ -70,6 +72,28 @@ autish/
 7. **No internet dependency** — all v0.0.1 commands must work offline. Do not add network calls.
 8. **Test coverage** — every command module should have a corresponding test file under `tests/`.
 9. **Microapp data storage** — use SQLite (stdlib `sqlite3`) for any microapp that needs to persist structured data. Scalability and efficiency matter: prefer granular `INSERT`/`UPDATE`/`DELETE` over full-table rewrites; use `WAL` journal mode; store JSON arrays/objects in `TEXT` columns when normalisation would be overkill for the data size. Never use plain JSON files for databases.
+
+---
+
+## Direct CLI access (standard for new commands)
+
+Every new command module **must** be registered both in `autish/main.py` (as a
+sub-app under `autish <command>`) **and** in `pyproject.toml` as a standalone
+entry-point script so users can invoke it directly without the `autish` prefix.
+
+Example — adding a new `foo` command:
+1. Create `autish/commands/foo.py` with a `app = typer.Typer(name="foo", ...)`.
+2. Import and register in `autish/main.py`:
+   ```python
+   from autish.commands import foo
+   app.add_typer(foo.app, name="foo")
+   ```
+3. Add the entry point in `pyproject.toml`:
+   ```toml
+   [tool.poetry.scripts]
+   foo = "autish.commands.foo:app"
+   ```
+4. Run `poetry lock && poetry install` to install the new script.
 
 ---
 
