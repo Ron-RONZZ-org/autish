@@ -2519,3 +2519,162 @@ def reordigi_konton(
         typer.echo("[!] Konto jam ĉe limo; ne movita.", err=True)
         raise typer.Exit(1)
     typer.echo(f"[✓] Konto reordigita: {acc['retposto']} ({direkto}).")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Export / Import (account configurations)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _accounts_to_toml(accounts: list[dict], passwords: dict[int, str]) -> bytes:
+    """Serialise account configs + passwords to TOML bytes."""
+    import tomli_w  # noqa: PLC0415
+
+    records: list[dict] = []
+    for acc in accounts:
+        record: dict = {
+            "nomo": acc.get("nomo") or "",
+            "retposto": acc.get("retposto") or "",
+            "imap_servilo": acc.get("imap_servilo") or "",
+            "imap_haveno": int(acc.get("imap_haveno") or 993),
+            "imap_ssl": bool(acc.get("imap_ssl", True)),
+            "smtp_servilo": acc.get("smtp_servilo") or "",
+            "smtp_haveno": int(acc.get("smtp_haveno") or 587),
+            "smtp_tls": bool(acc.get("smtp_tls", True)),
+            "uzantonomo": acc.get("uzantonomo") or "",
+            "subskribo": acc.get("subskribo") or "",
+        }
+        pw = passwords.get(int(acc["id"]))
+        if pw:
+            record["pasvorto"] = pw
+        records.append(record)
+    return tomli_w.dumps({"kontoj": records}).encode("utf-8")
+
+
+def _toml_to_accounts(toml_bytes: bytes) -> list[dict]:
+    """Deserialise account configs from TOML bytes."""
+    try:
+        import tomllib  # type: ignore[import-untyped]  # noqa: PLC0415
+    except ImportError:
+        import tomli as tomllib  # type: ignore[no-redef,import-untyped]  # noqa: PLC0415
+    data = tomllib.loads(toml_bytes.decode("utf-8"))
+    kontoj = data.get("kontoj")
+    if not isinstance(kontoj, list):
+        raise ValueError("Malvalida eksportita dosiero: 'kontoj' ne trovita.")
+    return kontoj
+
+
+@app.command("eksporti")
+def eksporti(
+    dosiero: str = typer.Argument(..., help="Output file path (e.g. kontoj.toml.enc)."),
+    pasvorto: str | None = typer.Option(
+        None,
+        "-p",
+        "--pasvorto",
+        help="Encryption password (required; asked interactively if omitted).",
+    ),
+) -> None:
+    """Export all email account configs (encrypted TOML) for portability."""
+    from autish.commands._crypto import (  # noqa: PLC0415
+        encrypt,
+        validate_strong_password,
+    )
+
+    if not pasvorto:
+        pasvorto = typer.prompt("Pasvorto", hide_input=True, confirmation_prompt=True)
+
+    err = validate_strong_password(pasvorto)
+    if err:
+        typer.echo(f"[!] {err}", err=True)
+        raise typer.Exit(1)
+
+    accounts = _load_accounts()
+    if not accounts:
+        typer.echo("[!] Neniuj kontoj por eksporti.", err=True)
+        raise typer.Exit(1)
+
+    passwords: dict[int, str] = {}
+    for acc in accounts:
+        pw = keyring.get_password(_KEYRING_SERVICE, str(acc["id"]))
+        if pw:
+            passwords[int(acc["id"])] = pw
+
+    toml_bytes = _accounts_to_toml(accounts, passwords)
+    encrypted = encrypt(toml_bytes, pasvorto)
+    out_path = Path(dosiero)
+    out_path.write_bytes(encrypted)
+    typer.echo(
+        f"[✓] Eksportis {len(accounts)} konto(j)n al {out_path} (ĉifrita)."
+    )
+
+
+@app.command("importi")
+def importi(
+    dosiero: str = typer.Argument(..., help="Input file path (encrypted TOML export)."),
+    pasvorto: str | None = typer.Option(
+        None,
+        "-p",
+        "--pasvorto",
+        help="Decryption password (asked interactively if omitted).",
+    ),
+    anstatauigi: bool = typer.Option(
+        False,
+        "-A",
+        "--anstatauigi",
+        help="Overwrite existing accounts instead of merging.",
+    ),
+) -> None:
+    """Import email account configs from an encrypted TOML export."""
+    from autish.commands._crypto import decrypt, is_encrypted  # noqa: PLC0415
+
+    in_path = Path(dosiero)
+    if not in_path.exists():
+        typer.echo(f"[!] Dosiero ne trovita: {in_path}", err=True)
+        raise typer.Exit(1)
+
+    raw = in_path.read_bytes()
+
+    if is_encrypted(raw):
+        if not pasvorto:
+            pasvorto = typer.prompt("Pasvorto", hide_input=True)
+        try:
+            raw = decrypt(raw, pasvorto)
+        except ValueError as exc:
+            typer.echo(f"[!] Malĉifrad-eraro: {exc}", err=True)
+            raise typer.Exit(1) from exc
+    else:
+        typer.echo(
+            "[!] Dosiero ne estas ĉifrita. Retposto-eksportoj ĉiam estas ĉifritaj.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    try:
+        kontoj = _toml_to_accounts(raw)
+    except (ValueError, Exception) as exc:
+        typer.echo(f"[!] Malvalida dosierformato: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    if anstatauigi:
+        if not _confirm_esperante(
+            f"Ĉu anstataŭigi ĈIUJN ekzistantajn kontojn per {len(kontoj)} importitajn?",
+            default_yes=False,
+        ):
+            typer.echo("Nuligita.")
+            return
+        existing = _load_accounts()
+        for acc in existing:
+            _delete_account(int(acc["id"]))
+
+    added = 0
+    for rec in kontoj:
+        if not rec.get("retposto"):
+            continue
+        pw = rec.pop("pasvorto", None)
+        acc_id = _save_account(rec)
+        if pw:
+            _set_password(acc_id, pw)
+        added += 1
+
+    typer.echo(f"[✓] Importis {added} konto(j)n.")
+

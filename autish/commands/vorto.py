@@ -1081,6 +1081,111 @@ def malfari() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Export / Import
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@app.command("eksporti")
+def eksporti(
+    dosiero: str = typer.Argument(..., help="Output file path (e.g. vorto.json)."),
+    pasvorto: str | None = typer.Option(
+        None,
+        "-p",
+        "--pasvorto",
+        help="Optional password to encrypt the export.",
+    ),
+) -> None:
+    """Export all wordbook entries to a JSON file (optionally encrypted)."""
+    from autish.commands._crypto import encrypt  # noqa: PLC0415
+
+    entries = _load_entries()
+    payload = json.dumps(entries, ensure_ascii=False, indent=2).encode("utf-8")
+
+    out_path = Path(dosiero)
+    if pasvorto:
+        data = encrypt(payload, pasvorto)
+        out_path.write_bytes(data)
+        typer.echo(
+            f"[✓] Eksportis {len(entries)} eniro(j)n al {out_path} (ĉifrita)."
+        )
+    else:
+        out_path.write_bytes(payload)
+        typer.echo(f"[✓] Eksportis {len(entries)} eniro(j)n al {out_path}.")
+
+
+@app.command("importi")
+def importi(
+    dosiero: str = typer.Argument(..., help="Input file path (e.g. vorto.json)."),
+    pasvorto: str | None = typer.Option(
+        None,
+        "-p",
+        "--pasvorto",
+        help="Password to decrypt the import (if encrypted).",
+    ),
+    anstatauigi: bool = typer.Option(
+        False,
+        "-A",
+        "--anstatauigi",
+        help="Overwrite existing entries instead of merging.",
+    ),
+) -> None:
+    """Import wordbook entries from a JSON file (optionally encrypted)."""
+    from autish.commands._crypto import decrypt, is_encrypted  # noqa: PLC0415
+
+    in_path = Path(dosiero)
+    if not in_path.exists():
+        typer.echo(f"[!] Dosiero ne trovita: {in_path}", err=True)
+        raise typer.Exit(1)
+
+    raw = in_path.read_bytes()
+
+    if is_encrypted(raw):
+        if not pasvorto:
+            pasvorto = typer.prompt("Pasvorto", hide_input=True)
+        try:
+            raw = decrypt(raw, pasvorto)
+        except ValueError as exc:
+            typer.echo(f"[!] Malĉifrad-eraro: {exc}", err=True)
+            raise typer.Exit(1) from exc
+
+    try:
+        new_entries: list[dict] = json.loads(raw.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        typer.echo(f"[!] Malvalida dosierformato: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    if not isinstance(new_entries, list):
+        typer.echo("[!] Malvalida dosierformato: atendita listo de eniroj.", err=True)
+        raise typer.Exit(1)
+
+    if anstatauigi:
+        if not _confirm_esperante(
+            f"Ĉu anstataŭigi ĈIUJN ekzistantajn eniro(j)n per {len(new_entries)} "
+            "importitajn?",
+            default_yes=False,
+        ):
+            typer.echo("Nuligita.")
+            return
+        with _get_db() as con:
+            con.execute("DELETE FROM vorto")
+            con.commit()
+        _save_entries(new_entries)
+        typer.echo(
+            f"[✓] Anstataŭigis ĉiujn eniro(j)n per {len(new_entries)} importitajn."
+        )
+    else:
+        existing = _load_entries()
+        existing_uuids = {e["uuid"] for e in existing}
+        added = 0
+        for entry in new_entries:
+            if entry.get("uuid") not in existing_uuids:
+                existing.append(entry)
+                added += 1
+        _save_entries(existing)
+        typer.echo(f"[✓] Importis {added} nova(j)n eniro(j)n (ignoris duplikatojn).")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Interactive mode — full-screen curses TUI
 # ──────────────────────────────────────────────────────────────────────────────
 
