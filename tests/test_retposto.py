@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
-import json
+import curses
 import sqlite3
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from typer.testing import CliRunner
 
+from autish.commands._retposto_tui import (
+    ComposePanel,
+    LineEditor,
+    MessageReader,
+    RetpostoTUI,
+)
 from autish.commands.retposto import (
     _add_spam_block,
     _apply_filters,
@@ -25,13 +30,8 @@ from autish.commands.retposto import (
     _load_spam_blocks,
     _parse_imap_message,
     _remove_spam_block,
+    _reply_targets,
     _upsert_contact,
-)
-from autish.commands._retposto_tui import (
-    ComposePanel,
-    LineEditor,
-    MessageReader,
-    RetpostoTUI,
 )
 from autish.main import app
 
@@ -145,7 +145,7 @@ class TestParseImapMessage:
             f"Content-Type: text/plain; charset=utf-8\r\n"
             f"\r\n"
             f"{body}\r\n"
-        ).encode("utf-8")
+        ).encode()
 
     def test_basic_parse(self):
         raw = self._make_raw()
@@ -176,6 +176,47 @@ class TestParseImapMessage:
         msg = _parse_imap_message(raw, konto_id=1, dosierujo_id=None)
         assert msg["ricevita_je"] is not None
         assert "2024" in msg["ricevita_je"]
+
+    def test_thread_headers_extracted(self):
+        raw = (
+            b"From: sender@example.com\r\n"
+            b"To: rcpt@example.com\r\n"
+            b"Subject: Re: Test\r\n"
+            b"Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            b"Message-ID: <reply@example.com>\r\n"
+            b"In-Reply-To: <root@example.com>\r\n"
+            b"References: <root@example.com> <mid@example.com>\r\n"
+            b"Content-Type: text/plain; charset=utf-8\r\n"
+            b"\r\n"
+            b"Hello\r\n"
+        )
+        msg = _parse_imap_message(raw, konto_id=1, dosierujo_id=1)
+        assert msg["in_reply_to"] == "<root@example.com>"
+        assert "<mid@example.com>" in (msg["references_hdr"] or "")
+
+
+class TestReplyTargets:
+    def test_reply_to_self_targets_original_recipient(self):
+        msg = {
+            "de": "me@example.com",
+            "al": ["friend@example.com"],
+            "cc": ["team@example.com"],
+        }
+        to_targets, cc_targets = _reply_targets("me@example.com", msg)
+        assert to_targets == ["friend@example.com"]
+        assert cc_targets == []
+
+    def test_reply_all_excludes_self_and_keeps_others(self):
+        msg = {
+            "de": "alice@example.com",
+            "al": ["me@example.com", "bob@example.com"],
+            "cc": ["carol@example.com", "me@example.com"],
+        }
+        to_targets, cc_targets = _reply_targets(
+            "me@example.com", msg, reply_all=True
+        )
+        assert to_targets == ["alice@example.com", "bob@example.com"]
+        assert cc_targets == ["carol@example.com"]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -607,8 +648,34 @@ class TestCliFiltro:
 
 
 class _FakeStdScr:
+    def __init__(self, keys: list[int] | None = None):
+        self._keys = list(keys or [])
+
     def getmaxyx(self):
         return (24, 80)
+
+    def erase(self):
+        return None
+
+    def refresh(self):
+        return None
+
+    def noutrefresh(self):
+        return None
+
+    def addstr(self, *_args, **_kwargs):
+        return None
+
+    def move(self, *_args, **_kwargs):
+        return None
+
+    def timeout(self, _value):
+        return None
+
+    def get_wch(self):
+        if self._keys:
+            return self._keys.pop(0)
+        return -1
 
 
 class TestRetpostoTuiReader:
@@ -655,6 +722,26 @@ class TestRetpostoTuiReader:
             reader._handle_key(ord("j"))
         assert reader._view_row == 0
 
+    def test_R_triggers_reply_all_action(self):
+        msg = {"de": "a@b.com", "al": ["x@y.com"], "subjekto": "S", "korpo": "abc"}
+        reader = MessageReader(_FakeStdScr(), msg)
+        assert reader._handle_key(ord("R")) == "reply_all"
+
+    def test_compose_cancel_reopens_reader(self):
+        tui = _make_tui_for_keys()
+        tui._message_panel._messages = [
+            {"id": 1, "de": "a@b.com", "subjekto": "S", "korpo": "B", "legita": 1}
+        ]
+        tui._message_panel._cursor = 0
+        tui._compose_reply = MagicMock(return_value="cancel")  # type: ignore[method-assign]
+        with patch(
+            "autish.commands._retposto_tui.MessageReader.run",
+            side_effect=["reply", "quit"],
+        ) as run_mock:
+            tui._open_message()
+        tui._compose_reply.assert_called_once()
+        assert run_mock.call_count == 2
+
 
 class TestRetpostoTuiComposePanel:
     def test_esc_in_insert_switches_to_normal(self):
@@ -690,6 +777,14 @@ class TestRetpostoTuiComposePanel:
         panel.handle_key(ord("ŝ"))
         assert panel.get_values()["al"] == "ŝ"
 
+    def test_m_toggles_markdown_in_normal_mode(self):
+        panel = ComposePanel(_FakeStdScr(), {"korpo": "text"})
+        panel._current_field = len(panel._field_names()) - 1
+        panel._body_lines[0].mode = "NORMAL"
+        assert panel.markdown_enabled() is False
+        panel.handle_key(ord("m"))
+        assert panel.markdown_enabled() is True
+
 
 class TestRetpostoLineEditor:
     def test_ctrl_right_moves_word_in_insert(self):
@@ -718,7 +813,7 @@ class TestRetpostoLineEditor:
 
 def _make_tui_for_keys() -> RetpostoTUI:
     stdscr = _FakeStdScr()
-    return RetpostoTUI(
+    tui = RetpostoTUI(
         stdscr,
         load_accounts=lambda: [{"id": 1, "retposto": "me@example.com"}],
         load_messages=lambda **_: [],
@@ -736,6 +831,8 @@ def _make_tui_for_keys() -> RetpostoTUI:
         is_spam=lambda _s: False,
         ensure_folder=lambda *_a, **_k: 1,
     )
+    tui._focus = "list"
+    return tui
 
 
 class TestRetpostoTuiGlobalKeys:
@@ -750,6 +847,49 @@ class TestRetpostoTuiGlobalKeys:
         tui._action_spam = MagicMock()  # type: ignore[method-assign]
         assert tui._handle_key(ord("s")) is False
         tui._action_spam.assert_called_once()
+
+    def test_shift_tab_moves_focus_back_to_folder(self):
+        tui = _make_tui_for_keys()
+        tui._focus = "list"
+        assert tui._handle_key(curses.KEY_BTAB) is False
+        assert tui._focus == "folder"
+
+    def test_access_key_x_calls_delete_action(self):
+        tui = _make_tui_for_keys()
+        tui._action_delete = MagicMock()  # type: ignore[method-assign]
+        assert tui._handle_key(ord("x")) is False
+        tui._action_delete.assert_called_once()
+
+    def test_access_key_d_calls_move_action(self):
+        tui = _make_tui_for_keys()
+        tui._action_move = MagicMock()  # type: ignore[method-assign]
+        assert tui._handle_key(ord("d")) is False
+        tui._action_move.assert_called_once()
+
+    def test_access_key_y_calls_copy_action(self):
+        tui = _make_tui_for_keys()
+        tui._action_copy = MagicMock()  # type: ignore[method-assign]
+        assert tui._handle_key(ord("y")) is False
+        tui._action_copy.assert_called_once()
+
+    def test_slash_opens_search_screen(self):
+        tui = _make_tui_for_keys()
+        tui._show_message_search_screen = MagicMock()  # type: ignore[method-assign]
+        assert tui._handle_key(ord("/")) is False
+        tui._show_message_search_screen.assert_called_once()
+
+    def test_key_K_opens_folder_manager_from_accounts(self):
+        tui = _make_tui_for_keys()
+        tui._focus = "folder"
+        tui._show_folder_manager = MagicMock()  # type: ignore[method-assign]
+        assert tui._handle_key(ord("K")) is False
+        tui._show_folder_manager.assert_called_once()
+
+    def test_default_status_shows_spam_pane_hint_in_list(self):
+        tui = _make_tui_for_keys()
+        tui._focus = "list"
+        status = tui._default_status()
+        assert "S:spamo-listo" in status
 
     def test_fetch_guard_blocks_duplicate_attempt(self):
         tui = _make_tui_for_keys()
@@ -775,3 +915,706 @@ class TestRetpostoTuiGlobalKeys:
             assert tui._current_status() == "Premu q por eliri."
         with patch("autish.commands._retposto_tui.time.monotonic", return_value=13.5):
             assert tui._current_status() == ""
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Tests for new features: account update, signature, spam pane, folder creation
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestUpdateAccount:
+    def test_update_name(self, isolated_db):
+        from autish.commands.retposto import (
+            _load_accounts,
+            _save_account,
+            _update_account,
+        )
+
+        acc_id = _save_account({
+            "nomo": "OldName",
+            "retposto": "user@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        _update_account(acc_id, {"nomo": "NewName"})
+        accounts = _load_accounts()
+        assert accounts[0]["nomo"] == "NewName"
+
+    def test_update_imap_server(self, isolated_db):
+        from autish.commands.retposto import (
+            _load_accounts,
+            _save_account,
+            _update_account,
+        )
+
+        acc_id = _save_account({
+            "nomo": "Test",
+            "retposto": "u@example.com",
+            "imap_servilo": "old.imap.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        _update_account(acc_id, {"imap_servilo": "new.imap.com"})
+        accounts = _load_accounts()
+        assert accounts[0]["imap_servilo"] == "new.imap.com"
+
+    def test_update_invalid_column_raises(self, isolated_db):
+        from autish.commands.retposto import _save_account, _update_account
+
+        acc_id = _save_account({
+            "nomo": "Test",
+            "retposto": "u2@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        with pytest.raises(ValueError, match="Disallowed"):
+            _update_account(acc_id, {"id": 99})
+
+    def test_update_empty_fields_noop(self, isolated_db):
+        from autish.commands.retposto import (
+            _load_accounts,
+            _save_account,
+            _update_account,
+        )
+
+        acc_id = _save_account({
+            "nomo": "Unchanged",
+            "retposto": "u3@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        _update_account(acc_id, {})
+        accounts = _load_accounts()
+        assert accounts[0]["nomo"] == "Unchanged"
+
+
+class TestSignatureColumn:
+    def test_signature_default_null(self, isolated_db):
+        from autish.commands.retposto import _load_accounts, _save_account
+
+        _save_account({
+            "nomo": "Test",
+            "retposto": "sig@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        accounts = _load_accounts()
+        assert accounts[0].get("subskribo") is None
+
+    def test_set_and_retrieve_signature(self, isolated_db):
+        from autish.commands.retposto import (
+            _load_accounts,
+            _save_account,
+            _update_account,
+        )
+
+        acc_id = _save_account({
+            "nomo": "Sig",
+            "retposto": "sig2@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        _update_account(acc_id, {"subskribo": "/home/user/sig.txt"})
+        accounts = _load_accounts()
+        assert accounts[0]["subskribo"] == "/home/user/sig.txt"
+
+    def test_clear_signature(self, isolated_db):
+        from autish.commands.retposto import (
+            _load_accounts,
+            _save_account,
+            _update_account,
+        )
+
+        acc_id = _save_account({
+            "nomo": "Sig3",
+            "retposto": "sig3@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        _update_account(acc_id, {"subskribo": "/some/path"})
+        _update_account(acc_id, {"subskribo": None})
+        accounts = _load_accounts()
+        assert accounts[0]["subskribo"] is None
+
+
+class TestCliSubskribo:
+    def test_view_no_signature(self, isolated_db):
+        from autish.commands.retposto import _save_account
+
+        acc_id = _save_account({
+            "nomo": "Test",
+            "retposto": "cli@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        result = runner.invoke(app, ["retposto", "subskribo", str(acc_id)])
+        assert result.exit_code == 0
+        assert "Neniu" in result.output
+
+    def test_set_signature(self, isolated_db):
+        from autish.commands.retposto import _load_accounts, _save_account
+
+        acc_id = _save_account({
+            "nomo": "Sig",
+            "retposto": "clisig@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        result = runner.invoke(
+            app, ["retposto", "subskribo", str(acc_id), "-a", "/sig.txt"]
+        )
+        assert result.exit_code == 0
+        assert "agordita" in result.output.lower()
+        accounts = _load_accounts()
+        assert accounts[0]["subskribo"] == "/sig.txt"
+
+    def test_remove_signature(self, isolated_db):
+        from autish.commands.retposto import (
+            _load_accounts,
+            _save_account,
+            _update_account,
+        )
+
+        acc_id = _save_account({
+            "nomo": "Sig4",
+            "retposto": "clisig4@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        _update_account(acc_id, {"subskribo": "/tmp/sig.txt"})
+        result = runner.invoke(
+            app, ["retposto", "subskribo", str(acc_id), "-f"]
+        )
+        assert result.exit_code == 0
+        assert "forigita" in result.output.lower()
+        accounts = _load_accounts()
+        assert accounts[0]["subskribo"] is None
+
+
+class TestCliNovdos:
+    def test_create_folder(self, isolated_db):
+        from autish.commands.retposto import _load_folders, _save_account
+
+        acc_id = _save_account({
+            "nomo": "Fld",
+            "retposto": "fld@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        result = runner.invoke(
+            app, ["retposto", "novdos", "Projekto", "-k", str(acc_id)]
+        )
+        assert result.exit_code == 0
+        assert "Projekto" in result.output
+        folders = _load_folders(acc_id)
+        assert any(f["nomo"] == "Projekto" for f in folders)
+
+    def test_create_sub_folder(self, isolated_db):
+        from autish.commands.retposto import (
+            _ensure_folder,
+            _load_folders,
+            _save_account,
+        )
+
+        acc_id = _save_account({
+            "nomo": "Fld2",
+            "retposto": "fld2@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        _ensure_folder(acc_id, "Inbox", "INBOX")  # create parent first
+        result = runner.invoke(
+            app,
+            ["retposto", "novdos", "SubFolder", "-k", str(acc_id), "-p", "Inbox"],
+        )
+        assert result.exit_code == 0
+        folders = _load_folders(acc_id)
+        assert any(f["nomo"] == "SubFolder" for f in folders)
+
+    def test_no_accounts_error(self, isolated_db):
+        result = runner.invoke(app, ["retposto", "novdos", "SomeFolder"])
+        assert result.exit_code != 0
+        assert "kontoj" in result.output.lower() or "kontoj" in (
+            result.stderr or ""
+        ).lower()
+
+
+class TestCliListigiDosierujojn:
+    def test_list_empty(self, isolated_db):
+        from autish.commands.retposto import _save_account
+
+        acc_id = _save_account({
+            "nomo": "Lst",
+            "retposto": "lst@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        result = runner.invoke(
+            app, ["retposto", "listigi-dosierujojn", "-k", str(acc_id)]
+        )
+        assert result.exit_code == 0
+        assert "neniuj" in result.output.lower()
+
+    def test_list_with_folder(self, isolated_db):
+        from autish.commands.retposto import _ensure_folder, _save_account
+
+        acc_id = _save_account({
+            "nomo": "Lst2",
+            "retposto": "lst2@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        _ensure_folder(acc_id, "Archive", "Archive")
+        result = runner.invoke(
+            app, ["retposto", "listigi-dosierujojn", "-k", str(acc_id)]
+        )
+        assert result.exit_code == 0
+        assert "Archive" in result.output
+
+
+class TestCliMoviMesagon:
+    def test_move_message_to_folder(self, isolated_db):
+        from autish.commands.retposto import (
+            _ensure_folder,
+            _save_account,
+            _save_message,
+        )
+
+        acc_id = _save_account({
+            "nomo": "Move",
+            "retposto": "move@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        msg_id = _save_message({
+            "konto_id": acc_id,
+            "de": "a@b.com",
+            "al": ["move@example.com"],
+            "subjekto": "Test",
+        })
+        _ensure_folder(acc_id, "Archive", "Archive")
+        result = runner.invoke(
+            app, ["retposto", "movi-mesagon", str(msg_id), "Archive"]
+        )
+        assert result.exit_code == 0
+        assert "movita" in result.output.lower()
+
+    def test_move_nonexistent_message(self, isolated_db):
+        result = runner.invoke(app, ["retposto", "movi-mesagon", "9999", "Archive"])
+        assert result.exit_code != 0
+
+
+class TestSpamPaneTui:
+    """Tests for the spam pane (`S` key) in the TUI."""
+
+    def test_key_S_opens_spam_pane(self):
+        tui = _make_tui_for_keys()
+        tui._show_spam_pane = MagicMock()  # type: ignore[method-assign]
+        assert tui._handle_key(ord("S")) is False
+        tui._show_spam_pane.assert_called_once()
+
+    def test_spam_confirmation_cancel(self):
+        """'s' asks for confirmation; cancelling does not add spam block."""
+        added = []
+        stdscr = _FakeStdScr()
+        tui = RetpostoTUI(
+            stdscr,
+            load_accounts=lambda: [{"id": 1, "retposto": "me@example.com"}],
+            load_messages=lambda **_: [],
+            load_folders=lambda _acc_id: [],
+            fetch_account_mail=lambda _acc, _max: (0, 0),
+            send_message=lambda *_a, **_k: True,
+            save_message=lambda _m: 1,
+            update_message_field=lambda *_a, **_k: None,
+            delete_message=lambda *_a, **_k: None,
+            load_contacts=lambda: [],
+            find_contact=lambda _p: [],
+            upsert_contact=lambda *_a, **_k: None,
+            load_filters=lambda: [],
+            add_spam_block=lambda r: added.append(r),
+            is_spam=lambda _s: False,
+            ensure_folder=lambda *_a, **_k: 1,
+        )
+        # Set up a selected message
+        tui._message_panel._messages = [
+            {"id": 1, "de": "spammer@evil.com", "legita": 0}
+        ]
+        tui._message_panel._cursor = 0
+        # Simulate prompt_confirm returning False (user cancels)
+        with patch.object(tui, "_prompt_confirm_inline", return_value=False):
+            tui._action_spam()
+        assert added == []
+        assert tui._status_msg == ""
+
+    def test_spam_confirmation_accept(self):
+        """Pressing 's' and confirming should block the sender."""
+        added = []
+        stdscr = _FakeStdScr()
+        tui = RetpostoTUI(
+            stdscr,
+            load_accounts=lambda: [{"id": 1, "retposto": "me@example.com"}],
+            load_messages=lambda **_: [],
+            load_folders=lambda _acc_id: [],
+            fetch_account_mail=lambda _acc, _max: (0, 0),
+            send_message=lambda *_a, **_k: True,
+            save_message=lambda _m: 1,
+            update_message_field=lambda *_a, **_k: None,
+            delete_message=lambda *_a, **_k: None,
+            load_contacts=lambda: [],
+            find_contact=lambda _p: [],
+            upsert_contact=lambda *_a, **_k: None,
+            load_filters=lambda: [],
+            add_spam_block=lambda r: added.append(r),
+            is_spam=lambda _s: False,
+            ensure_folder=lambda *_a, **_k: 1,
+        )
+        tui._message_panel._messages = [
+            {"id": 1, "de": "spammer@evil.com", "legita": 0}
+        ]
+        tui._message_panel._cursor = 0
+        tui._refresh_list = MagicMock()  # type: ignore[method-assign]
+        with patch.object(tui, "_prompt_confirm_inline", return_value=True):
+            tui._action_spam()
+        assert "spammer@evil.com" in added
+        assert "blokita" in tui._status_msg.lower()
+
+    def test_spam_pane_unblock_without_confirmation(self):
+        removed: list[str] = []
+        tui = RetpostoTUI(
+            _FakeStdScr(keys=[ord("u"), ord("q")]),
+            load_accounts=lambda: [{"id": 1, "retposto": "me@example.com"}],
+            load_messages=lambda **_: [],
+            load_folders=lambda _acc_id: [{"id": 10, "nomo": "Inbox"}],
+            fetch_account_mail=lambda _acc, _max: (0, 0),
+            send_message=lambda *_a, **_k: True,
+            save_message=lambda _m: 1,
+            update_message_field=lambda *_a, **_k: None,
+            delete_message=lambda *_a, **_k: None,
+            load_contacts=lambda: [],
+            find_contact=lambda _p: [],
+            upsert_contact=lambda *_a, **_k: None,
+            load_filters=lambda: [],
+            add_spam_block=lambda _r: None,
+            is_spam=lambda _s: False,
+            ensure_folder=lambda *_a, **_k: 1,
+            load_spam_blocks=lambda: [{"regulo": "spam@evil.com", "kreita_je": ""}],
+            remove_spam_block=lambda rule: removed.append(rule),
+            load_messages_spam=lambda **_: [],
+        )
+        with patch.object(tui, "_prompt_confirm_inline") as confirm_mock:
+            tui._show_spam_pane()
+        confirm_mock.assert_not_called()
+        assert removed == ["spam@evil.com"]
+
+    def test_spam_pane_restore_without_confirmation(self):
+        updated: list[tuple[int, dict]] = []
+        tui = RetpostoTUI(
+            _FakeStdScr(keys=[9, ord("u"), ord("q")]),
+            load_accounts=lambda: [{"id": 1, "retposto": "me@example.com"}],
+            load_messages=lambda **_: [],
+            load_folders=lambda _acc_id: [{"id": 10, "nomo": "Inbox"}],
+            fetch_account_mail=lambda _acc, _max: (0, 0),
+            send_message=lambda *_a, **_k: True,
+            save_message=lambda _m: 1,
+            update_message_field=(
+                lambda msg_id, **fields: updated.append((msg_id, fields))
+            ),
+            delete_message=lambda *_a, **_k: None,
+            load_contacts=lambda: [],
+            find_contact=lambda _p: [],
+            upsert_contact=lambda *_a, **_k: None,
+            load_filters=lambda: [],
+            add_spam_block=lambda _r: None,
+            is_spam=lambda _s: False,
+            ensure_folder=lambda *_a, **_k: 1,
+            load_spam_blocks=lambda: [],
+            remove_spam_block=lambda _rule: None,
+            load_messages_spam=(
+                lambda **_: [{"id": 33, "de": "s@x.com", "subjekto": "S"}]
+            ),
+        )
+        with patch.object(tui, "_prompt_confirm_inline") as confirm_mock:
+            tui._show_spam_pane()
+        confirm_mock.assert_not_called()
+        assert updated == [(33, {"spamo": 0})]
+
+
+class TestConfirmPrompt:
+    def test_prompt_confirm_waits_for_user_keystroke(self):
+        tui = _make_tui_for_keys()
+        with patch(
+            "autish.commands._retposto_tui._getch_unicode",
+            side_effect=[-1, -1, ord("j")],
+        ) as key_mock:
+            assert tui._prompt_confirm_inline("Ĉu? (j/N)") is True
+        assert key_mock.call_count == 3
+
+
+class TestPromptAutocomplete:
+    def test_enter_accepts_first_suggestion(self):
+        tui = _make_tui_for_keys()
+        tui._draw = lambda: None  # type: ignore[method-assign]
+        with patch(
+            "autish.commands._retposto_tui._getch_unicode",
+            side_effect=[ord("\n")],
+        ):
+            value = tui._prompt_inline(
+                "Celo",
+                suggestions=lambda _s: ["Archive", "Inbox"],
+                accept_first_suggestion=True,
+            )
+        assert value == "Archive"
+
+    def test_move_copy_does_not_create_unknown_folder(self):
+        tui = _make_tui_for_keys()
+        tui._message_panel._messages = [
+            {"id": 1, "konto_id": 1, "de": "a@b.com", "subjekto": "S", "legita": 0}
+        ]
+        tui._message_panel._cursor = 0
+        with (
+            patch.object(tui, "_prompt_inline", return_value="archice"),
+            patch.object(tui, "_prompt_confirm_inline", return_value=True),
+            patch.object(tui, "_folder_id_by_name", return_value=None),
+        ):
+            tui._action_move()
+        assert "ne trovita" in tui._status_msg.lower()
+
+
+class TestDeleteMessageBehavior:
+    def test_non_permanent_delete_moves_message_to_trash_folder(self, isolated_db):
+        from autish.commands.retposto import (
+            _delete_message,
+            _get_db,
+            _save_account,
+            _save_message,
+        )
+
+        acc_id = _save_account({
+            "nomo": "Trash Test",
+            "retposto": "trash@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        msg_id = _save_message({
+            "konto_id": acc_id,
+            "de": "a@b.com",
+            "al": ["trash@example.com"],
+            "subjekto": "Delete me",
+        })
+
+        _delete_message(msg_id, permanent=False)
+
+        with _get_db() as con:
+            row = con.execute(
+                "SELECT dosierujo_id, forigita FROM mesago WHERE id = ?",
+                (msg_id,),
+            ).fetchone()
+            trash = con.execute(
+                "SELECT id FROM dosierujo WHERE konto_id = ? AND nomo = 'Trash'",
+                (acc_id,),
+            ).fetchone()
+
+        assert row is not None
+        assert trash is not None
+        assert row["dosierujo_id"] == trash["id"]
+        assert row["forigita"] == 0
+
+
+class TestAccountOrdering:
+    def test_move_account_order_swaps_positions(self, isolated_db):
+        from autish.commands.retposto import (
+            _load_accounts,
+            _move_account_order,
+            _save_account,
+        )
+
+        id1 = _save_account({
+            "nomo": "A",
+            "retposto": "a@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        id2 = _save_account({
+            "nomo": "B",
+            "retposto": "b@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        before = [a["id"] for a in _load_accounts()]
+        assert before == [id1, id2]
+        moved = _move_account_order(id2, -1)
+        assert moved is True
+        after = [a["id"] for a in _load_accounts()]
+        assert after == [id2, id1]
+
+    def test_cli_reordigi_konton(self, isolated_db):
+        from autish.commands.retposto import _save_account
+
+        _save_account({
+            "nomo": "A",
+            "retposto": "aa@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        _save_account({
+            "nomo": "B",
+            "retposto": "bb@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        result = runner.invoke(
+            app,
+            ["retposto", "reordigi-konton", "bb@example.com", "supren"],
+        )
+        assert result.exit_code == 0
+        assert "reordigita" in result.output.lower()
+
+
+class TestMessageSearchFiltering:
+    def test_apply_message_search_updates_message_panel(self):
+        tui = _make_tui_for_keys()
+        tui._message_panel._all_messages = [
+            {"id": 1, "de": "alice@example.com", "subjekto": "meeting", "korpo": "x"},
+            {"id": 2, "de": "bob@example.com", "subjekto": "other", "korpo": "y"},
+        ]
+        tui._message_panel.reset_filter()
+        tui._apply_message_search(['FROM "alice@example.com"'])
+        assert len(tui._message_panel._messages) == 1
+        assert tui._message_panel._messages[0]["id"] == 1
+
+    def test_empty_search_resets_messages(self):
+        tui = _make_tui_for_keys()
+        tui._message_panel._all_messages = [
+            {"id": 1, "de": "alice@example.com", "subjekto": "meeting", "korpo": "x"},
+            {"id": 2, "de": "bob@example.com", "subjekto": "other", "korpo": "y"},
+        ]
+        tui._message_panel.set_filtered_messages(
+            [{"id": 1, "de": "alice@example.com", "subjekto": "meeting", "korpo": "x"}],
+            "FROM alice",
+        )
+        tui._apply_message_search([])
+        assert len(tui._message_panel._messages) == 2
+
+
+class TestCliFolderAndCopyParity:
+    def test_cli_kopii_mesagon_and_rename_move_folder(self, isolated_db):
+        from autish.commands.retposto import (
+            _ensure_folder,
+            _get_db,
+            _save_account,
+            _save_message,
+        )
+
+        acc_id = _save_account({
+            "nomo": "Acct",
+            "retposto": "acct@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        src = _ensure_folder(acc_id, "Inbox", "Inbox")
+        dst = _ensure_folder(acc_id, "Archive", "Archive")
+        msg_id = _save_message({
+            "konto_id": acc_id,
+            "dosierujo_id": src,
+            "de": "a@b.com",
+            "al": ["acct@example.com"],
+            "subjekto": "Copy me",
+        })
+        result_copy = runner.invoke(
+            app, ["retposto", "kopii-mesagon", str(msg_id), "Archive"]
+        )
+        assert result_copy.exit_code == 0
+        assert "kopiita" in result_copy.output.lower()
+
+        result_rename = runner.invoke(
+            app, ["retposto", "renomi-dosierujon", str(dst), "Archive2"]
+        )
+        assert result_rename.exit_code == 0
+        assert "renomita" in result_rename.output.lower()
+
+        parent = _ensure_folder(acc_id, "Parent", "Parent")
+        result_move = runner.invoke(
+            app, ["retposto", "movi-dosierujon", str(dst), str(parent)]
+        )
+        assert result_move.exit_code == 0
+        assert "movita" in result_move.output.lower()
+
+        with _get_db() as con:
+            row = con.execute(
+                "SELECT patro_id FROM dosierujo WHERE id = ?",
+                (dst,),
+            ).fetchone()
+        assert row is not None
+        assert row["patro_id"] == parent
+
+
+class TestCliGisdatigiKonton:
+    def test_update_imap_server(self, isolated_db):
+        from autish.commands.retposto import _load_accounts, _save_account
+
+        acc_id = _save_account({
+            "nomo": "Upd",
+            "retposto": "upd@example.com",
+            "imap_servilo": "old.imap.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        result = runner.invoke(
+            app,
+            [
+                "retposto", "ĝisdatigi-konton", str(acc_id),
+                "--imap", "new.imap.com",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "ĝisdatigita" in result.output.lower()
+        accounts = _load_accounts()
+        assert accounts[0]["imap_servilo"] == "new.imap.com"
+
+    def test_no_change_specified(self, isolated_db):
+        from autish.commands.retposto import _save_account
+
+        acc_id = _save_account({
+            "nomo": "NoChange",
+            "retposto": "nc@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        result = runner.invoke(
+            app, ["retposto", "ĝisdatigi-konton", str(acc_id)]
+        )
+        assert result.exit_code == 0
+        assert "neniu" in result.output.lower()
+
+    def test_account_not_found(self, isolated_db):
+        result = runner.invoke(
+            app, ["retposto", "ĝisdatigi-konton", "9999", "--imap", "x.com"]
+        )
+        assert result.exit_code != 0
+
+
+class TestDbMigration:
+    def test_migration_adds_subskribo_column(self, tmp_path, monkeypatch):
+        """Migration should add 'subskribo' to existing DB that lacks it."""
+        import autish.commands.retposto as rp_mod
+
+        monkeypatch.setattr(rp_mod, "_DATA_DIR", tmp_path)
+        monkeypatch.setattr(rp_mod, "_DB_FILE", tmp_path / "retposto.db")
+
+        # Create a DB without the subskribo column
+        con = sqlite3.connect(str(tmp_path / "retposto.db"))
+        con.execute(
+            """CREATE TABLE konto (
+                id INTEGER PRIMARY KEY, nomo TEXT, retposto TEXT UNIQUE,
+                imap_servilo TEXT, imap_haveno INTEGER DEFAULT 993,
+                imap_ssl INTEGER DEFAULT 1, smtp_servilo TEXT,
+                smtp_haveno INTEGER DEFAULT 587, smtp_tls INTEGER DEFAULT 1,
+                uzantonomo TEXT, kreita_je TEXT
+            )"""
+        )
+        con.commit()
+        con.close()
+
+        # Opening the DB via _get_db should apply the migration
+        db = rp_mod._get_db()
+        cols = {row[1] for row in db.execute("PRAGMA table_info(konto)").fetchall()}
+        db.close()
+        assert "subskribo" in cols

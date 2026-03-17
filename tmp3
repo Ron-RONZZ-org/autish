@@ -1,0 +1,12 @@
+# bug fixes
+
+## vorto 
+
+- certain CLI/interactive mode command still do not accept UUID entered with `#` at the beginning
+  - implement global space/# strip to facilitate ease of user
+- `vidi` CLI
+  - accept partial entries if no ambiguity: `prépondéra` for `prépondérant·e`, for example
+  - if ambiguity, give user a multiple choice: 1... 2... 3... and accept a number input from user to show corresponding entry
+  - add `--detala/-D` option
+    - if not passed, do not show `nivelo`, `kreita` or `modifita`
+

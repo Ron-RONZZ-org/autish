@@ -1652,9 +1652,12 @@ class VortoTUI:
         lines.append("─" * 40)
         lines.append("")
         difinoj: list[str] = entry.get("difinoj") or []
+        uzoj: list[str] = entry.get("uzoj") or []
         if difinoj:
             for i, d in enumerate(difinoj, 1):
                 lines.append(f"  {i}. {d}")
+                if i - 1 < len(uzoj) and uzoj[i - 1]:
+                    lines.append(f"     /{uzoj[i - 1]}/")
         else:
             lines.append("  (neniu difino)")
         lines.append("")
@@ -2011,7 +2014,8 @@ class VortoTUI:
                 buf += ch
 
     def _prompt_confirm(self, prompt: str) -> bool:
-        """Ask j/N at the bottom of the screen; returns True for 'j'."""
+        """Ask J/n or j/N at the bottom; Enter follows the shown default."""
+        default_yes = "(J/n)" in prompt or "(j/n)" in prompt
         while True:
             self._draw_welcome()
             h, w = self.stdscr.getmaxyx()
@@ -2021,6 +2025,8 @@ class VortoTUI:
             self.stdscr.refresh()
             key = _getch_unicode(self.stdscr)
             ch = chr(key) if 0 < key < 256 else ""
+            if key in (_ENTER, _CR):
+                return default_yes
             if ch in ("j", "y"):
                 return True
             if ch in ("n", "N", "q") or key in (_ESC, _CTRL_C, _CTRL_D):
