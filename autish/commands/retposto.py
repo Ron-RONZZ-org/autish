@@ -2525,6 +2525,13 @@ def reordigi_konton(
 # Export / Import (account configurations)
 # ──────────────────────────────────────────────────────────────────────────────
 
+_7Z_MAGIC = b"7z\xbc\xaf\x27\x1c"
+
+
+def _is_7z_bytes(data: bytes) -> bool:
+    """Return True if *data* starts with the 7z magic bytes."""
+    return len(data) >= 6 and data[:6] == _7Z_MAGIC
+
 
 def _accounts_to_toml(accounts: list[dict], passwords: dict[int, str]) -> bytes:
     """Serialise account configs + passwords to TOML bytes."""
@@ -2566,19 +2573,41 @@ def _toml_to_accounts(toml_bytes: bytes) -> list[dict]:
 
 @app.command("eksporti")
 def eksporti(
-    dosiero: str = typer.Argument(..., help="Output file path (e.g. kontoj.toml.enc)."),
+    dosiero: str = typer.Argument(
+        ..., help="Output file path (e.g. retposto.7z or retposto.zip)."
+    ),
     pasvorto: str | None = typer.Option(
         None,
         "-p",
         "--pasvorto",
         help="Encryption password (required; asked interactively if omitted).",
     ),
+    formato: str = typer.Option(
+        "7z",
+        "-f",
+        "--formato",
+        help="Archive format: '7z' (default) or 'zip'.",
+    ),
 ) -> None:
-    """Export all email account configs (encrypted TOML) for portability."""
+    """Export all retposto user data as an encrypted archive.
+
+    Includes account configs (with passwords), sieve filter script,
+    contacts (VCF), and any local signature files.
+    """
+    import io  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+    import zipfile  # noqa: PLC0415
+
+    import py7zr  # noqa: PLC0415
+
     from autish.commands._crypto import (  # noqa: PLC0415
         encrypt,
         validate_strong_password,
     )
+
+    if formato not in ("7z", "zip"):
+        typer.echo("[!] Formato devas esti '7z' au 'zip'.", err=True)
+        raise typer.Exit(1)
 
     if not pasvorto:
         pasvorto = typer.prompt("Pasvorto", hide_input=True, confirmation_prompt=True)
@@ -2593,24 +2622,65 @@ def eksporti(
         typer.echo("[!] Neniuj kontoj por eksporti.", err=True)
         raise typer.Exit(1)
 
-    passwords: dict[int, str] = {}
-    for acc in accounts:
-        pw = keyring.get_password(_KEYRING_SERVICE, str(acc["id"]))
-        if pw:
-            passwords[int(acc["id"])] = pw
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
 
-    toml_bytes = _accounts_to_toml(accounts, passwords)
-    encrypted = encrypt(toml_bytes, pasvorto)
-    out_path = Path(dosiero)
-    out_path.write_bytes(encrypted)
+        # 1. Account configs + passwords
+        passwords_map: dict[int, str] = {}
+        for acc in accounts:
+            pw = keyring.get_password(_KEYRING_SERVICE, str(acc["id"]))
+            if pw:
+                passwords_map[int(acc["id"])] = pw
+        toml_bytes = _accounts_to_toml(accounts, passwords_map)
+        (tmp_path / "kontoj.toml").write_bytes(toml_bytes)
+
+        # 2. Sieve filter script
+        filters = _load_filters()
+        if filters:
+            sieve_script = _build_sieve_script(filters)
+            (tmp_path / "filtro.sieve").write_text(sieve_script, encoding="utf-8")
+
+        # 3. Contacts VCF
+        contacts = _load_contacts()
+        if contacts:
+            _export_vcf(tmp_path / "kontaktoj.vcf")
+
+        # 4. Local signature files — copy them into the archive
+        for acc in accounts:
+            subskribo = acc.get("subskribo") or ""
+            if subskribo and not subskribo.startswith(("http://", "https://")):
+                sig_path = Path(subskribo)
+                if sig_path.exists():
+                    dest = tmp_path / f"subskribo_{acc['id']}{sig_path.suffix}"
+                    dest.write_bytes(sig_path.read_bytes())
+
+        # Build archive
+        out_path = Path(dosiero)
+        bundle_files = list(tmp_path.iterdir())
+
+        if formato == "7z":
+            with py7zr.SevenZipFile(str(out_path), "w", password=pasvorto) as szf:
+                for fp in bundle_files:
+                    szf.write(fp, fp.name)
+        else:
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for fp in bundle_files:
+                    zf.write(fp, fp.name)
+            encrypted = encrypt(buf.getvalue(), pasvorto)
+            out_path.write_bytes(encrypted)
+
     typer.echo(
-        f"[✓] Eksportis {len(accounts)} konto(j)n al {out_path} (ĉifrita)."
+        f"[v] Eksportis retpostan datumaron ({len(accounts)} konto(j)n) "
+        f"al {out_path} (formato={formato}, cifrita)."
     )
 
 
 @app.command("importi")
 def importi(
-    dosiero: str = typer.Argument(..., help="Input file path (encrypted TOML export)."),
+    dosiero: str = typer.Argument(
+        ..., help="Input file path (encrypted archive or legacy encrypted TOML)."
+    ),
     pasvorto: str | None = typer.Option(
         None,
         "-p",
@@ -2624,7 +2694,13 @@ def importi(
         help="Overwrite existing accounts instead of merging.",
     ),
 ) -> None:
-    """Import email account configs from an encrypted TOML export."""
+    """Import email account configs from an encrypted archive or legacy export."""
+    import io  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+    import zipfile  # noqa: PLC0415
+
+    import py7zr  # noqa: PLC0415
+
     from autish.commands._crypto import decrypt, is_encrypted  # noqa: PLC0415
 
     in_path = Path(dosiero)
@@ -2634,30 +2710,63 @@ def importi(
 
     raw = in_path.read_bytes()
 
-    if is_encrypted(raw):
+    # Determine format: 7z archive, AUTX-encrypted zip/blob
+    if _is_7z_bytes(raw):
+        # New 7z archive format
         if not pasvorto:
             pasvorto = typer.prompt("Pasvorto", hide_input=True)
         try:
-            raw = decrypt(raw, pasvorto)
-        except ValueError as exc:
-            typer.echo(f"[!] Malĉifrad-eraro: {exc}", err=True)
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                with py7zr.SevenZipFile(str(in_path), "r", password=pasvorto) as szf:
+                    szf.extractall(path=tmp_dir)
+                toml_path = Path(tmp_dir) / "kontoj.toml"
+                if not toml_path.exists():
+                    typer.echo(
+                        "[!] Arkivo ne enhavas 'kontoj.toml'.", err=True
+                    )
+                    raise typer.Exit(1)
+                kontoj_bytes = toml_path.read_bytes()
+        except typer.Exit:
+            raise
+        except Exception as exc:
+            typer.echo(f"[!] Arkiv-eraro: {exc}", err=True)
             raise typer.Exit(1) from exc
+    elif is_encrypted(raw):
+        # AUTX-encrypted blob (zip inside AUTX, or legacy TOML inside AUTX)
+        if not pasvorto:
+            pasvorto = typer.prompt("Pasvorto", hide_input=True)
+        try:
+            decrypted = decrypt(raw, pasvorto)
+        except ValueError as exc:
+            typer.echo(f"[!] Malcifrad-eraro: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        # Check if decrypted content is a zip archive
+        if decrypted[:2] == b"PK":
+            buf = io.BytesIO(decrypted)
+            with zipfile.ZipFile(buf, "r") as zf:
+                if "kontoj.toml" in zf.namelist():
+                    kontoj_bytes = zf.read("kontoj.toml")
+                else:
+                    # Treat decrypted content as raw TOML (legacy format)
+                    kontoj_bytes = decrypted
+        else:
+            kontoj_bytes = decrypted
     else:
         typer.echo(
-            "[!] Dosiero ne estas ĉifrita. Retposto-eksportoj ĉiam estas ĉifritaj.",
+            "[!] Dosiero ne estas cifrita. Retposto-eksportoj ciam estas cifritaj.",
             err=True,
         )
         raise typer.Exit(1)
 
     try:
-        kontoj = _toml_to_accounts(raw)
+        kontoj = _toml_to_accounts(kontoj_bytes)
     except (ValueError, Exception) as exc:
         typer.echo(f"[!] Malvalida dosierformato: {exc}", err=True)
         raise typer.Exit(1) from exc
 
     if anstatauigi:
         if not _confirm_esperante(
-            f"Ĉu anstataŭigi ĈIUJN ekzistantajn kontojn per {len(kontoj)} importitajn?",
+            f"Cu anstatauigi CIUJN ekzistantajn kontojn per {len(kontoj)} importitajn?",
             default_yes=False,
         ):
             typer.echo("Nuligita.")
@@ -2676,5 +2785,119 @@ def importi(
             _set_password(acc_id, pw)
         added += 1
 
-    typer.echo(f"[✓] Importis {added} konto(j)n.")
+    typer.echo(f"[v] Importis {added} konto(j)n.")
 
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Account editor (konton)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@app.command("konton")
+def konton() -> None:
+    """Open all email accounts in the system terminal editor for direct editing.
+
+    Serialises all account configurations (without passwords) to a temporary
+    TOML file, opens it with $EDITOR / $VISUAL / sensible-editor / nano / vi,
+    and re-imports any changes on save.  Passwords remain in the system keyring
+    and are not written to the temporary file.
+    """
+    import os  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+
+    accounts = _load_accounts()
+    if not accounts:
+        typer.echo(
+            "[!] Neniuj kontoj konfiguritaj. Uzu: retposto aldoni-konton",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    # Build editable TOML (no passwords)
+    import tomli_w  # noqa: PLC0415
+
+    records: list[dict] = []
+    for acc in accounts:
+        records.append({
+            "id": int(acc["id"]),
+            "nomo": acc.get("nomo") or "",
+            "retposto": acc.get("retposto") or "",
+            "imap_servilo": acc.get("imap_servilo") or "",
+            "imap_haveno": int(acc.get("imap_haveno") or 993),
+            "imap_ssl": bool(acc.get("imap_ssl", True)),
+            "smtp_servilo": acc.get("smtp_servilo") or "",
+            "smtp_haveno": int(acc.get("smtp_haveno") or 587),
+            "smtp_tls": bool(acc.get("smtp_tls", True)),
+            "uzantonomo": acc.get("uzantonomo") or "",
+            "subskribo": acc.get("subskribo") or "",
+        })
+    toml_text = tomli_w.dumps({"kontoj": records})
+
+    # Choose editor
+    editor = (
+        os.environ.get("VISUAL")
+        or os.environ.get("EDITOR")
+        or _find_terminal_editor()
+    )
+
+    with tempfile.NamedTemporaryFile(
+        suffix=".toml", mode="w", encoding="utf-8", delete=False
+    ) as tf:
+        tf.write(toml_text)
+        tmp_file = tf.name
+
+    try:
+        result = subprocess.run([editor, tmp_file], check=False)
+        if result.returncode != 0:
+            typer.echo(f"[!] Redaktoro finis kun kodo {result.returncode}.", err=True)
+            return
+
+        # Read back
+        try:
+            import tomllib  # type: ignore[import-untyped]  # noqa: PLC0415
+        except ImportError:
+            import tomli as tomllib  # type: ignore[no-redef,import-untyped]  # noqa: PLC0415
+
+        with open(tmp_file, encoding="utf-8") as f:
+            edited_data = tomllib.loads(f.read())
+    finally:
+        try:
+            Path(tmp_file).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    edited_kontoj = edited_data.get("kontoj")
+    if not isinstance(edited_kontoj, list):
+        typer.echo("[!] Malvalida TOML: 'kontoj' listo ne trovita.", err=True)
+        raise typer.Exit(1)
+
+    updated = 0
+    for rec in edited_kontoj:
+        acc_id = rec.get("id")
+        if acc_id is None:
+            continue
+        acc_id = int(acc_id)
+        existing = _find_account(str(acc_id))
+        if not existing:
+            continue
+        fields: dict[str, object] = {}
+        for col in _KONTO_UPDATABLE_COLS:
+            if col in rec:
+                fields[col] = rec[col]
+        if fields:
+            _update_account(acc_id, fields)
+            updated += 1
+
+    typer.echo(f"[v] Aktualigis {updated} konto(j)n.")
+
+
+def _find_terminal_editor() -> str:
+    """Return a terminal text editor available on the system."""
+    import shutil  # noqa: PLC0415
+
+    for candidate in ("sensible-editor", "nano", "vi", "vim"):
+        if shutil.which(candidate):
+            return candidate
+    return "vi"

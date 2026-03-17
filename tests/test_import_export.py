@@ -269,7 +269,8 @@ class TestRetpostoEksporti:
             )
         assert result.exit_code == 0, result.output
         raw = out.read_bytes()
-        assert raw[:4] == b"AUTX"
+        # New format: 7z archive (magic bytes 7z\xbc\xaf...)
+        assert raw[:2] == b"7z"
 
     def test_export_no_accounts_exits_nonzero(self, tmp_path):
         out = tmp_path / "empty.enc"
