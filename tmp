@@ -1,1 +1,41 @@
+COPILOT GITHUB WEB
+# feature enhancements
+
+## `sekurkopio`
+  
+- `auto`
+  - on strategy set, prompt user to save the encryption key for restoration in case of crash>complete reinstall of autish
+- new: `reveni`: restores state from a particular `auto` backup
+  - passed without arguments: interactively ask user to select one
+  - then j/N confirmation
+  - `--tempo/-t {minutes}`: specify a time period from now
+    - propose the two closest candiates in time and ask user to select one interactively
+    - j/N confirmation
+
+## `retposto`
+
+- enhance `eksporti` to include all local user data
+  - `7z` format if not `--formato/-f zip`
+  - include sieve filter script, signature, etc.
+    - if they are external files, create a copy and include in archive
+- direct `konton` command for exposing all email accounts as a `.toml` file style for editing with system default terminal text editor
+
+# new CLI command : `uzanto`
+
+- allows configuring/storing/viewing/exporting/importing user profile `profilo`
+  - `modifi -{flag} {value}`
+  - `vidi (-{flag}, for custom fields -k {KEY})`
+  - `eksporti`: requires password encryption similar to `retposto` eksporti, interactive prompt if no password given with `--pasvorto/-p`
+  - `importi`: interactive prompt for password if encrypted import and no password given with `--pasvorto/-p`
+- user profile: `.toml` file, all fields optional
+  - given name(s) (TEXT)
+  - family name (TEXT)
+  - date of birth (DATE)
+  - languages spoken (2 letter codes)
+  - organization (TEXT)
+  - other custom fields: `{KEY}:{VALUE}`
+- allow setting user password `pasvorto`
+  - once set, sensitive user data/configs are stored under encryption with the user password (for now, email account passwords, user profile)
+    - password required for operations involving those sensitive data (once per `shelo` session, if outside command loop each sensitive operation)
+    - since `sekurkopio` exports are already encrypted, sensitive data included in `sekurkopio` backups should not be individually encrypted in addition
 
