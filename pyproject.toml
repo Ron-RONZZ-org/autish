@@ -31,6 +31,10 @@ psutil = ">=5.9"
 pyperclip = ">=1.8"
 keyring = ">=25.7"
 vobject = ">=0.9.9"
+cryptography = ">=38"
+py7zr = ">=0.20"
+tomli-w = ">=1"
+tomli = {version = ">=2", python = "<3.11"}
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8"
@@ -40,6 +44,14 @@ ruff = ">=0.4"
 [tool.poetry.scripts]
 autish = "autish.main:app"
 vorto = "autish.commands.vorto:app"
+retposto = "autish.commands.retposto:app"
+bluhdento = "autish.commands.bluetooth:app"
+wifi = "autish.commands.wifi:app"
+sistemo = "autish.commands.sistemo:app"
+tempo = "autish.commands.tempo:app"
+kp = "autish.commands.kp:app"
+shelo = "autish.commands.shelo:app"
+sekurkopio = "autish.commands.sekurkopio:app"
 
 [tool.ruff]
 line-length = 88
