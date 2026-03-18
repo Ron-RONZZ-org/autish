@@ -8,11 +8,14 @@ from unittest.mock import patch
 from typer.testing import CliRunner
 
 from autish.commands.vorto import (
+    _apply_french_ligatures,
     _detect_kategorio,
     _display_entry,
     _entries_to_lines,
     _entry_to_lines,
     _find_entry,
+    _fuzzy_text_matches,
+    _normalize_oe,
     _normalize_tipo,
     _normalize_tono,
     _parse_etikedo,
@@ -1265,3 +1268,197 @@ class TestRubujoSubcommandVisible:
         result = runner.invoke(app, ["vorto", "--help"])
         assert result.exit_code == 0
         assert "rubujo" in result.output
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# New helper tests — French ligature normalization and OE folding
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestApplyFrenchLigatures:
+    def test_lowercase_oe_becomes_oe_ligature(self):
+        assert _apply_french_ligatures("coeur") == "cœur"
+
+    def test_uppercase_OE_becomes_OE_ligature(self):
+        assert _apply_french_ligatures("OEUVRE") == "ŒUVRE"
+
+    def test_mixed_case_Oe_followed_by_letter_becomes_ligature(self):
+        assert _apply_french_ligatures("Oeuvre") == "Œuvre"
+
+    def test_already_has_ligature_unchanged(self):
+        assert _apply_french_ligatures("œuvre") == "œuvre"
+
+    def test_no_oe_unchanged(self):
+        assert _apply_french_ligatures("bonjour") == "bonjour"
+
+    def test_multiple_occurrences(self):
+        result = _apply_french_ligatures("coeur et poeme")
+        assert result == "cœur et pœme"
+
+
+class TestNormalizeOe:
+    def test_ligature_folded_to_oe(self):
+        assert _normalize_oe("œuvre") == "oeuvre"
+
+    def test_uppercase_ligature_folded(self):
+        assert _normalize_oe("Œuvre") == "OEuvre"
+
+    def test_plain_oe_unchanged(self):
+        assert _normalize_oe("oeuvre") == "oeuvre"
+
+    def test_no_ligature_unchanged(self):
+        assert _normalize_oe("bonjour") == "bonjour"
+
+
+class TestFuzzyTextMatchesOeEquivalence:
+    def test_oe_and_ligature_match(self):
+        entry = _make_entry(teksto="œuvre")
+        results = _fuzzy_text_matches([entry], "oeuvre")
+        assert entry in results
+
+    def test_ligature_and_oe_match(self):
+        entry = _make_entry(teksto="oeuvre")
+        results = _fuzzy_text_matches([entry], "œuvre")
+        assert entry in results
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Aldoni French ligature normalization
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestAldoniFrenchLigatures:
+    def test_oe_in_teksto_normalized_when_fr(self):
+        with (
+            patch(_LOAD, return_value=[]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            runner.invoke(app, ["vorto", "aldoni", "coeur", "-l", "fr"])
+        saved = mock_save.call_args[0][0][0]
+        assert saved["teksto"] == "cœur"
+
+    def test_oe_in_difino_normalized_when_fr(self):
+        with (
+            patch(_LOAD, return_value=[]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            runner.invoke(
+                app,
+                ["vorto", "aldoni", "cœur", "-l", "fr", "-d", "organe de poete"],
+            )
+        saved = mock_save.call_args[0][0][0]
+        # "poete" → "pœte" (oe → œ in French)
+        assert saved["difinoj"] == ["organe de pœte"]
+
+    def test_non_fr_does_not_normalize(self):
+        with (
+            patch(_LOAD, return_value=[]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            runner.invoke(app, ["vorto", "aldoni", "coeur", "-l", "en"])
+        saved = mock_save.call_args[0][0][0]
+        # English 'oe' should not be converted
+        assert saved["teksto"] == "coeur"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Modifi French ligature normalization
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestModifiFrenchLigatures:
+    def test_oe_in_teksto_normalized_when_lingvo_fr(self):
+        entry = _make_entry(lingvo="fr", teksto="coeur")
+        with (
+            patch(_LOAD, return_value=[entry]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            runner.invoke(app, ["vorto", "modifi", SAMPLE_UUID, "--temo", "corps"])
+        saved = mock_save.call_args[0][0][0]
+        assert saved["teksto"] == "cœur"
+
+    def test_oe_normalized_when_switching_to_fr(self):
+        entry = _make_entry(lingvo="en", teksto="oeuvre")
+        with (
+            patch(_LOAD, return_value=[entry]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            runner.invoke(app, ["vorto", "modifi", SAMPLE_UUID, "-l", "fr"])
+        saved = mock_save.call_args[0][0][0]
+        assert saved["teksto"] == "œuvre"
+
+    def test_oe_in_difinoj_normalized_when_fr(self):
+        entry = _make_entry(lingvo="fr", difinoj=["poeme du coeur"])
+        with (
+            patch(_LOAD, return_value=[entry]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            runner.invoke(app, ["vorto", "modifi", SAMPLE_UUID, "--temo", "art"])
+        saved = mock_save.call_args[0][0][0]
+        # "poeme" → "pœme", "coeur" → "cœur"
+        assert saved["difinoj"] == ["pœme du cœur"]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Vidi — closest match fallback
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestVidiClosestMatch:
+    def test_single_fuzzy_match_shown_automatically(self):
+        entry = _make_entry(teksto="hello")
+        with patch(_LOAD, return_value=[entry]):
+            result = runner.invoke(app, ["vorto", "vidi", "helo"])
+        assert result.exit_code == 0
+        assert "hello" in result.output
+
+    def test_multiple_fuzzy_matches_prompts_user(self):
+        e1 = _make_entry(uuid=SAMPLE_UUID, teksto="hello")
+        e2 = _make_entry(uuid=SAMPLE_UUID2, teksto="helli")
+        with (
+            patch(_LOAD, return_value=[e1, e2]),
+            patch("autish.commands.vorto.typer.prompt", return_value="1"),
+        ):
+            result = runner.invoke(app, ["vorto", "vidi", "hellx"])
+        assert result.exit_code == 0
+
+    def test_fuzzy_matches_user_cancels(self):
+        e1 = _make_entry(uuid=SAMPLE_UUID, teksto="hello")
+        e2 = _make_entry(uuid=SAMPLE_UUID2, teksto="helli")
+        with (
+            patch(_LOAD, return_value=[e1, e2]),
+            patch("autish.commands.vorto.typer.prompt", return_value=""),
+        ):
+            result = runner.invoke(app, ["vorto", "vidi", "hellx"])
+        assert result.exit_code == 0
+        assert "Nuligita" in result.output
+
+    def test_no_fuzzy_match_exits_nonzero(self):
+        with patch(_LOAD, return_value=[]):
+            result = runner.invoke(app, ["vorto", "vidi", "zzzzzzzzz"])
+        assert result.exit_code != 0
+
+    def test_oe_and_ligature_interchangeable_in_vidi(self):
+        entry = _make_entry(teksto="œuvre")
+        with patch(_LOAD, return_value=[entry]):
+            result = runner.invoke(app, ["vorto", "vidi", "oeuvre"])
+        assert result.exit_code == 0
+        assert "œuvre" in result.output

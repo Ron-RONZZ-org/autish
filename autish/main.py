@@ -5,6 +5,7 @@ import typer
 from autish.commands import (
     bluetooth,
     kp,
+    md,
     retposto,
     sekurkopio,
     shelo,
@@ -33,6 +34,7 @@ app.add_typer(vorto.app, name="vorto")
 app.add_typer(retposto.app, name="retposto")
 app.add_typer(sekurkopio.app, name="sekurkopio")
 app.add_typer(uzanto.app, name="uzanto")
+app.add_typer(md.app, name="md")
 
 
 @app.command("help")
