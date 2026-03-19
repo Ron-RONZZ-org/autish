@@ -553,6 +553,60 @@ class TestCliListigiKontojn:
         assert "Neniuj" in result.output or "kontoj" in result.output.lower()
 
 
+class TestCliAldoniKonton:
+    def test_auto_infers_gmail_servers(self, isolated_db, monkeypatch):
+        monkeypatch.setattr(
+            "autish.commands.retposto._set_password",
+            lambda _i, _p: None,
+        )
+        result = runner.invoke(
+            app,
+            ["retposto", "aldoni-konton"],
+            input="Test User\ntest@gmail.com\nsekreto123\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert "Aŭtomate deduktis servilojn" in result.output
+
+        from autish.commands.retposto import _load_accounts
+
+        accounts = _load_accounts()
+        assert len(accounts) == 1
+        acc = accounts[0]
+        assert acc["imap_servilo"] == "imap.gmail.com"
+        assert acc["imap_haveno"] == 993
+        assert bool(acc["imap_ssl"]) is True
+        assert acc["smtp_servilo"] == "smtp.gmail.com"
+        assert acc["smtp_haveno"] == 587
+        assert bool(acc["smtp_tls"]) is True
+
+    def test_unknown_domain_prompts_manual_servers(self, isolated_db, monkeypatch):
+        monkeypatch.setattr(
+            "autish.commands.retposto._set_password",
+            lambda _i, _p: None,
+        )
+        result = runner.invoke(
+            app,
+            ["retposto", "aldoni-konton"],
+            input=(
+                "Test User\n"
+                "test@nekonata-domaino.invalid\n"
+                "imap.nekonata.invalid\n"
+                "smtp.nekonata.invalid\n"
+                "sekreto123\n"
+            ),
+        )
+        assert result.exit_code == 0, result.output
+        assert "Aŭtomate deduktis servilojn" not in result.output
+
+        from autish.commands.retposto import _load_accounts
+
+        accounts = _load_accounts()
+        assert len(accounts) == 1
+        acc = accounts[0]
+        assert acc["imap_servilo"] == "imap.nekonata.invalid"
+        assert acc["smtp_servilo"] == "smtp.nekonata.invalid"
+
+
 class TestCliBloki:
     def test_bloki_command(self, isolated_db):
         result = runner.invoke(app, ["retposto", "bloki", "spam@evil.com"])

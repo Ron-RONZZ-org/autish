@@ -36,6 +36,7 @@ from email.mime.text import MIMEText
 from email.utils import make_msgid
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import TypedDict
 
 import keyring
 import typer
@@ -87,6 +88,124 @@ _DB_FILE: Path = _DATA_DIR / "retposto.db"
 _KEYRING_SERVICE: str = "autish-retposto"
 
 _MAX_FOLDERS_PER_ACCOUNT: int = 20
+
+class _EmailServerConfig(TypedDict):
+    imap_servilo: str
+    imap_haveno: int
+    imap_ssl: bool
+    smtp_servilo: str
+    smtp_haveno: int
+    smtp_tls: bool
+
+
+_EMAIL_DOMAIN_CONFIGS: dict[str, _EmailServerConfig] = {
+    "gmail.com": {
+        "imap_servilo": "imap.gmail.com",
+        "imap_haveno": 993,
+        "imap_ssl": True,
+        "smtp_servilo": "smtp.gmail.com",
+        "smtp_haveno": 587,
+        "smtp_tls": True,
+    },
+    "googlemail.com": {
+        "imap_servilo": "imap.gmail.com",
+        "imap_haveno": 993,
+        "imap_ssl": True,
+        "smtp_servilo": "smtp.gmail.com",
+        "smtp_haveno": 587,
+        "smtp_tls": True,
+    },
+    "outlook.com": {
+        "imap_servilo": "outlook.office365.com",
+        "imap_haveno": 993,
+        "imap_ssl": True,
+        "smtp_servilo": "smtp.office365.com",
+        "smtp_haveno": 587,
+        "smtp_tls": True,
+    },
+    "hotmail.com": {
+        "imap_servilo": "outlook.office365.com",
+        "imap_haveno": 993,
+        "imap_ssl": True,
+        "smtp_servilo": "smtp.office365.com",
+        "smtp_haveno": 587,
+        "smtp_tls": True,
+    },
+    "live.com": {
+        "imap_servilo": "outlook.office365.com",
+        "imap_haveno": 993,
+        "imap_ssl": True,
+        "smtp_servilo": "smtp.office365.com",
+        "smtp_haveno": 587,
+        "smtp_tls": True,
+    },
+    "office365.com": {
+        "imap_servilo": "outlook.office365.com",
+        "imap_haveno": 993,
+        "imap_ssl": True,
+        "smtp_servilo": "smtp.office365.com",
+        "smtp_haveno": 587,
+        "smtp_tls": True,
+    },
+    "yahoo.com": {
+        "imap_servilo": "imap.mail.yahoo.com",
+        "imap_haveno": 993,
+        "imap_ssl": True,
+        "smtp_servilo": "smtp.mail.yahoo.com",
+        "smtp_haveno": 465,
+        "smtp_tls": False,
+    },
+    "yahoo.co.jp": {
+        "imap_servilo": "imap.mail.yahoo.co.jp",
+        "imap_haveno": 993,
+        "imap_ssl": True,
+        "smtp_servilo": "smtp.mail.yahoo.co.jp",
+        "smtp_haveno": 465,
+        "smtp_tls": False,
+    },
+    "icloud.com": {
+        "imap_servilo": "imap.mail.me.com",
+        "imap_haveno": 993,
+        "imap_ssl": True,
+        "smtp_servilo": "smtp.mail.me.com",
+        "smtp_haveno": 587,
+        "smtp_tls": True,
+    },
+    "me.com": {
+        "imap_servilo": "imap.mail.me.com",
+        "imap_haveno": 993,
+        "imap_ssl": True,
+        "smtp_servilo": "smtp.mail.me.com",
+        "smtp_haveno": 587,
+        "smtp_tls": True,
+    },
+    "mac.com": {
+        "imap_servilo": "imap.mail.me.com",
+        "imap_haveno": 993,
+        "imap_ssl": True,
+        "smtp_servilo": "smtp.mail.me.com",
+        "smtp_haveno": 587,
+        "smtp_tls": True,
+    },
+    "proton.me": {
+        # Proton domains require Proton Mail Bridge running locally.
+        "imap_servilo": "127.0.0.1",
+        "imap_haveno": 1143,
+        "imap_ssl": False,
+        "smtp_servilo": "127.0.0.1",
+        "smtp_haveno": 1025,
+        "smtp_tls": False,
+    },
+    "protonmail.com": {
+        # Proton domains require Proton Mail Bridge running locally.
+        "imap_servilo": "127.0.0.1",
+        "imap_haveno": 1143,
+        "imap_ssl": False,
+        "smtp_servilo": "127.0.0.1",
+        "smtp_haveno": 1025,
+        "smtp_tls": False,
+    },
+}
 
 # Allowed column names for _update_message_field to prevent SQL injection
 _MSG_UPDATABLE_COLS: frozenset[str] = frozenset({
@@ -1196,6 +1315,15 @@ def _confirm_esperante(prompt: str, *, default_yes: bool) -> bool:
     return default_yes
 
 
+def _infer_mail_config(email_addr: str) -> _EmailServerConfig | None:
+    if "@" not in email_addr:
+        return None
+    domain = email_addr.rsplit("@", 1)[1].strip().lower()
+    if not domain:
+        return None
+    return _EMAIL_DOMAIN_CONFIGS.get(domain)
+
+
 def _normalize_subject_for_thread(subject: str | None) -> str:
     text = (subject or "").strip().lower()
     while True:
@@ -1550,6 +1678,21 @@ def aldoni_konton(
         nomo = typer.prompt("Display name")
     if not retposto:
         retposto = typer.prompt("Email address")
+    retposto = retposto.lower().strip()
+
+    inferred = _infer_mail_config(retposto)
+    if inferred and not imap_servilo and not smtp_servilo:
+        imap_servilo = inferred["imap_servilo"]
+        imap_haveno = inferred["imap_haveno"]
+        imap_ssl = inferred["imap_ssl"]
+        smtp_servilo = inferred["smtp_servilo"]
+        smtp_haveno = inferred["smtp_haveno"]
+        smtp_tls = inferred["smtp_tls"]
+        typer.echo(
+            "[i] Aŭtomate deduktis servilojn por ĉi tiu retpoŝta domajno. "
+            "Uzu --imap/--smtp por mane ŝanĝi."
+        )
+
     if not imap_servilo:
         imap_servilo = typer.prompt("IMAP server")
     if not smtp_servilo:
@@ -1558,14 +1701,14 @@ def aldoni_konton(
 
     acc = {
         "nomo": nomo,
-        "retposto": retposto.lower().strip(),
+        "retposto": retposto,
         "imap_servilo": imap_servilo,
         "imap_haveno": imap_haveno,
         "imap_ssl": imap_ssl,
         "smtp_servilo": smtp_servilo,
         "smtp_haveno": smtp_haveno,
         "smtp_tls": smtp_tls,
-        "uzantonomo": retposto.lower().strip(),
+        "uzantonomo": retposto,
     }
     acc_id = _save_account(acc)
     _set_password(acc_id, password)

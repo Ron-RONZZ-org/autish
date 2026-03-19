@@ -28,6 +28,7 @@ import tempfile
 import uuid as _uuid_mod
 from collections import deque
 from datetime import datetime, timezone
+from difflib import get_close_matches
 from pathlib import Path
 
 import typer
@@ -99,6 +100,19 @@ _ISO_690_TIPOJ: dict[str, str] = {
     "pod": "podkastoj",
     "pre": "prelegoj",
 }
+
+_ALLOWED_ENC_PLAIN_KEYS: frozenset[str] = frozenset({
+    "terminologio",
+    "definio",
+    "titolo",
+    "superklaso",
+    "ligilo",
+    "fonto",
+    "source",
+})
+_ALLOWED_ENC_PLAIN_KEYS_SORTED: tuple[str, ...] = tuple(
+    sorted(_ALLOWED_ENC_PLAIN_KEYS)
+)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # DB helpers
@@ -375,7 +389,9 @@ def _parse_enc_file(path: Path) -> dict:
     try:
         data = tomllib.loads(raw_core)
     except Exception as exc:
-        raise ValueError(f"Malformed .enc file: {exc}") from exc
+        raise ValueError(_format_enc_parse_error(raw_core, exc)) from exc
+
+    _validate_enc_keys(data)
 
     terminologio, difinoj = _collect_lang_fields(data)
     if not terminologio and title_from_comment:
@@ -430,6 +446,109 @@ def _extract_enhavo_block(raw: str) -> tuple[str, str]:
     enhavo = match.group(1).strip()
     without = raw[: match.start()] + "\n" + raw[match.end() :]
     return without, enhavo
+
+
+def _format_enc_parse_error(raw_toml: str, exc: Exception) -> str:
+    message = f"Malformed .enc file: {exc}"
+    lineno = getattr(exc, "lineno", None)
+    colno = getattr(exc, "colno", None)
+    if not isinstance(lineno, int):
+        match = re.search(r"\(at line (\d+), column (\d+)\)", str(exc))
+        if match:
+            lineno = int(match.group(1))
+            colno = int(match.group(2))
+    if not isinstance(lineno, int) or lineno < 1:
+        return message
+
+    lines = raw_toml.splitlines()
+    if lineno > len(lines):
+        return message
+
+    line = lines[lineno - 1]
+    pointer = ""
+    if isinstance(colno, int) and colno > 0:
+        pointer = " " * max(colno - 1, 0) + "^"
+    hints = _build_parse_hints(str(exc), line)
+    hint_block = "\n".join(f"  - {hint}" for hint in hints)
+    pointer_block = f"{pointer}\n" if pointer else ""
+    return (
+        f"{message}\n"
+        f"Problema linio {lineno}: {line}\n"
+        f"{pointer_block}"
+        f"Sugestoj:\n{hint_block}"
+    )
+
+
+def _build_parse_hints(error_text: str, line: str) -> list[str]:
+    lowered = error_text.lower()
+    hints = [
+        (
+            "Uzu validan TOML-sintekson: ŝlosilo = valoro "
+            '(ekz. terminologio.eo = "RS232").'
+        ),
+        "Kontrolu kampnomojn: terminologio.xx, definio.xx, superklaso, ligilo, fonto.",
+    ]
+    if "invalid value" in lowered:
+        hints.append(
+            "Kontrolu ĉu tekstoj estas en citiloj kaj listoj/tabeloj estas ĝuste "
+            "fermitaj per ] aŭ }."
+        )
+    if "expected '=' after a key" in lowered:
+        hints.append("Verŝajne mankas '=' inter kampnomo kaj valoro.")
+    if "cannot overwrite a value" in lowered:
+        hints.append("Sama ŝlosilo aperas plurfoje; forigu duplikatan kampon.")
+    if "unterminated" in lowered or "unclosed" in lowered:
+        hints.append("Mankas ferma citilo, ] aŭ }.")
+    left_side = line.split("=", 1)[0].strip().lower()
+    dotted_key_like = bool(re.match(r"^[a-z_][a-z0-9_]*(\.[a-z0-9_]+)+$", left_side))
+    if (
+        line.strip().endswith("=")
+        and "invalid value" in lowered
+        and dotted_key_like
+    ):
+        hints.append(
+            "Por plurlinia teksto (`\"\"\"`), metu la malferman `\"\"\"` sur la "
+            "sama linio kiel `=` (ekz. definio.fr = \"\"\"...)."
+        )
+    if "=" not in line:
+        hints.append("Ĉiu kampolinio devus aspekti kiel: nomo = valoro")
+    return hints
+
+
+def _validate_enc_keys(data: dict) -> None:
+    allowed_dotted_prefixes = {"terminologio", "definio"}
+    for key in data:
+        if "." in key:
+            prefix = key.split(".", 1)[0]
+            if prefix in allowed_dotted_prefixes:
+                continue
+            suggestion = _suggest_enc_dotted_key(key)
+            raise ValueError(
+                f"Nevalida .enc: nekonata kampo '{key}'. "
+                f"Uzu ekz. terminologio.xx aŭ definio.xx.{suggestion}"
+            )
+        if key not in _ALLOWED_ENC_PLAIN_KEYS:
+            suggestion = _suggest_enc_key(key, _ALLOWED_ENC_PLAIN_KEYS_SORTED)
+            raise ValueError(
+                f"Nevalida .enc: nekonata kampo '{key}'.{suggestion}"
+            )
+
+
+def _suggest_enc_key(key: str, allowed: tuple[str, ...]) -> str:
+    match = get_close_matches(key, allowed, n=1, cutoff=0.6)
+    if not match:
+        return ""
+    return f" Ĉu vi celis '{match[0]}'?"
+
+
+def _suggest_enc_dotted_key(key: str) -> str:
+    prefix = key.split(".", 1)[0].strip().lower()
+    if not prefix:
+        return ""
+    match = get_close_matches(prefix, ["terminologio", "definio"], n=1, cutoff=0.6)
+    if not match:
+        return ""
+    return f" Ĉu vi celis '{match[0]}.eo'?"
 
 
 def _collect_lang_fields(data: dict) -> tuple[dict[str, str], dict[str, str]]:
@@ -854,8 +973,10 @@ def aldoni(
     dosiero: str = typer.Argument(
         ...,
         help=(
-            "Vojo al .enc dosiero. Formato: terminologio.xx, definio.xx, "
-            '"""libera teksto""", superklaso, ligilo, fonto.'
+            "Vojo al .enc dosiero. Formato: terminologio.xx = \"...\", "
+            "definio.xx = \"...\", laŭvola "
+            '"""libera teksto""", superklaso/ligilo = [["Titolo", "uuid"]], '
+            "fonto = [{title=\"...\", author=\"...\", year=\"...\", type=\"lib\"}]."
         ),
     ),
 ) -> None:
