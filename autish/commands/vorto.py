@@ -738,7 +738,7 @@ def _confirm_esperante(prompt: str, *, default_yes: bool) -> bool:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@app.command("aldoni", context_settings={"help_option_names": ["--help"]})
+@app.command("aldoni")
 def aldoni(
     teksto: str = typer.Argument(..., help="Word, phrase, or sentence to add."),
     lingvo: str | None = typer.Option(
@@ -765,7 +765,6 @@ def aldoni(
     difino: list[str] | None = typer.Option(
         None,
         "-d",
-        "-h",
         "--difino",
         help=(
             "Definition. Repeat flag for multiple. "

@@ -431,31 +431,14 @@ class TestEncikCLI:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# vorto aldoni -h / --difino alias test
+# vorto aldoni --difino help text test
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-class TestVortoAldoniDefiniAlias:
-    """Verify that -h is an accepted alias for --difino in vorto aldoni."""
+class TestVortoAldoniDifinoHelpText:
+    """Verify that --difino help text includes the inline example syntax."""
 
-    @pytest.fixture(autouse=True)
-    def isolate_db(self, tmp_path, monkeypatch):
-        import autish.commands.vorto as vorto_mod
-
-        db_path = tmp_path / "vorto.db"
-        monkeypatch.setattr(vorto_mod, "_DB_FILE", db_path)
-        monkeypatch.setattr(vorto_mod, "_DATA_DIR", tmp_path)
-
-    def test_aldoni_accepts_h_flag_for_difino(self):
-        result = runner.invoke(
-            app,
-            ["vorto", "aldoni", "test-word", "-h", "My definition"],
-            input="j\n",
-        )
-        assert result.exit_code == 0, result.output
-        assert "Aldonis" in result.output or "Modifis" in result.output
-
-    def test_h_flag_help_text_mentions_syntax(self):
+    def test_difino_help_text_mentions_syntax(self):
         result = runner.invoke(app, ["vorto", "aldoni", "--help"])
         assert result.exit_code == 0
         assert "{definition}:*{example}*" in result.output
