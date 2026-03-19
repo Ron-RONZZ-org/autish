@@ -26,9 +26,11 @@ import subprocess
 import sys
 import tempfile
 import uuid as _uuid_mod
+import webbrowser
 from collections import deque
 from datetime import datetime, timezone
 from difflib import get_close_matches
+from html import escape
 from pathlib import Path
 
 import typer
@@ -372,8 +374,9 @@ def _parse_enc_file(path: Path) -> dict:
     If the TOML itself contains a ``titolo`` key that takes precedence;
     otherwise the first ``# …`` comment is used as the title.
     """
-    raw = path.read_text(encoding="utf-8")
-    raw_core, enhavo = _extract_enhavo_block(raw)
+    raw = _normalize_multiline_value_spacing(path.read_text(encoding="utf-8"))
+    raw_core = raw
+    enhavo = ""
 
     # Extract title from the first non-empty comment line
     title_from_comment = ""
@@ -389,7 +392,16 @@ def _parse_enc_file(path: Path) -> dict:
     try:
         data = tomllib.loads(raw_core)
     except Exception as exc:
-        raise ValueError(_format_enc_parse_error(raw_core, exc)) from exc
+        stripped_core, extracted_enhavo = _extract_enhavo_block(raw)
+        if stripped_core != raw:
+            try:
+                data = tomllib.loads(stripped_core)
+                raw_core = stripped_core
+                enhavo = extracted_enhavo
+            except Exception as exc2:
+                raise ValueError(_format_enc_parse_error(raw_core, exc)) from exc2
+        else:
+            raise ValueError(_format_enc_parse_error(raw_core, exc)) from exc
 
     _validate_enc_keys(data)
 
@@ -439,13 +451,38 @@ def _parse_enc_file(path: Path) -> dict:
 
 
 def _extract_enhavo_block(raw: str) -> tuple[str, str]:
-    pattern = re.compile(r'^\s*"""\n(.*?)\n"""\s*$', re.MULTILINE | re.DOTALL)
-    match = pattern.search(raw)
-    if not match:
-        return raw, ""
-    enhavo = match.group(1).strip()
-    without = raw[: match.start()] + "\n" + raw[match.end() :]
-    return without, enhavo
+    lines = raw.splitlines()
+    for start in range(len(lines)):
+        if lines[start].strip() != '"""':
+            continue
+        prev_line = lines[start - 1].strip() if start > 0 else ""
+        if "=" in prev_line and (
+            re.search(r"=\s*$", prev_line) or re.search(r'=\s*"""$', prev_line)
+        ):
+            continue
+        end = start + 1
+        while end < len(lines) and lines[end].strip() != '"""':
+            end += 1
+        if end >= len(lines):
+            continue
+        enhavo = "\n".join(lines[start + 1 : end]).strip()
+        kept: list[str] = []
+        kept.extend(lines[:start])
+        kept.extend(lines[end + 1 :])
+        without = "\n".join(kept)
+        if raw.endswith("\n"):
+            without += "\n"
+        return without, enhavo
+    return raw, ""
+
+
+def _normalize_multiline_value_spacing(raw: str) -> str:
+    """Accept extra spacing/newlines between '=' and triple-quoted value starts."""
+    pattern = re.compile(
+        r"(^\s*(?:definio(?:\.[A-Za-z0-9_-]+)?)\s*=)\s*\n+\s*\"\"\"",
+        re.MULTILINE,
+    )
+    return pattern.sub(r'\1 """', raw)
 
 
 def _format_enc_parse_error(raw_toml: str, exc: Exception) -> str:
@@ -714,6 +751,141 @@ def _display_entry(
     console.print(
         Panel("\n".join(panel_lines), title=f"[bold]{title}[/bold]", expand=False)
     )
+
+
+def _markdown_to_html_fragment(md_text: str) -> str:
+    try:
+        import markdown  # type: ignore[import-untyped]
+    except ImportError:
+        return f"<pre>{escape(md_text)}</pre>"
+    extensions = ["extra", "toc", "tables", "fenced_code", "codehilite"]
+    return markdown.markdown(md_text, extensions=extensions)
+
+
+def _render_entry_html(
+    entry: dict, *, lingvo: str | None = None, montri_cxion: bool = False
+) -> str:
+    terminologio = entry.get("terminologio") or {}
+    difinoj = entry.get("difinoj") or {}
+    selected_lang = (lingvo or "").strip().lower() or _preferred_lang(
+        terminologio, difinoj
+    )
+    title = (
+        terminologio.get(selected_lang)
+        or entry.get("titolo", "")
+        or next(iter(terminologio.values()), "")
+    )
+    definio = (
+        difinoj.get(selected_lang)
+        or entry.get("definio", "")
+        or next(iter(difinoj.values()), "")
+    ).strip()
+    definio_html = _markdown_to_html_fragment(definio) if definio else ""
+
+    rows: list[tuple[str, str]] = [
+        ("uuid", escape((entry.get("uuid") or "")[:8])),
+        ("lingvo", escape(selected_lang or "-")),
+    ]
+    if definio_html:
+        rows.append(("definio", definio_html))
+
+    if montri_cxion and terminologio:
+        terms = "<br>".join(
+            f"{escape(lang)}: {escape(term)}"
+            for lang, term in sorted(terminologio.items())
+        )
+        rows.append(("terminologio", terms))
+    if montri_cxion and difinoj:
+        defs = "<br>".join(
+            f"{escape(lang)}: {_markdown_to_html_fragment(term_def)}"
+            for lang, term_def in sorted(difinoj.items())
+        )
+        rows.append(("difinoj", defs))
+
+    enhavo = (entry.get("enhavo") or "").strip()
+    if enhavo and montri_cxion:
+        rows.append(("enhavo", f"<pre>{escape(enhavo)}</pre>"))
+
+    superklaso = entry.get("superklaso") or []
+    if superklaso:
+        sup = "<br>".join(
+            (
+                f"{escape(pair[0] if pair else '?')} "
+                f"#{escape((pair[1] if len(pair) > 1 else '')[:8])}"
+            )
+            for pair in superklaso
+        )
+        rows.append(("superklaso", sup))
+
+    ligilo = entry.get("ligilo") or []
+    if ligilo:
+        links = "<br>".join(
+            (
+                f"{escape(pair[0] if pair else '?')} "
+                f"#{escape((pair[1] if len(pair) > 1 else '')[:8])}"
+            )
+            for pair in ligilo
+        )
+        rows.append(("ligilo", links))
+
+    fonto = entry.get("fonto") or []
+    if fonto:
+        fonto_lines: list[str] = []
+        for s in fonto:
+            parts: list[str] = []
+            if s.get("author"):
+                parts.append(escape(str(s["author"])))
+            if s.get("year"):
+                parts.append(f"({escape(str(s['year']))})")
+            if s.get("title"):
+                parts.append(f'"{escape(str(s["title"]))}"')
+            if s.get("type"):
+                parts.append(f"tipo={escape(str(s['type']))}")
+            title_lang_items = sorted(
+                (k, v)
+                for k, v in s.items()
+                if isinstance(k, str) and k.startswith("title.")
+            )
+            for k, v in title_lang_items:
+                parts.append(f"{escape(k)}={escape(str(v))}")
+            fonto_lines.append(" ".join(parts))
+        rows.append(("fonto", "<br>".join(fonto_lines)))
+
+    rows.extend(
+        [
+            ("kreita_je", escape((entry.get("kreita_je") or "")[:10])),
+            ("modifita_je", escape((entry.get("modifita_je") or "")[:10])),
+        ]
+    )
+    table_rows = "".join(
+        f"<tr><th>{escape(label)}</th><td>{value}</td></tr>" for label, value in rows
+    )
+    return (
+        "<!DOCTYPE html>"
+        '<html lang="eo"><head><meta charset="utf-8">'
+        f"<title>{escape(title)}</title>"
+        "<style>"
+        "body{font-family:system-ui,-apple-system,sans-serif;max-width:980px;"
+        "margin:2rem auto;padding:0 1rem;color:#333;line-height:1.5;}"
+        "table{width:100%;border-collapse:collapse;}"
+        "th,td{border:1px solid #ddd;padding:.6rem;vertical-align:top;}"
+        "th{width:180px;background:#f5f5f5;text-align:left;}"
+        "pre{margin:0;white-space:pre-wrap;background:#fafafa;padding:.6rem;border-radius:4px;}"
+        "</style></head><body>"
+        f"<h1>{escape(title)}</h1>"
+        f"<table>{table_rows}</table>"
+        "</body></html>"
+    )
+
+
+def _open_html_document(html_doc: str) -> str:
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".html", delete=False, encoding="utf-8"
+    ) as fh:
+        fh.write(html_doc)
+        tmp_path = fh.name
+    webbrowser.open(f"file://{tmp_path}")
+    return tmp_path
 
 
 def _print_candidates(candidates: list[dict]) -> None:
@@ -1116,12 +1288,23 @@ def vidi(
         "--cxio",
         help="Montri ĉiujn disponeblajn lingvojn kaj kampojn.",
     ),
+    html: bool = typer.Option(
+        False,
+        "-H",
+        "--html",
+        help="Montri la nodon kiel bildigita HTML-tabelo en la defaŭlta retumilo.",
+    ),
 ) -> None:
     """Montri unu nodon laŭ UUID aŭ terminologio."""
     entry = _resolve_entry(ref, interactive=True)
     if entry is None:
         typer.echo(f"Nodo ne trovita: {ref!r}", err=True)
         raise typer.Exit(code=1)
+    if html:
+        html_doc = _render_entry_html(entry, lingvo=lingvo, montri_cxion=montri_cxion)
+        out_path = _open_html_document(html_doc)
+        typer.echo(f"Malfermas en retumilo: {out_path}")
+        return
     _display_entry(entry, lingvo=lingvo, montri_cxion=montri_cxion)
 
 

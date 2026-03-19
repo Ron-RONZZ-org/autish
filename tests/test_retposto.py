@@ -606,6 +606,110 @@ class TestCliAldoniKonton:
         assert acc["imap_servilo"] == "imap.nekonata.invalid"
         assert acc["smtp_servilo"] == "smtp.nekonata.invalid"
 
+    def test_auto_infers_from_mozilla_autoconfig(self, isolated_db, monkeypatch):
+        monkeypatch.setattr(
+            "autish.commands.retposto._set_password",
+            lambda _i, _p: None,
+        )
+        xml = """
+<clientConfig version="1.1">
+  <emailProvider id="example.com">
+    <incomingServer type="imap">
+      <hostname>imap.example.com</hostname>
+      <port>993</port>
+      <socketType>SSL</socketType>
+    </incomingServer>
+    <outgoingServer type="smtp">
+      <hostname>smtp.example.com</hostname>
+      <port>587</port>
+      <socketType>STARTTLS</socketType>
+    </outgoingServer>
+  </emailProvider>
+</clientConfig>
+"""
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return xml.encode("utf-8")
+
+        monkeypatch.setattr(
+            "autish.commands.retposto.urllib.request.urlopen",
+            lambda *_a, **_k: _Resp(),
+        )
+        result = runner.invoke(
+            app,
+            ["retposto", "aldoni-konton"],
+            input="Test User\ntest@example.com\nsekreto123\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert "Aŭtomate deduktis servilojn" in result.output
+
+        from autish.commands.retposto import _load_accounts
+
+        acc = _load_accounts()[0]
+        assert acc["imap_servilo"] == "imap.example.com"
+        assert acc["smtp_servilo"] == "smtp.example.com"
+
+    def test_auto_infers_from_microsoft_autodiscover(self, isolated_db, monkeypatch):
+        monkeypatch.setattr(
+            "autish.commands.retposto._set_password",
+            lambda _i, _p: None,
+        )
+        xml = """
+<Autodiscover>
+  <Response xmlns="http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a">
+    <Account>
+      <Protocol>
+        <Type>IMAP</Type>
+        <Server>imap.example.com</Server>
+        <Port>993</Port>
+        <SSL>on</SSL>
+      </Protocol>
+      <Protocol>
+        <Type>SMTP</Type>
+        <Server>smtp.example.com</Server>
+        <Port>587</Port>
+        <SSL>on</SSL>
+      </Protocol>
+    </Account>
+  </Response>
+</Autodiscover>
+"""
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return xml.encode("utf-8")
+
+        monkeypatch.setattr(
+            "autish.commands.retposto.urllib.request.urlopen",
+            lambda *_a, **_k: _Resp(),
+        )
+        result = runner.invoke(
+            app,
+            ["retposto", "aldoni-konton"],
+            input="Test User\ntest@example.com\nsekreto123\n",
+        )
+        assert result.exit_code == 0, result.output
+        assert "Aŭtomate deduktis servilojn" in result.output
+
+        from autish.commands.retposto import _load_accounts
+
+        acc = _load_accounts()[0]
+        assert acc["imap_servilo"] == "imap.example.com"
+        assert acc["smtp_servilo"] == "smtp.example.com"
+
 
 class TestCliBloki:
     def test_bloki_command(self, isolated_db):

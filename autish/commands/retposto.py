@@ -25,11 +25,13 @@ import imaplib
 import json
 import re
 import smtplib
+import socket
 import sqlite3
 import ssl
 import urllib.request
 import uuid as _uuid_mod
 import webbrowser
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -1321,7 +1323,199 @@ def _infer_mail_config(email_addr: str) -> _EmailServerConfig | None:
     domain = email_addr.rsplit("@", 1)[1].strip().lower()
     if not domain:
         return None
-    return _EMAIL_DOMAIN_CONFIGS.get(domain)
+    static = _EMAIL_DOMAIN_CONFIGS.get(domain)
+    if static:
+        return static
+
+    autoconfig = _fetch_autoconfig(domain, email_addr)
+    if autoconfig:
+        return autoconfig
+
+    dns_inferred = _infer_mail_config_from_dns(domain)
+    if dns_inferred:
+        return dns_inferred
+
+    return _infer_mail_config_from_guesses(domain)
+
+
+def _fetch_autoconfig(domain: str, email_addr: str) -> _EmailServerConfig | None:
+    urls = [
+        f"https://autoconfig.{domain}/mail/config-v1.1.xml",
+        f"https://{domain}/.well-known/autoconfig/mail/config-v1.1.xml",
+        f"https://autodiscover.{domain}/autodiscover/autodiscover.xml",
+        f"https://{domain}/autodiscover/autodiscover.xml",
+    ]
+    for url in urls:
+        try:
+            with urllib.request.urlopen(url, timeout=3) as resp:  # noqa: S310
+                content = resp.read().decode("utf-8", errors="replace")
+        except OSError:
+            continue
+        config = _parse_autoconfig_xml(content, email_addr)
+        if config:
+            return config
+    return None
+
+
+def _parse_autoconfig_xml(xml_text: str, email_addr: str) -> _EmailServerConfig | None:
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return None
+    if root.tag.endswith("clientConfig"):
+        return _parse_thunderbird_autoconfig(root, email_addr)
+    return _parse_autodiscover(root, email_addr)
+
+
+def _parse_thunderbird_autoconfig(
+    root: ET.Element, email_addr: str
+) -> _EmailServerConfig | None:
+    incoming = root.findall(".//incomingServer")
+    outgoing = root.findall(".//outgoingServer")
+
+    def _find_server(nodes: list[ET.Element], prefer_type: str) -> ET.Element | None:
+        for node in nodes:
+            if (node.get("type") or "").strip().lower() == prefer_type:
+                return node
+        return nodes[0] if nodes else None
+
+    in_node = _find_server(incoming, "imap")
+    out_node = _find_server(outgoing, "smtp")
+    if in_node is None or out_node is None:
+        return None
+
+    def _text(node: ET.Element, name: str) -> str:
+        child = node.find(name)
+        return (child.text or "").strip() if child is not None and child.text else ""
+
+    imap_host = _text(in_node, "hostname").replace("%EMAILADDRESS%", email_addr)
+    smtp_host = _text(out_node, "hostname").replace("%EMAILADDRESS%", email_addr)
+    if not imap_host or not smtp_host:
+        return None
+
+    imap_socket = _text(in_node, "socketType").upper()
+    smtp_socket = _text(out_node, "socketType").upper()
+
+    try:
+        imap_port = int(_text(in_node, "port") or "993")
+        smtp_port = int(
+            _text(out_node, "port") or ("465" if smtp_socket == "SSL" else "587")
+        )
+    except ValueError:
+        return None
+
+    return {
+        "imap_servilo": imap_host,
+        "imap_haveno": imap_port,
+        "imap_ssl": imap_socket in {"SSL", "STARTTLS"},
+        "smtp_servilo": smtp_host,
+        "smtp_haveno": smtp_port,
+        "smtp_tls": smtp_socket == "STARTTLS",
+    }
+
+
+def _parse_autodiscover(root: ET.Element, email_addr: str) -> _EmailServerConfig | None:
+    ns = {"a": "http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a"}
+    protocols = root.findall(".//a:Protocol", ns) or root.findall(".//Protocol")
+    if not protocols:
+        return None
+
+    imap_conf: tuple[str, int, bool] | None = None
+    smtp_conf: tuple[str, int, bool] | None = None
+    for proto in protocols:
+        proto_type = proto.findtext("a:Type", default="", namespaces=ns)
+        proto_type = proto_type or proto.findtext("Type", default="")
+        typ = (
+            proto_type.strip().upper()
+        )
+        proto_server = proto.findtext("a:Server", default="", namespaces=ns)
+        proto_server = proto_server or proto.findtext("Server", default="")
+        server = (
+            proto_server
+            .strip()
+            .replace("%EMAILADDRESS%", email_addr)
+        )
+        port_raw = proto.findtext("a:Port", default="", namespaces=ns)
+        port_raw = port_raw or proto.findtext("Port", default="")
+        ssl_raw = proto.findtext("a:SSL", default="", namespaces=ns)
+        ssl_raw = ssl_raw or proto.findtext("SSL", default="")
+        encryption = (
+            proto.findtext("a:Encryption", default="", namespaces=ns)
+            or proto.findtext("Encryption", default="")
+        )
+        if not server:
+            continue
+        try:
+            port = int(port_raw) if port_raw else (993 if typ == "IMAP" else 587)
+        except ValueError:
+            continue
+        use_tls = (
+            ssl_raw.strip().lower() in {"on", "true", "1"}
+            or encryption.strip().lower() == "ssl"
+        )
+        if typ == "IMAP" and imap_conf is None:
+            imap_conf = (server, port, use_tls or port == 993)
+        if typ == "SMTP" and smtp_conf is None:
+            smtp_conf = (server, port, use_tls or port == 587)
+
+    if imap_conf is None or smtp_conf is None:
+        return None
+    return {
+        "imap_servilo": imap_conf[0],
+        "imap_haveno": imap_conf[1],
+        "imap_ssl": imap_conf[2],
+        "smtp_servilo": smtp_conf[0],
+        "smtp_haveno": smtp_conf[1],
+        "smtp_tls": smtp_conf[2],
+    }
+
+
+def _infer_mail_config_from_dns(domain: str) -> _EmailServerConfig | None:
+    hosts = [
+        ("imap", f"imap.{domain}", 993, True),
+        ("smtp", f"smtp.{domain}", 587, True),
+    ]
+    resolved: dict[str, tuple[str, int, bool]] = {}
+    for kind, host, port, tls_flag in hosts:
+        try:
+            socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except OSError:
+            continue
+        resolved[kind] = (host, port, tls_flag)
+
+    if "imap" not in resolved or "smtp" not in resolved:
+        return None
+    imap = resolved["imap"]
+    smtp = resolved["smtp"]
+    return {
+        "imap_servilo": imap[0],
+        "imap_haveno": imap[1],
+        "imap_ssl": imap[2],
+        "smtp_servilo": smtp[0],
+        "smtp_haveno": smtp[1],
+        "smtp_tls": smtp[2],
+    }
+
+
+def _infer_mail_config_from_guesses(domain: str) -> _EmailServerConfig | None:
+    imap_candidates = [f"imap.{domain}", f"mail.{domain}"]
+    smtp_candidates = [f"smtp.{domain}", f"mail.{domain}"]
+    for imap_host in imap_candidates:
+        for smtp_host in smtp_candidates:
+            try:
+                socket.getaddrinfo(imap_host, 993, type=socket.SOCK_STREAM)
+                socket.getaddrinfo(smtp_host, 587, type=socket.SOCK_STREAM)
+            except OSError:
+                continue
+            return {
+                "imap_servilo": imap_host,
+                "imap_haveno": 993,
+                "imap_ssl": True,
+                "smtp_servilo": smtp_host,
+                "smtp_haveno": 587,
+                "smtp_tls": True,
+            }
+    return None
 
 
 def _normalize_subject_for_thread(subject: str | None) -> str:
