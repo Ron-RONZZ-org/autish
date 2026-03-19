@@ -1323,6 +1323,8 @@ def _infer_mail_config(email_addr: str) -> _EmailServerConfig | None:
     domain = email_addr.rsplit("@", 1)[1].strip().lower()
     if not domain:
         return None
+    if not _is_valid_domain(domain):
+        return None
     static = _EMAIL_DOMAIN_CONFIGS.get(domain)
     if static:
         return static
@@ -1355,6 +1357,21 @@ def _fetch_autoconfig(domain: str, email_addr: str) -> _EmailServerConfig | None
         if config:
             return config
     return None
+
+
+def _is_valid_domain(domain: str) -> bool:
+    domain = domain.strip().lower()
+    if len(domain) > 253 or "." not in domain:
+        return False
+    if domain.startswith(".") or domain.endswith("."):
+        return False
+    labels = domain.split(".")
+    if any(not label or len(label) > 63 for label in labels):
+        return False
+    return all(
+        re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label)
+        for label in labels
+    )
 
 
 def _parse_autoconfig_xml(xml_text: str, email_addr: str) -> _EmailServerConfig | None:
@@ -1425,16 +1442,10 @@ def _parse_autodiscover(root: ET.Element, email_addr: str) -> _EmailServerConfig
     for proto in protocols:
         proto_type = proto.findtext("a:Type", default="", namespaces=ns)
         proto_type = proto_type or proto.findtext("Type", default="")
-        typ = (
-            proto_type.strip().upper()
-        )
+        typ = proto_type.strip().upper()
         proto_server = proto.findtext("a:Server", default="", namespaces=ns)
         proto_server = proto_server or proto.findtext("Server", default="")
-        server = (
-            proto_server
-            .strip()
-            .replace("%EMAILADDRESS%", email_addr)
-        )
+        server = proto_server.strip().replace("%EMAILADDRESS%", email_addr)
         port_raw = proto.findtext("a:Port", default="", namespaces=ns)
         port_raw = port_raw or proto.findtext("Port", default="")
         ssl_raw = proto.findtext("a:SSL", default="", namespaces=ns)

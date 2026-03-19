@@ -375,6 +375,8 @@ def _parse_enc_file(path: Path) -> dict:
     otherwise the first ``# …`` comment is used as the title.
     """
     raw = _normalize_multiline_value_spacing(path.read_text(encoding="utf-8"))
+    # Start with raw TOML text, then retry after stripping standalone enhavo block
+    # if initial parse fails.
     raw_core = raw
     enhavo = ""
 
@@ -477,7 +479,10 @@ def _extract_enhavo_block(raw: str) -> tuple[str, str]:
 
 
 def _normalize_multiline_value_spacing(raw: str) -> str:
-    """Accept extra spacing/newlines between '=' and triple-quoted value starts."""
+    """Accept extra spacing/newlines between '=' and triple-quoted definio values.
+
+    This tolerance is intentionally scoped to definio.* as requested by issue behavior.
+    """
     pattern = re.compile(
         r"(^\s*(?:definio(?:\.[A-Za-z0-9_-]+)?)\s*=)\s*\n+\s*\"\"\"",
         re.MULTILINE,
@@ -759,7 +764,10 @@ def _markdown_to_html_fragment(md_text: str) -> str:
     except ImportError:
         return f"<pre>{escape(md_text)}</pre>"
     extensions = ["extra", "toc", "tables", "fenced_code", "codehilite"]
-    return markdown.markdown(md_text, extensions=extensions)
+    try:
+        return markdown.markdown(md_text, extensions=extensions)
+    except Exception:
+        return markdown.markdown(md_text)
 
 
 def _render_entry_html(
@@ -884,6 +892,7 @@ def _open_html_document(html_doc: str) -> str:
     ) as fh:
         fh.write(html_doc)
         tmp_path = fh.name
+    # Keep the file for browser access; temporary browser previews may accumulate.
     webbrowser.open(f"file://{tmp_path}")
     return tmp_path
 
