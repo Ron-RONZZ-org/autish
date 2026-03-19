@@ -423,7 +423,7 @@ def _parse_enc_file(path: Path) -> dict:
 
 
 def _extract_enhavo_block(raw: str) -> tuple[str, str]:
-    pattern = re.compile(r'(?ms)^\s*"""\n(.*?)\n"""\s*$')
+    pattern = re.compile(r'^\s*"""\n(.*?)\n"""\s*$', re.MULTILINE | re.DOTALL)
     match = pattern.search(raw)
     if not match:
         return raw, ""
@@ -611,9 +611,8 @@ def _print_candidates(candidates: list[dict]) -> None:
 
 
 def _preferred_lang(terminologio: dict[str, str], difinoj: dict[str, str]) -> str:
-    env_lang = (os.environ.get("LC_ALL") or os.environ.get("LANG") or "").split(".")[
-        0
-    ]
+    raw_env_lang = os.environ.get("LC_ALL") or os.environ.get("LANG") or ""
+    env_lang = raw_env_lang.split(".")[0]
     env_lang = env_lang.split("_")[0].lower()
     if env_lang and terminologio.get(env_lang) and difinoj.get(env_lang):
         return env_lang

@@ -562,7 +562,7 @@ class TestEncikCLI:
             )
             runner.invoke(app, ["encik", "aldoni", str(enc)])
 
-        result = runner.invoke(app, ["encik", "vidi", "Term common",], input="1\n")
+        result = runner.invoke(app, ["encik", "vidi", "Term common"], input="1\n")
         assert result.exit_code == 0, result.output
         assert "Elektu numeron" in result.output
 
