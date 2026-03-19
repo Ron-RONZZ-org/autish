@@ -101,6 +101,19 @@ _ISO_690_TIPOJ: dict[str, str] = {
     "pre": "prelegoj",
 }
 
+_ALLOWED_ENC_PLAIN_KEYS: frozenset[str] = frozenset({
+    "terminologio",
+    "definio",
+    "titolo",
+    "superklaso",
+    "ligilo",
+    "fonto",
+    "source",
+})
+_ALLOWED_ENC_PLAIN_KEYS_SORTED: tuple[str, ...] = tuple(
+    sorted(_ALLOWED_ENC_PLAIN_KEYS)
+)
+
 # ──────────────────────────────────────────────────────────────────────────────
 # DB helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -452,14 +465,16 @@ def _format_enc_parse_error(raw_toml: str, exc: Exception) -> str:
         return message
 
     line = lines[lineno - 1]
-    col = colno if isinstance(colno, int) and colno > 0 else 1
-    pointer = " " * max(col - 1, 0) + "^"
+    pointer = ""
+    if isinstance(colno, int) and colno > 0:
+        pointer = " " * max(colno - 1, 0) + "^"
     hints = _build_parse_hints(str(exc), line)
     hint_block = "\n".join(f"  - {hint}" for hint in hints)
+    pointer_block = f"{pointer}\n" if pointer else ""
     return (
         f"{message}\n"
         f"Problema linio {lineno}: {line}\n"
-        f"{pointer}\n"
+        f"{pointer_block}"
         f"Sugestoj:\n{hint_block}"
     )
 
@@ -467,10 +482,11 @@ def _format_enc_parse_error(raw_toml: str, exc: Exception) -> str:
 def _build_parse_hints(error_text: str, line: str) -> list[str]:
     lowered = error_text.lower()
     hints = [
-        "Uzu validan TOML-sintekson: ŝlosilo = valoro (ekz. terminologio.eo = "
-        '"RS232").',
-        "Kontrolu kampnomojn: terminologio.xx, definio.xx, superklaso, ligilo, "
-        "fonto.",
+        (
+            "Uzu validan TOML-sintekson: ŝlosilo = valoro "
+            '(ekz. terminologio.eo = "RS232").'
+        ),
+        "Kontrolu kampnomojn: terminologio.xx, definio.xx, superklaso, ligilo, fonto.",
     ]
     if "invalid value" in lowered:
         hints.append(
@@ -489,41 +505,39 @@ def _build_parse_hints(error_text: str, line: str) -> list[str]:
 
 
 def _validate_enc_keys(data: dict) -> None:
-    allowed_plain = {
-        "terminologio",
-        "definio",
-        "titolo",
-        "superklaso",
-        "ligilo",
-        "fonto",
-        "source",
-    }
     allowed_dotted_prefixes = {"terminologio", "definio"}
     for key in data:
         if "." in key:
             prefix = key.split(".", 1)[0]
             if prefix in allowed_dotted_prefixes:
                 continue
-            suggestion = _suggest_enc_key(key, allowed_plain | {
-                "terminologio.xx",
-                "definio.xx",
-            })
+            suggestion = _suggest_enc_dotted_key(key)
             raise ValueError(
                 f"Nevalida .enc: nekonata kampo '{key}'. "
                 f"Uzu ekz. terminologio.xx aŭ definio.xx.{suggestion}"
             )
-        if key not in allowed_plain:
-            suggestion = _suggest_enc_key(key, allowed_plain)
+        if key not in _ALLOWED_ENC_PLAIN_KEYS:
+            suggestion = _suggest_enc_key(key, _ALLOWED_ENC_PLAIN_KEYS_SORTED)
             raise ValueError(
                 f"Nevalida .enc: nekonata kampo '{key}'.{suggestion}"
             )
 
 
-def _suggest_enc_key(key: str, allowed: set[str]) -> str:
-    match = get_close_matches(key, sorted(allowed), n=1, cutoff=0.6)
+def _suggest_enc_key(key: str, allowed: tuple[str, ...]) -> str:
+    match = get_close_matches(key, allowed, n=1, cutoff=0.6)
     if not match:
         return ""
     return f" Ĉu vi celis '{match[0]}'?"
+
+
+def _suggest_enc_dotted_key(key: str) -> str:
+    prefix = key.split(".", 1)[0].strip().lower()
+    if not prefix:
+        return ""
+    match = get_close_matches(prefix, ["terminologio", "definio"], n=1, cutoff=0.6)
+    if not match:
+        return ""
+    return f" Ĉu vi celis '{match[0]}.eo'?"
 
 
 def _collect_lang_fields(data: dict) -> tuple[dict[str, str], dict[str, str]]:

@@ -36,6 +36,7 @@ from email.mime.text import MIMEText
 from email.utils import make_msgid
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from typing import TypedDict
 
 import keyring
 import typer
@@ -88,7 +89,16 @@ _KEYRING_SERVICE: str = "autish-retposto"
 
 _MAX_FOLDERS_PER_ACCOUNT: int = 20
 
-_EMAIL_DOMAIN_CONFIGS: dict[str, dict[str, object]] = {
+class _EmailServerConfig(TypedDict):
+    imap_servilo: str
+    imap_haveno: int
+    imap_ssl: bool
+    smtp_servilo: str
+    smtp_haveno: int
+    smtp_tls: bool
+
+
+_EMAIL_DOMAIN_CONFIGS: dict[str, _EmailServerConfig] = {
     "gmail.com": {
         "imap_servilo": "imap.gmail.com",
         "imap_haveno": 993,
@@ -178,6 +188,7 @@ _EMAIL_DOMAIN_CONFIGS: dict[str, dict[str, object]] = {
         "smtp_tls": True,
     },
     "proton.me": {
+        # Proton domains require Proton Mail Bridge running locally.
         "imap_servilo": "127.0.0.1",
         "imap_haveno": 1143,
         "imap_ssl": False,
@@ -186,6 +197,7 @@ _EMAIL_DOMAIN_CONFIGS: dict[str, dict[str, object]] = {
         "smtp_tls": False,
     },
     "protonmail.com": {
+        # Proton domains require Proton Mail Bridge running locally.
         "imap_servilo": "127.0.0.1",
         "imap_haveno": 1143,
         "imap_ssl": False,
@@ -1303,7 +1315,7 @@ def _confirm_esperante(prompt: str, *, default_yes: bool) -> bool:
     return default_yes
 
 
-def _infer_mail_config(email_addr: str) -> dict[str, object] | None:
+def _infer_mail_config(email_addr: str) -> _EmailServerConfig | None:
     if "@" not in email_addr:
         return None
     domain = email_addr.rsplit("@", 1)[1].strip().lower()
@@ -1670,12 +1682,12 @@ def aldoni_konton(
 
     inferred = _infer_mail_config(retposto)
     if inferred and not imap_servilo and not smtp_servilo:
-        imap_servilo = str(inferred["imap_servilo"])
-        imap_haveno = int(inferred["imap_haveno"])
-        imap_ssl = bool(inferred["imap_ssl"])
-        smtp_servilo = str(inferred["smtp_servilo"])
-        smtp_haveno = int(inferred["smtp_haveno"])
-        smtp_tls = bool(inferred["smtp_tls"])
+        imap_servilo = inferred["imap_servilo"]
+        imap_haveno = inferred["imap_haveno"]
+        imap_ssl = inferred["imap_ssl"]
+        smtp_servilo = inferred["smtp_servilo"]
+        smtp_haveno = inferred["smtp_haveno"]
+        smtp_tls = inferred["smtp_tls"]
         typer.echo(
             "[i] Aŭtomate deduktis servilojn por ĉi tiu retpoŝta domajno. "
             "Uzu --imap/--smtp por mane ŝanĝi."
