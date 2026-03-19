@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 from autish.commands.encik import (
     _entry_to_enc,
     _normalise_pairs,
+    _normalize_fonto_tipo,
     _paralela_of,
     _parse_enc_file,
     _subklasoj_of,
@@ -35,9 +36,12 @@ def _make_entry(**kwargs) -> dict:
         "uuid": SAMPLE_UUID,
         "titolo": "Test Node",
         "definio": "A test definition.",
+        "terminologio": {"eo": "Test Node"},
+        "difinoj": {"eo": "A test definition."},
+        "enhavo": "",
         "superklaso": [],
         "ligilo": [],
-        "source": [],
+        "fonto": [],
         "kreita_je": "2024-01-01T00:00:00+00:00",
         "modifita_je": "2024-01-01T00:00:00+00:00",
     }
@@ -57,23 +61,32 @@ def _load_db_fixture(entries: list[dict], tmp_db: Path):
             uuid TEXT PRIMARY KEY,
             titolo TEXT NOT NULL,
             definio TEXT NOT NULL DEFAULT '',
+            terminologio TEXT NOT NULL DEFAULT '{}',
+            difinoj TEXT NOT NULL DEFAULT '{}',
+            enhavo TEXT NOT NULL DEFAULT '',
             superklaso TEXT NOT NULL DEFAULT '[]',
             ligilo TEXT NOT NULL DEFAULT '[]',
-            source TEXT NOT NULL DEFAULT '[]',
+            fonto TEXT NOT NULL DEFAULT '[]',
             kreita_je TEXT NOT NULL,
             modifita_je TEXT NOT NULL
         )"""
     )
     for e in entries:
         conn.execute(
-            "INSERT OR REPLACE INTO encik VALUES (?,?,?,?,?,?,?,?)",
+            """INSERT OR REPLACE INTO encik
+               (uuid, titolo, definio, terminologio, difinoj, enhavo,
+                superklaso, ligilo, fonto, kreita_je, modifita_je)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 e["uuid"],
                 e["titolo"],
                 e.get("definio", ""),
+                json.dumps(e.get("terminologio", {"eo": e["titolo"]})),
+                json.dumps(e.get("difinoj", {"eo": e.get("definio", "")})),
+                e.get("enhavo", ""),
                 json.dumps(e.get("superklaso", [])),
                 json.dumps(e.get("ligilo", [])),
-                json.dumps(e.get("source", [])),
+                json.dumps(e.get("fonto", [])),
                 e["kreita_je"],
                 e["modifita_je"],
             ),
@@ -108,16 +121,19 @@ class TestParseEncFile:
     def test_basic_parsing(self, tmp_path):
         enc = tmp_path / "test.enc"
         enc.write_text(
-            '# My Concept\n\ndefinio = "A nice definition."\n\n'
-            "superklaso = []\nligilo = []\nsource = []\n",
+            'terminologio.eo = "My Concept"\n'
+            'definio.eo = "A nice definition."\n'
+            "superklaso = []\nligilo = []\nfonto = []\n",
             encoding="utf-8",
         )
         parsed = _parse_enc_file(enc)
         assert parsed["titolo"] == "My Concept"
         assert parsed["definio"] == "A nice definition."
+        assert parsed["terminologio"]["eo"] == "My Concept"
+        assert parsed["difinoj"]["eo"] == "A nice definition."
         assert parsed["superklaso"] == []
         assert parsed["ligilo"] == []
-        assert parsed["source"] == []
+        assert parsed["fonto"] == []
 
     def test_multiline_definio(self, tmp_path):
         enc = tmp_path / "test.enc"
@@ -126,13 +142,15 @@ class TestParseEncFile:
             encoding="utf-8",
         )
         parsed = _parse_enc_file(enc)
+        assert parsed["titolo"] == "Topic"
         assert "Line one." in parsed["definio"]
         assert "Line two." in parsed["definio"]
 
     def test_superklaso_pairs(self, tmp_path):
         enc = tmp_path / "test.enc"
         enc.write_text(
-            '# Child\n\ndefinio = ""\nsuperklaso = [["Parent","uuid-parent"]]\n',
+            'terminologio.eo = "Child"\ndefinio.eo = "Difino"\n'
+            'superklaso = [["Parent","uuid-parent"]]\n',
             encoding="utf-8",
         )
         parsed = _parse_enc_file(enc)
@@ -141,19 +159,22 @@ class TestParseEncFile:
     def test_source_list(self, tmp_path):
         enc = tmp_path / "test.enc"
         enc.write_text(
-            '# Book\n\ndefinio = ""\n'
-            'source = [{title = "Great Book", author = "A. Author", year = "2020"}]\n',
+            'terminologio.eo = "Book"\ndefinio.eo = "x"\n'
+            "fonto = ["
+            '{title = "Great Book", author = "A. Author", year = "2020", type = "lib"}'
+            "]\n",
             encoding="utf-8",
         )
         parsed = _parse_enc_file(enc)
-        assert len(parsed["source"]) == 1
-        assert parsed["source"][0]["title"] == "Great Book"
-        assert parsed["source"][0]["author"] == "A. Author"
+        assert len(parsed["fonto"]) == 1
+        assert parsed["fonto"][0]["title"] == "Great Book"
+        assert parsed["fonto"][0]["author"] == "A. Author"
+        assert parsed["fonto"][0]["type"] == "libroj"
 
     def test_missing_title_raises(self, tmp_path):
         enc = tmp_path / "test.enc"
         enc.write_text('definio = "No title here."\n', encoding="utf-8")
-        with pytest.raises(ValueError, match="No title"):
+        with pytest.raises(ValueError, match="almenaŭ unu lingvo"):
             _parse_enc_file(enc)
 
     def test_malformed_toml_raises(self, tmp_path):
@@ -168,8 +189,54 @@ class TestParseEncFile:
             '# Comment Title\ntitolo = "TOML Title"\ndefinio = ""\n',
             encoding="utf-8",
         )
+        with pytest.raises(ValueError, match="almenaŭ unu lingvo"):
+            _parse_enc_file(enc)
+
+    def test_requires_term_and_definition_in_same_language(self, tmp_path):
+        enc = tmp_path / "bad.enc"
+        enc.write_text(
+            'terminologio.eo = "Temo"\n'
+            'definio.en = "Definition only in another language."\n',
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="almenaŭ unu lingvo"):
+            _parse_enc_file(enc)
+
+    def test_extracts_free_text_block(self, tmp_path):
+        enc = tmp_path / "enhavo.enc"
+        enc.write_text(
+            'terminologio.eo = "Temo"\n'
+            'definio.eo = "Difino"\n\n'
+            '"""\n'
+            "Tio estas **Markdown** kaj $x^2$.\n"
+            '"""\n',
+            encoding="utf-8",
+        )
         parsed = _parse_enc_file(enc)
-        assert parsed["titolo"] == "TOML Title"
+        assert "Markdown" in parsed["enhavo"]
+
+    def test_source_legacy_key_is_still_read_as_fonto(self, tmp_path):
+        enc = tmp_path / "legacy.enc"
+        enc.write_text(
+            'terminologio.eo = "Legacy"\n'
+            'definio.eo = "Difino"\n'
+            'source = [{title = "Old", type = "fil"}]\n',
+            encoding="utf-8",
+        )
+        parsed = _parse_enc_file(enc)
+        assert parsed["fonto"][0]["type"] == "filmoj"
+        assert parsed["fonto"][0]["title"] == "Old"
+
+    def test_invalid_fonto_type_raises(self, tmp_path):
+        enc = tmp_path / "bad_type.enc"
+        enc.write_text(
+            'terminologio.eo = "Type"\n'
+            'definio.eo = "Difino"\n'
+            'fonto = [{title = "Book", type = "invalid"}]\n',
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="Nevalida fonto.type"):
+            _parse_enc_file(enc)
 
 
 class TestEntryToEnc:
@@ -177,6 +244,8 @@ class TestEntryToEnc:
         entry = _make_entry(
             titolo="Round Trip",
             definio="Some definition.",
+            terminologio={"eo": "Round Trip"},
+            difinoj={"eo": "Some definition."},
             superklaso=[["Parent", "parent-uuid"]],
         )
         enc_text = _entry_to_enc(entry)
@@ -188,13 +257,24 @@ class TestEntryToEnc:
         assert parsed["superklaso"] == [["Parent", "parent-uuid"]]
 
     def test_empty_fields(self, tmp_path):
-        entry = _make_entry(titolo="Empty", definio="")
+        entry = _make_entry(
+            titolo="Empty",
+            definio="",
+            terminologio={"eo": "Empty"},
+            difinoj={"eo": "Difino"},
+        )
         enc_text = _entry_to_enc(entry)
         enc_file = tmp_path / "empty.enc"
         enc_file.write_text(enc_text, encoding="utf-8")
         parsed = _parse_enc_file(enc_file)
         assert parsed["titolo"] == "Empty"
         assert parsed["superklaso"] == []
+
+
+class TestFontoTipoNormalisation:
+    def test_alias_and_full_type(self):
+        assert _normalize_fonto_tipo("lib") == "libroj"
+        assert _normalize_fonto_tipo("libroj") == "libroj"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -292,7 +372,9 @@ class TestEncikCLI:
         p = tmp_path / f"{titolo.replace(' ', '_')}.enc"
         definio_json = json.dumps(definio)
         p.write_text(
-            f"# {titolo}\n\ndefinio = {definio_json}\n", encoding="utf-8"
+            f'terminologio.eo = {json.dumps(titolo)}\n'
+            f"definio.eo = {definio_json}\n",
+            encoding="utf-8",
         )
         return p
 
@@ -349,7 +431,9 @@ class TestEncikCLI:
     def test_serci_subklasoj(self, tmp_path):
         # Animal -> Mammal
         parent_enc = tmp_path / "animal.enc"
-        parent_enc.write_text("# Animal\ndefinio = \"\"\n", encoding="utf-8")
+        parent_enc.write_text(
+            'terminologio.eo = "Animal"\ndefinio.eo = "Root"\n', encoding="utf-8"
+        )
         r1 = runner.invoke(app, ["encik", "aldoni", str(parent_enc)])
         assert r1.exit_code == 0, r1.output
 
@@ -361,7 +445,8 @@ class TestEncikCLI:
 
         child_enc = tmp_path / "mammal.enc"
         child_enc.write_text(
-            f'# Mammal\ndefinio = ""\nsuperklaso = [["Animal", "{animal["uuid"]}"]]\n',
+            f'terminologio.eo = "Mammal"\ndefinio.eo = "Child"\n'
+            f'superklaso = [["Animal", "{animal["uuid"]}"]]\n',
             encoding="utf-8",
         )
         r2 = runner.invoke(app, ["encik", "aldoni", str(child_enc)])
@@ -373,7 +458,9 @@ class TestEncikCLI:
 
     def test_serci_superklasoj(self, tmp_path):
         parent_enc = tmp_path / "a.enc"
-        parent_enc.write_text("# Science\ndefinio = \"\"\n", encoding="utf-8")
+        parent_enc.write_text(
+            'terminologio.eo = "Science"\ndefinio.eo = "Root"\n', encoding="utf-8"
+        )
         runner.invoke(app, ["encik", "aldoni", str(parent_enc)])
 
         import autish.commands.encik as enc_mod
@@ -384,7 +471,7 @@ class TestEncikCLI:
         child_enc = tmp_path / "b.enc"
         science_uuid = science["uuid"]
         child_enc.write_text(
-            f'# Physics\ndefinio = ""\n'
+            f'terminologio.eo = "Physics"\ndefinio.eo = "Child"\n'
             f'superklaso = [["Science", "{science_uuid}"]]\n',
             encoding="utf-8",
         )
@@ -408,7 +495,8 @@ class TestEncikCLI:
         def _fake_run(cmd, **kwargs):
             # cmd[1] is the temp file path
             Path(cmd[1]).write_text(
-                '# EditMe\ndefinio = "Updated."\n', encoding="utf-8"
+                'terminologio.eo = "EditMe"\ndefinio.eo = "Updated."\n',
+                encoding="utf-8",
             )
 
             class _R:
@@ -428,6 +516,61 @@ class TestEncikCLI:
         updated = enc_mod._find_by_title_exact("EditMe")
         assert updated is not None
         assert updated["definio"] == "Updated."
+
+    def test_encik_vidi_supports_hash_uuid(self, tmp_path):
+        enc = self._make_enc_file(tmp_path, "Hash Node", "Difino")
+        add = runner.invoke(app, ["encik", "aldoni", str(enc)])
+        assert add.exit_code == 0, add.output
+        import autish.commands.encik as enc_mod
+
+        entry = enc_mod._find_by_title_exact("Hash Node")
+        assert entry is not None
+        result = runner.invoke(app, ["encik", "vidi", f"#{entry['uuid'][:8]}"])
+        assert result.exit_code == 0, result.output
+        assert "Hash Node" in result.output
+
+    def test_encik_vidi_with_lingvo_and_all(self, tmp_path):
+        enc = tmp_path / "multi.enc"
+        enc.write_text(
+            'terminologio.eo = "Hundo"\n'
+            'terminologio.en = "Dog"\n'
+            'definio.eo = "Besto"\n'
+            'definio.en = "Animal"\n'
+            '"""\n'
+            "Aldona enhavo.\n"
+            '"""\n'
+            'fonto = [{author = "A", year = "2020", type = "lib", title = "Libro"}]\n',
+            encoding="utf-8",
+        )
+        add = runner.invoke(app, ["encik", "aldoni", str(enc)])
+        assert add.exit_code == 0, add.output
+        result = runner.invoke(app, ["encik", "vidi", "Dog", "-L", "en", "-a"])
+        assert result.exit_code == 0, result.output
+        assert "Animal" in result.output
+        assert "Aldona enhavo" in result.output
+        assert "libroj" in result.output
+
+    def test_encik_vidi_ambiguous_prompts_up_to_five(self, tmp_path):
+        for i in range(6):
+            enc = tmp_path / f"n{i}.enc"
+            enc.write_text(
+                f'terminologio.eo = "Koncepto{i}"\n'
+                f'terminologio.en = "Term common {i}"\n'
+                'definio.eo = "Difino"\n'
+                'definio.en = "Definition"\n',
+                encoding="utf-8",
+            )
+            runner.invoke(app, ["encik", "aldoni", str(enc)])
+
+        result = runner.invoke(app, ["encik", "vidi", "Term common"], input="1\n")
+        assert result.exit_code == 0, result.output
+        assert "Elektu numeron" in result.output
+
+    def test_aldoni_help_mentions_new_enc_syntax(self):
+        result = runner.invoke(app, ["encik", "aldoni", "-h"])
+        assert result.exit_code == 0
+        assert "terminologio.xx" in result.output
+        assert "fonto" in result.output
 
 
 # ──────────────────────────────────────────────────────────────────────────────
