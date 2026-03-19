@@ -110,3 +110,4 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
 - Do not add heavy dependencies (e.g. no Django, Flask, SQLAlchemy).
 - Do not add GUI/TUI widgets; keep the interface purely text-line-based.
 - Do not hard-code paths; use `pathlib.Path` and environment variables.
+- **File-path prompts that accept a directory**: if the resolved path `is_dir()`, automatically append the default filename (e.g. `autish_recovery_hint.txt`) inside that directory instead of raising `IsADirectoryError`. Apply this pattern consistently wherever users are prompted for an output file path.

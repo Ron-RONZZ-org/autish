@@ -69,6 +69,8 @@ CREATE TABLE IF NOT EXISTS vorto (
     uzoj        TEXT NOT NULL DEFAULT '[]',
     etikedoj    TEXT NOT NULL DEFAULT '{}',
     ligiloj     TEXT NOT NULL DEFAULT '[]',
+    autoro      TEXT,
+    verko       TEXT,
     kreita_je   TEXT NOT NULL,
     modifita_je TEXT NOT NULL
 );
@@ -88,6 +90,8 @@ CREATE TABLE IF NOT EXISTS rubujo (
     uzoj        TEXT NOT NULL DEFAULT '[]',
     etikedoj    TEXT NOT NULL DEFAULT '{}',
     ligiloj     TEXT NOT NULL DEFAULT '[]',
+    autoro      TEXT,
+    verko       TEXT,
     kreita_je   TEXT NOT NULL,
     modifita_je TEXT NOT NULL,
     forigita_je TEXT NOT NULL
@@ -124,6 +128,10 @@ def _migrate_db(con: sqlite3.Connection) -> None:
             con.execute(
                 f"ALTER TABLE {table} ADD COLUMN uzoj TEXT NOT NULL DEFAULT '[]'"
             )
+        if "autoro" not in cols:
+            con.execute(f"ALTER TABLE {table} ADD COLUMN autoro TEXT")
+        if "verko" not in cols:
+            con.execute(f"ALTER TABLE {table} ADD COLUMN verko TEXT")
     con.commit()
 
 
@@ -163,6 +171,8 @@ def _dict_to_params(entry: dict) -> tuple:
         json.dumps(entry.get("uzoj") or [], ensure_ascii=False),
         json.dumps(entry.get("etikedoj") or {}, ensure_ascii=False),
         json.dumps(entry.get("ligiloj") or [], ensure_ascii=False),
+        entry.get("autoro"),
+        entry.get("verko"),
         entry["kreita_je"],
         entry["modifita_je"],
     )
@@ -245,8 +255,9 @@ def _save_entries(entries: list[dict]) -> None:
             """
             INSERT INTO vorto
                 (uuid, teksto, lingvo, kategorio, tipo, temo, tono,
-                 nivelo, difinoj, uzoj, etikedoj, ligiloj, kreita_je, modifita_je)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 nivelo, difinoj, uzoj, etikedoj, ligiloj,
+                 autoro, verko, kreita_je, modifita_je)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [_dict_to_params(e) for e in entries],
         )
@@ -289,8 +300,9 @@ def _push_undo(operation: dict) -> None:
 _RUBUJO_INSERT = """
 INSERT INTO rubujo
     (uuid, teksto, lingvo, kategorio, tipo, temo, tono, nivelo,
-     difinoj, uzoj, etikedoj, ligiloj, kreita_je, modifita_je, forigita_je)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     difinoj, uzoj, etikedoj, ligiloj, autoro, verko,
+     kreita_je, modifita_je, forigita_je)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 _RUBUJO_DAYS = 30  # entries older than this are auto-purged
@@ -332,8 +344,9 @@ def _recover_from_rubujo(uuid: str) -> dict | None:
             """
             INSERT OR REPLACE INTO vorto
                 (uuid, teksto, lingvo, kategorio, tipo, temo, tono, nivelo,
-                 difinoj, uzoj, etikedoj, ligiloj, kreita_je, modifita_je)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 difinoj, uzoj, etikedoj, ligiloj, autoro, verko,
+                 kreita_je, modifita_je)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             _dict_to_params(entry),
         )
@@ -587,6 +600,8 @@ def _display_entry(entry: dict, all_entries: list[dict] | None = None) -> None:
     _row("tono:", entry.get("tono") or "")
     nivelo = entry.get("nivelo")
     _row("nivelo:", f"{nivelo:.1f}" if nivelo is not None else "")
+    _row("autoro:", entry.get("autoro") or "")
+    _row("verko:", entry.get("verko") or "")
 
     difinoj: list[str] = entry.get("difinoj") or []
     uzoj: list[str] = entry.get("uzoj") or []
@@ -683,6 +698,8 @@ def _show_diff_confirmation(
         "uzoj",
         "etikedoj",
         "ligiloj",
+        "autoro",
+        "verko",
     )
     title = entry.get("teksto") or action_label
     uuid_short = (entry.get("uuid") or "")[:8]
@@ -757,6 +774,15 @@ def aldoni(
     ligilo: list[str] | None = typer.Option(
         None, "-L", "--ligilo", help="Linked entry UUID(s). Repeat flag for multiple."
     ),
+    autoro: str | None = typer.Option(
+        None, "-A", "--autoro", help="Author of the text."
+    ),
+    verko: str | None = typer.Option(
+        None,
+        "-v",
+        "--verko",
+        help="Source work in 'Title:Year' format (e.g. 'Le Petit Prince:1943').",
+    ),
 ) -> None:
     """Add a new word, phrase, or sentence to the wordbank."""
     if nivelo is not None and not (1.0 <= nivelo <= 10.0):
@@ -769,6 +795,72 @@ def aldoni(
         difino = [_apply_french_ligatures(d) for d in (difino or [])]
 
     difinoj, uzoj = _normalize_difinoj_uzoj(difino or [], [])
+
+    # Load entries early so we can check for duplicates
+    entries = _load_entries()
+
+    # ── Duplicate teksto check ───────────────────────────────────────────────
+    existing_entry = next(
+        (e for e in entries if e["teksto"].lower() == teksto.lower()),
+        None,
+    )
+    if existing_entry is not None:
+        typer.echo(
+            f"Eniro kun teksto \"{existing_entry['teksto']}\" jam ekzistas "
+            f"(#{existing_entry['uuid'][:8]})."
+        )
+        if not _confirm_esperante(
+            "Ĉu anstataŭigi la ekzistantan eniron per la novaj valoroj?",
+            default_yes=False,
+        ):
+            typer.echo("Nuligita. (Cancelled.)")
+            return
+        # Overwrite: apply modifi-equivalent on the existing entry
+        old_entry = dict(existing_entry)
+        if lingvo is not None:
+            existing_entry["lingvo"] = lingvo
+        if tipo is not None:
+            existing_entry["tipo"] = _normalize_tipo(tipo)
+        if temo is not None:
+            existing_entry["temo"] = temo
+        if tono is not None:
+            existing_entry["tono"] = _normalize_tono(tono)
+        if nivelo is not None:
+            existing_entry["nivelo"] = nivelo
+        if difino is not None:
+            existing_entry["difinoj"] = difinoj
+            existing_entry["uzoj"] = uzoj
+        if etikedo is not None:
+            existing_entry["etikedoj"] = _parse_etikedo(etikedo)
+        if ligilo is not None:
+            existing_entry["ligiloj"] = ligilo or []
+        if autoro is not None:
+            existing_entry["autoro"] = autoro
+        if verko is not None:
+            existing_entry["verko"] = verko
+        existing_entry["modifita_je"] = _now_iso()
+        if not _show_diff_confirmation(
+            "modifi (anstataŭigi)", existing_entry, old_entry
+        ):
+            typer.echo("Nuligita. (Cancelled.)")
+            return
+        idx = next(
+            i for i, e in enumerate(entries) if e["uuid"] == existing_entry["uuid"]
+        )
+        entries[idx] = existing_entry
+        _sync_bidirectional_links(
+            entries,
+            existing_entry["uuid"],
+            existing_entry.get("ligiloj") or [],
+            previous_links=old_entry.get("ligiloj") or [],
+        )
+        _save_entries(entries)
+        _push_undo({"op": "modifi", "old": old_entry})
+        typer.echo(
+            f"Modifis #{existing_entry['uuid'][:8]}  \"{existing_entry['teksto']}\""
+        )
+        return
+    # ── No duplicate — create a new entry ────────────────────────────────────
 
     now = _now_iso()
     entry: dict = {
@@ -784,6 +876,8 @@ def aldoni(
         "uzoj": uzoj,
         "etikedoj": _parse_etikedo(etikedo),
         "ligiloj": ligilo or [],
+        "autoro": autoro,
+        "verko": verko,
         "kreita_je": now,
         "modifita_je": now,
     }
@@ -792,7 +886,6 @@ def aldoni(
         typer.echo("Nuligita. (Cancelled.)")
         return
 
-    entries = _load_entries()
     entries.append(entry)
     _sync_bidirectional_links(
         entries,
@@ -891,9 +984,19 @@ def modifi(
     ligilo: list[str] | None = typer.Option(
         None, "-L", "--ligilo", help="New linked UUIDs (replaces existing)."
     ),
+    autoro: str | None = typer.Option(None, "-A", "--autoro", help="New author."),
+    verko: str | None = typer.Option(
+        None,
+        "-v",
+        "--verko",
+        help="New source work in 'Title:Year' format.",
+    ),
 ) -> None:
     """Modify a wordbank entry. Pass at least one option to update."""
-    opts = (teksto, lingvo, tipo, temo, tono, nivelo, difino, etikedo, ligilo)
+    opts = (
+        teksto, lingvo, tipo, temo, tono, nivelo, difino, etikedo, ligilo,
+        autoro, verko,
+    )
     if all(o is None for o in opts):
         typer.echo(ctx.get_help())
         return
@@ -931,6 +1034,10 @@ def modifi(
         entry["etikedoj"] = _parse_etikedo(etikedo)
     if ligilo is not None:
         entry["ligiloj"] = ligilo
+    if autoro is not None:
+        entry["autoro"] = autoro
+    if verko is not None:
+        entry["verko"] = verko
     entry["modifita_je"] = _now_iso()
 
     # Apply French ligature normalization using the effective language
@@ -1276,6 +1383,8 @@ def _entry_to_lines(entry: dict) -> list[str]:
     _row("tono:", entry.get("tono") or "")
     nivelo = entry.get("nivelo")
     _row("nivelo:", f"{nivelo:.1f}" if nivelo is not None else "")
+    _row("autoro:", entry.get("autoro") or "")
+    _row("verko:", entry.get("verko") or "")
 
     difinoj: list[str] = entry.get("difinoj") or []
     uzoj: list[str] = entry.get("uzoj") or []

@@ -1462,3 +1462,252 @@ class TestVidiClosestMatch:
             result = runner.invoke(app, ["vorto", "vidi", "oeuvre"])
         assert result.exit_code == 0
         assert "œuvre" in result.output
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# New fields: autoro and verko
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestAldoniautoroVerko:
+    """Tests for --autoro/-A and --verko/-v options in aldoni."""
+
+    def test_aldoni_saves_autoro(self):
+        with (
+            patch(_LOAD, return_value=[]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            runner.invoke(
+                app, ["vorto", "aldoni", "hello", "-A", "John Doe"]
+            )
+        saved = mock_save.call_args[0][0][0]
+        assert saved["autoro"] == "John Doe"
+
+    def test_aldoni_saves_verko(self):
+        with (
+            patch(_LOAD, return_value=[]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            runner.invoke(
+                app, ["vorto", "aldoni", "hello", "-v", "My Book:2023"]
+            )
+        saved = mock_save.call_args[0][0][0]
+        assert saved["verko"] == "My Book:2023"
+
+    def test_aldoni_without_autoro_verko_stores_none(self):
+        with (
+            patch(_LOAD, return_value=[]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            runner.invoke(app, ["vorto", "aldoni", "hello"])
+        saved = mock_save.call_args[0][0][0]
+        assert saved.get("autoro") is None
+        assert saved.get("verko") is None
+
+    def test_aldoni_long_flags_autoro_verko(self):
+        with (
+            patch(_LOAD, return_value=[]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            runner.invoke(
+                app,
+                [
+                    "vorto",
+                    "aldoni",
+                    "hello",
+                    "--autoro",
+                    "Jane Austen",
+                    "--verko",
+                    "Pride:1813",
+                ],
+            )
+        saved = mock_save.call_args[0][0][0]
+        assert saved["autoro"] == "Jane Austen"
+        assert saved["verko"] == "Pride:1813"
+
+
+class TestModifiAutoroVerko:
+    """Tests for --autoro/-A and --verko/-v options in modifi."""
+
+    def test_modifi_updates_autoro(self):
+        entry = _make_entry()
+        with (
+            patch(_LOAD, return_value=[entry]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            runner.invoke(
+                app, ["vorto", "modifi", SAMPLE_UUID, "-A", "New Author"]
+            )
+        saved = mock_save.call_args[0][0][0]
+        assert saved["autoro"] == "New Author"
+
+    def test_modifi_updates_verko(self):
+        entry = _make_entry()
+        with (
+            patch(_LOAD, return_value=[entry]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            runner.invoke(
+                app, ["vorto", "modifi", SAMPLE_UUID, "-v", "Hamlet:1603"]
+            )
+        saved = mock_save.call_args[0][0][0]
+        assert saved["verko"] == "Hamlet:1603"
+
+    def test_modifi_autoro_verko_count_in_opts(self):
+        """modifi with only --autoro should update (not show help)."""
+        entry = _make_entry()
+        with (
+            patch(_LOAD, return_value=[entry]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            result = runner.invoke(
+                app, ["vorto", "modifi", SAMPLE_UUID, "--autoro", "Alice"]
+            )
+        assert result.exit_code == 0
+        saved = mock_save.call_args[0][0][0]
+        assert saved["autoro"] == "Alice"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# No-duplicate teksto policy in aldoni
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestAldoniDuplicateTeksto:
+    """Tests for the no-duplicate teksto policy in aldoni."""
+
+    def test_duplicate_teksto_exact_asks_to_overwrite(self):
+        existing = _make_entry(teksto="hello")
+        with (
+            patch(_LOAD, return_value=[existing]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch("autish.commands.vorto.typer.prompt", return_value="j"),
+            patch(_CONFIRM, return_value=True),
+        ):
+            result = runner.invoke(app, ["vorto", "aldoni", "hello"])
+        # Should update existing entry, not add new one
+        assert result.exit_code == 0
+        saved = mock_save.call_args[0][0]
+        assert len(saved) == 1
+        assert saved[0]["uuid"] == SAMPLE_UUID
+
+    def test_duplicate_teksto_case_insensitive_asks_to_overwrite(self):
+        existing = _make_entry(teksto="Hello")
+        with (
+            patch(_LOAD, return_value=[existing]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch("autish.commands.vorto.typer.prompt", return_value="j"),
+            patch(_CONFIRM, return_value=True),
+        ):
+            result = runner.invoke(app, ["vorto", "aldoni", "hello"])
+        assert result.exit_code == 0
+        # Still only 1 entry
+        saved = mock_save.call_args[0][0]
+        assert len(saved) == 1
+
+    def test_duplicate_teksto_user_cancels_does_not_save(self):
+        existing = _make_entry(teksto="hello")
+        with (
+            patch(_LOAD, return_value=[existing]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=False),
+        ):
+            result = runner.invoke(app, ["vorto", "aldoni", "hello"])
+        assert result.exit_code == 0
+        mock_save.assert_not_called()
+
+    def test_duplicate_teksto_overwrites_with_new_lingvo(self):
+        existing = _make_entry(teksto="hello", lingvo="en")
+        with (
+            patch(_LOAD, return_value=[existing]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch("autish.commands.vorto.typer.prompt", return_value="j"),
+            patch(_CONFIRM, return_value=True),
+        ):
+            runner.invoke(app, ["vorto", "aldoni", "hello", "-l", "eo"])
+        saved = mock_save.call_args[0][0]
+        assert saved[0]["lingvo"] == "eo"
+
+    def test_duplicate_teksto_overwrite_pushes_modifi_to_undo(self):
+        existing = _make_entry(teksto="hello")
+        with (
+            patch(_LOAD, return_value=[existing]),
+            patch(_SAVE),
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO) as mock_save_undo,
+            patch("autish.commands.vorto.typer.prompt", return_value="j"),
+            patch(_CONFIRM, return_value=True),
+        ):
+            runner.invoke(app, ["vorto", "aldoni", "hello", "-l", "eo"])
+        saved_stack = mock_save_undo.call_args[0][0]
+        assert saved_stack[-1]["op"] == "modifi"
+        assert saved_stack[-1]["old"]["lingvo"] == "en"
+
+    def test_unique_teksto_adds_new_entry(self):
+        existing = _make_entry(teksto="hello")
+        with (
+            patch(_LOAD, return_value=[existing]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            runner.invoke(app, ["vorto", "aldoni", "world"])
+        saved = mock_save.call_args[0][0]
+        assert len(saved) == 2
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# autoro/verko fields shown in entry display
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestEntryToLinesAutoroVerko:
+    """Tests that autoro and verko are included in entry display lines."""
+
+    def test_autoro_shown_when_present(self):
+        entry = _make_entry(autoro="Voltaire")
+        lines = _entry_to_lines(entry)
+        assert any("Voltaire" in ln for ln in lines)
+
+    def test_verko_shown_when_present(self):
+        entry = _make_entry(verko="Candide:1759")
+        lines = _entry_to_lines(entry)
+        assert any("Candide:1759" in ln for ln in lines)
+
+    def test_autoro_verko_absent_when_not_set(self):
+        entry = _make_entry()
+        lines = _entry_to_lines(entry)
+        joined = "\n".join(lines)
+        assert "autoro:" not in joined
+        assert "verko:" not in joined
+

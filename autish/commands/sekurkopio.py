@@ -489,6 +489,8 @@ def auto(
                 "Dosiero por konservi gvidon", default=default_hint
             ).strip()
             hint_path = Path(hint_file)
+            if hint_path.is_dir():
+                hint_path = hint_path / "autish_recovery_hint.txt"
             hint_path.write_text(
                 "autish sekurkopio — ciferlanda restarigado\n"
                 f"Sekurkopio-dosierujo : {new_dir}\n"
