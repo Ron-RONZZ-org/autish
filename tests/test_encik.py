@@ -183,6 +183,33 @@ class TestParseEncFile:
         with pytest.raises(ValueError, match="Malformed"):
             _parse_enc_file(enc)
 
+    def test_malformed_toml_error_includes_line_and_hint(self, tmp_path):
+        enc = tmp_path / "bad.enc"
+        enc.write_text(
+            'terminologio.eo = "RS232"\n'
+            'definio.eo = "Seria interfaco."\n'
+            "fonto = [{year = 202x}]\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError) as exc_info:
+            _parse_enc_file(enc)
+        msg = str(exc_info.value)
+        assert "Malformed .enc file" in msg
+        assert "Problema linio 3" in msg
+        assert "^" in msg
+        assert "Sugestoj:" in msg
+
+    def test_unknown_enc_key_suggests_fix(self, tmp_path):
+        enc = tmp_path / "bad_key.enc"
+        enc.write_text(
+            'terminolgio.eo = "RS232"\n'
+            'terminologio.en = "RS232"\n'
+            'definio.en = "Serial line protocol."\n',
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="nekonata kampo"):
+            _parse_enc_file(enc)
+
     def test_toml_titolo_overrides_comment(self, tmp_path):
         enc = tmp_path / "test.enc"
         enc.write_text(
@@ -571,6 +598,7 @@ class TestEncikCLI:
         assert result.exit_code == 0
         assert "terminologio.xx" in result.output
         assert "fonto" in result.output
+        assert "superklaso/ligilo" in result.output
 
 
 # ──────────────────────────────────────────────────────────────────────────────
