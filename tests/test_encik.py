@@ -210,6 +210,28 @@ class TestParseEncFile:
         with pytest.raises(ValueError, match="nekonata kampo"):
             _parse_enc_file(enc)
 
+    def test_multiline_string_after_equals_hint(self, tmp_path):
+        enc = tmp_path / "rs232.enc"
+        enc.write_text(
+            'terminologio.eo = "EIA RS-232"\n'
+            'terminologio.fr = "EIA RS-232"\n'
+            "definio.fr =\n"
+            '"""\n'
+            "Norme série.\n"
+            '"""\n'
+            "definio.eo =\n"
+            '"""\n'
+            "Normo serio.\n"
+            '"""\n',
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError) as exc_info:
+            _parse_enc_file(enc)
+        msg = str(exc_info.value)
+        assert "Malformed .enc file" in msg
+        assert "Por plurlinia teksto" in msg
+        assert "definio.fr = \"\"\"" in msg
+
     def test_toml_titolo_overrides_comment(self, tmp_path):
         enc = tmp_path / "test.enc"
         enc.write_text(

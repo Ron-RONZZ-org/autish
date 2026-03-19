@@ -499,6 +499,17 @@ def _build_parse_hints(error_text: str, line: str) -> list[str]:
         hints.append("Sama ŝlosilo aperas plurfoje; forigu duplikatan kampon.")
     if "unterminated" in lowered or "unclosed" in lowered:
         hints.append("Mankas ferma citilo, ] aŭ }.")
+    left_side = line.split("=", 1)[0].strip().lower()
+    dotted_key_like = bool(re.match(r"^[a-z_][a-z0-9_]*(\.[a-z0-9_]+)+$", left_side))
+    if (
+        line.strip().endswith("=")
+        and "invalid value" in lowered
+        and dotted_key_like
+    ):
+        hints.append(
+            "Por plurlinia teksto (`\"\"\"`), metu la malferman `\"\"\"` sur la "
+            "sama linio kiel `=` (ekz. definio.fr = \"\"\"...)."
+        )
     if "=" not in line:
         hints.append("Ĉiu kampolinio devus aspekti kiel: nomo = valoro")
     return hints
