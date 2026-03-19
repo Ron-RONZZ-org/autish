@@ -55,6 +55,7 @@ shelo = "autish.commands.shelo:app"
 sekurkopio = "autish.commands.sekurkopio:app"
 uzanto = "autish.commands.uzanto:app"
 md = "autish.commands.md:app"
+encik = "autish.commands.encik:app"
 
 [tool.ruff]
 line-length = 88

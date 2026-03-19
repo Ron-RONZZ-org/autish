@@ -763,7 +763,13 @@ def aldoni(
         None, "-n", "--nivelo", help="Lexical complexity 1–10."
     ),
     difino: list[str] | None = typer.Option(
-        None, "-d", "--difino", help="Definition. Repeat flag for multiple."
+        None,
+        "-d",
+        "--difino",
+        help=(
+            "Definition. Repeat flag for multiple. "
+            'Syntax: "{definition}:*{example}*" to attach an example.'
+        ),
     ),
     etikedo: list[str] | None = typer.Option(
         None,
