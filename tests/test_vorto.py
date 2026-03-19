@@ -363,6 +363,13 @@ class TestVidi:
             result = runner.invoke(app, ["vorto", "vidi", "aaaaaaaa"])
         assert result.exit_code == 0
 
+    def test_uuid_prefix_with_hash_works(self):
+        entry = _make_entry()
+        with patch(_LOAD, return_value=[entry]):
+            result = runner.invoke(app, ["vorto", "vidi", "#aaaaaaaa"])
+        assert result.exit_code == 0
+        assert "hello" in result.output
+
     def test_not_found_exits_nonzero(self):
         with patch(_LOAD, return_value=[]):
             result = runner.invoke(app, ["vorto", "vidi", "notfound"])
@@ -1710,4 +1717,3 @@ class TestEntryToLinesAutoroVerko:
         joined = "\n".join(lines)
         assert "autoro:" not in joined
         assert "verko:" not in joined
-

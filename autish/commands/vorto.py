@@ -926,10 +926,11 @@ def vidi(
         typer.echo(f"{len(results)} rezulto(j).")
         _display_results(results)
         return
-    entry = _find_entry(uid, entries)
+    lookup_uid = uid[1:] if uid.startswith("#") else uid
+    entry = _find_entry(lookup_uid, entries)
     if entry is None:
         # No exact match — try fuzzy/closest matches (max 5)
-        closest = _fuzzy_text_matches(entries, uid, limit=5)
+        closest = _fuzzy_text_matches(entries, lookup_uid, limit=5)
         if not closest:
             typer.echo(f"Eniro ne trovita: {uid!r}", err=True)
             raise typer.Exit(code=1)
