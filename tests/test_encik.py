@@ -146,6 +146,20 @@ class TestParseEncFile:
         assert "Line one." in parsed["definio"]
         assert "Line two." in parsed["definio"]
 
+    def test_multiline_definio_with_spacing_before_triple_quotes(self, tmp_path):
+        enc = tmp_path / "test_spaces.enc"
+        enc.write_text(
+            'terminologio.eo = "Temo"\n'
+            "definio.eo =   \n"
+            '   """\n'
+            "estas difinio\n"
+            '"""\n',
+            encoding="utf-8",
+        )
+        parsed = _parse_enc_file(enc)
+        assert parsed["titolo"] == "Temo"
+        assert parsed["definio"] == "estas difinio"
+
     def test_superklaso_pairs(self, tmp_path):
         enc = tmp_path / "test.enc"
         enc.write_text(
@@ -210,7 +224,7 @@ class TestParseEncFile:
         with pytest.raises(ValueError, match="nekonata kampo"):
             _parse_enc_file(enc)
 
-    def test_multiline_string_after_equals_hint(self, tmp_path):
+    def test_multiline_string_after_equals_is_accepted(self, tmp_path):
         enc = tmp_path / "rs232.enc"
         enc.write_text(
             'terminologio.eo = "EIA RS-232"\n'
@@ -225,12 +239,10 @@ class TestParseEncFile:
             '"""\n',
             encoding="utf-8",
         )
-        with pytest.raises(ValueError) as exc_info:
-            _parse_enc_file(enc)
-        msg = str(exc_info.value)
-        assert "Malformed .enc file" in msg
-        assert "Por plurlinia teksto" in msg
-        assert "definio.fr = \"\"\"" in msg
+        parsed = _parse_enc_file(enc)
+        assert parsed["terminologio"]["fr"] == "EIA RS-232"
+        assert parsed["difinoj"]["fr"] == "Norme série."
+        assert parsed["difinoj"]["eo"] == "Normo serio."
 
     def test_toml_titolo_overrides_comment(self, tmp_path):
         enc = tmp_path / "test.enc"
@@ -614,6 +626,34 @@ class TestEncikCLI:
         result = runner.invoke(app, ["encik", "vidi", "Term common"], input="1\n")
         assert result.exit_code == 0, result.output
         assert "Elektu numeron" in result.output
+
+    def test_encik_vidi_html_opens_browser_with_rendered_table(
+        self, tmp_path, monkeypatch
+    ):
+        enc = tmp_path / "html.enc"
+        enc.write_text(
+            'terminologio.eo = "Hundo"\n'
+            'definio.eo = "**Besto**"\n',
+            encoding="utf-8",
+        )
+        add = runner.invoke(app, ["encik", "aldoni", str(enc)])
+        assert add.exit_code == 0, add.output
+
+        opened: dict[str, str] = {}
+
+        def _fake_open(url: str) -> bool:
+            opened["url"] = url
+            return True
+
+        monkeypatch.setattr("autish.commands.encik.webbrowser.open", _fake_open)
+        result = runner.invoke(app, ["encik", "vidi", "Hundo", "--html"])
+        assert result.exit_code == 0, result.output
+        assert "Malfermas en retumilo:" in result.output
+        assert opened["url"].startswith("file://")
+        html_path = Path(opened["url"][7:])
+        html_content = html_path.read_text(encoding="utf-8")
+        assert "<table>" in html_content
+        assert "<strong>Besto</strong>" in html_content
 
     def test_aldoni_help_mentions_new_enc_syntax(self):
         result = runner.invoke(app, ["encik", "aldoni", "-h"])
