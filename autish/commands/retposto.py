@@ -307,6 +307,23 @@ CREATE TABLE IF NOT EXISTS filtro (
 );
 """
 
+_CREATE_ALDONAJO = """
+CREATE TABLE IF NOT EXISTS aldonajo (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    mesago_id  INTEGER NOT NULL,
+    dosiernomo TEXT NOT NULL,
+    mime_tipo  TEXT NOT NULL DEFAULT 'application/octet-stream',
+    grandeco   INTEGER NOT NULL DEFAULT 0,
+    enhavo     BLOB,
+    vojo       TEXT,
+    kreita_je  TEXT NOT NULL,
+    FOREIGN KEY (mesago_id) REFERENCES mesago(id) ON DELETE CASCADE
+);
+"""
+
+# Maximum size (bytes) for attachments stored in DB (1 MB)
+_ALDONAJO_MAX_DB_SIZE = 1024 * 1024
+
 # ──────────────────────────────────────────────────────────────────────────────
 # DB helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -326,6 +343,7 @@ def _get_db() -> sqlite3.Connection:
         + _CREATE_KONTAKTO
         + _CREATE_SPAMO_BLOKO
         + _CREATE_FILTRO
+        + _CREATE_ALDONAJO
     )
     # Migrations for existing databases
     _migrate_db(con)
@@ -757,6 +775,161 @@ def _copy_message(msg_id: int, konto_id: int, dosierujo_id: int) -> int | None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Attachment helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+_ALDONAJOJ_DIR = _DATA_DIR / "retposto_aldonajoj"
+
+
+def _save_aldonajo(
+    mesago_id: int,
+    dosiernomo: str,
+    enhavo: bytes,
+    mime_tipo: str = "application/octet-stream",
+) -> int:
+    """Save an attachment. Small files (<1MB) in DB, large files to filesystem.
+    
+    Returns: aldonajo_id
+    """
+    grandeco = len(enhavo)
+    kreita_je = _now_iso()
+    
+    with _get_db() as con:
+        if grandeco < _ALDONAJO_MAX_DB_SIZE:
+            # Store in database
+            cur = con.execute(
+                """INSERT INTO aldonajo
+                   (mesago_id, dosiernomo, mime_tipo, grandeco, enhavo, vojo, kreita_je)
+                   VALUES (?, ?, ?, ?, ?, NULL, ?)""",
+                (mesago_id, dosiernomo, mime_tipo, grandeco, enhavo, kreita_je),
+            )
+        else:
+            # Store as file
+            _ALDONAJOJ_DIR.mkdir(parents=True, exist_ok=True)
+            import uuid
+            
+            # Generate unique filename: <uuid>_<original_name>
+            unique_id = uuid.uuid4().hex[:12]
+            safe_name = "".join(
+                c if c.isalnum() or c in "._-" else "_" for c in dosiernomo
+            )
+            vojo = _ALDONAJOJ_DIR / f"{unique_id}_{safe_name}"
+            vojo.write_bytes(enhavo)
+            
+            cur = con.execute(
+                """INSERT INTO aldonajo
+                   (mesago_id, dosiernomo, mime_tipo, grandeco, enhavo, vojo, kreita_je)
+                   VALUES (?, ?, ?, ?, NULL, ?, ?)""",
+                (mesago_id, dosiernomo, mime_tipo, grandeco, str(vojo), kreita_je),
+            )
+        return int(cur.lastrowid)
+
+
+def _load_aldonajoj(mesago_id: int) -> list[dict]:
+    """Load all attachments for a message.
+    
+    Returns: list of {id, mesago_id, dosiernomo, mime_tipo, grandeco, kreita_je}
+    """
+    with _get_db() as con:
+        rows = con.execute(
+            """SELECT id, mesago_id, dosiernomo, mime_tipo, grandeco, kreita_je
+               FROM aldonajo WHERE mesago_id = ? ORDER BY id ASC""",
+            (mesago_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _get_aldonajo_enhavo(aldonajo_id: int) -> bytes | None:
+    """Retrieve attachment content from DB or filesystem.
+    
+    Returns: bytes of the attachment, or None if not found.
+    """
+    with _get_db() as con:
+        row = con.execute(
+            "SELECT enhavo, vojo FROM aldonajo WHERE id = ?",
+            (aldonajo_id,),
+        ).fetchone()
+    
+    if row is None:
+        return None
+    
+    if row["enhavo"] is not None:
+        # Stored in database
+        return bytes(row["enhavo"])
+    elif row["vojo"]:
+        # Stored as file
+        from pathlib import Path
+        vojo = Path(row["vojo"])
+        if vojo.exists():
+            return vojo.read_bytes()
+    
+    return None
+
+
+def _delete_aldonajo(aldonajo_id: int) -> None:
+    """Delete an attachment from DB and filesystem if applicable."""
+    with _get_db() as con:
+        row = con.execute(
+            "SELECT vojo FROM aldonajo WHERE id = ?",
+            (aldonajo_id,),
+        ).fetchone()
+        
+        if row and row["vojo"]:
+            # Delete filesystem file
+            from pathlib import Path
+            vojo = Path(row["vojo"])
+            if vojo.exists():
+                vojo.unlink()
+        
+        con.execute("DELETE FROM aldonajo WHERE id = ?", (aldonajo_id,))
+
+
+def _malfermi_aldonajon(aldonajo_id: int) -> None:
+    """Open attachment with system default app (xdg-open)."""
+    import subprocess
+    import tempfile
+    
+    with _get_db() as con:
+        row = con.execute(
+            "SELECT dosiernomo, enhavo, vojo FROM aldonajo WHERE id = ?",
+            (aldonajo_id,),
+        ).fetchone()
+    
+    if row is None:
+        typer.echo("Aldonaĵo ne trovita.", err=True)
+        raise typer.Exit(1)
+    
+    # Get the file path
+    if row["vojo"]:
+        # File stored on filesystem
+        vojo = Path(row["vojo"])
+        if not vojo.exists():
+            typer.echo(f"Dosiero ne trovita: {vojo}", err=True)
+            raise typer.Exit(1)
+        file_path = vojo
+    else:
+        # File in database - extract to temp directory
+        enhavo = bytes(row["enhavo"])
+        dosiernomo = row["dosiernomo"]
+        
+        # Create temp file with original extension
+        temp_dir = Path(tempfile.gettempdir()) / "autish_aldonajoj"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        file_path = temp_dir / f"{aldonajo_id}_{dosiernomo}"
+        file_path.write_bytes(enhavo)
+    
+    # Open with system default app
+    try:
+        subprocess.run(["xdg-open", str(file_path)], check=True)
+    except subprocess.CalledProcessError as e:
+        typer.echo(f"Eraro malfermante dosieron: {e}", err=True)
+        raise typer.Exit(1) from e
+    except FileNotFoundError as e:
+        typer.echo("xdg-open ne trovita. Ĉu vi estas sur sistemo kun GUI?", err=True)
+        raise typer.Exit(1) from e
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Contact helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -1024,10 +1197,17 @@ def _extract_address_list(raw: str | None) -> list[str]:
     return [_extract_address(p) for p in parts if p.strip()]
 
 
-def _parse_imap_message(raw_bytes: bytes, konto_id: int,
-                        dosierujo_id: int | None,
-                        uid: str | None = None) -> dict:
-    """Parse a raw RFC 5322 message into a retposto message dict."""
+def _parse_imap_message(
+    raw_bytes: bytes,
+    konto_id: int,
+    dosierujo_id: int | None,
+    uid: str | None = None,
+) -> tuple[dict, list[tuple[str, bytes, str]]]:
+    """Parse raw RFC 5322 message into a mesago dict and attachment list.
+    
+    Returns:
+        tuple: (mesago_dict, [(filename, content_bytes, mime_type), ...])
+    """
     msg = _email_mod.message_from_bytes(
         raw_bytes, policy=_email_mod.policy.compat32
     )
@@ -1049,10 +1229,11 @@ def _parse_imap_message(raw_bytes: bytes, konto_id: int,
     except Exception:
         pass
 
-    # Extract body
+    # Extract body and attachments
     korpo: str | None = None
     html_korpo: str | None = None
-    aldonajoj: list[str] = []
+    aldonajoj_filenames: list[str] = []
+    aldonajoj_data: list[tuple[str, bytes, str]] = []
 
     if msg.is_multipart():
         for part in msg.walk():
@@ -1060,7 +1241,13 @@ def _parse_imap_message(raw_bytes: bytes, konto_id: int,
             disp = str(part.get("Content-Disposition") or "")
             if "attachment" in disp:
                 filename = part.get_filename() or "attachment"
-                aldonajoj.append(_decode_header(filename))
+                decoded_filename = _decode_header(filename)
+                aldonajoj_filenames.append(decoded_filename)
+                
+                # Extract attachment content
+                payload = part.get_payload(decode=True)
+                if isinstance(payload, bytes):
+                    aldonajoj_data.append((decoded_filename, payload, ct))
             elif ct == "text/plain" and korpo is None:
                 payload = part.get_payload(decode=True)
                 if isinstance(payload, bytes):
@@ -1077,7 +1264,7 @@ def _parse_imap_message(raw_bytes: bytes, konto_id: int,
             charset = msg.get_content_charset() or "utf-8"
             korpo = payload.decode(charset, errors="replace")
 
-    return {
+    mesago_dict = {
         "uuid": _make_uuid(),
         "konto_id": konto_id,
         "dosierujo_id": dosierujo_id,
@@ -1097,11 +1284,13 @@ def _parse_imap_message(raw_bytes: bytes, konto_id: int,
         "stelo": 0,
         "spamo": 0,
         "forigita": 0,
-        "aldonajoj": aldonajoj,
+        "aldonajoj": aldonajoj_filenames,
         "etikedoj": [],
         "ricevita_je": ricevita_je,
         "kreita_je": _now_iso(),
     }
+    
+    return mesago_dict, aldonajoj_data
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1173,7 +1362,9 @@ def _fetch_account_mail(acc: dict, max_msgs: int = 100) -> tuple[int, int]:
                 if not isinstance(raw, bytes):
                     skipped += 1
                     continue
-                parsed = _parse_imap_message(raw, acc["id"], folder_id, uid)
+                parsed, aldonajoj_data = _parse_imap_message(
+                    raw, acc["id"], folder_id, uid
+                )
 
                 # Spam check
                 if _is_spam(parsed.get("de") or ""):
@@ -1192,7 +1383,11 @@ def _fetch_account_mail(acc: dict, max_msgs: int = 100) -> tuple[int, int]:
                     ff = parsed.pop("_filter_folder")
                     parsed["dosierujo_id"] = _ensure_folder(acc["id"], ff, ff)
 
-                _save_message(parsed)
+                # Save message and attachments
+                msg_id = _save_message(parsed)
+                for filename, content, mime_tipo in aldonajoj_data:
+                    _save_aldonajo(msg_id, filename, content, mime_tipo)
+                
                 fetched += 1
 
         imap.logout()
@@ -3239,6 +3434,50 @@ def konton() -> None:
             updated += 1
 
     typer.echo(f"[v] Aktualigis {updated} konto(j)n.")
+
+
+@app.command("listigi-aldonajojn")
+def listigi_aldonajojn(mesago_id: int) -> None:
+    """List attachments for a message."""
+    aldonajoj = _load_aldonajoj(mesago_id)
+    if not aldonajoj:
+        typer.echo("Neniu aldonaĵo trovita.")
+        return
+    
+    console = Console()
+    table = Table(title=f"Aldonaĵoj por mesaĝo #{mesago_id}")
+    table.add_column("ID", style="cyan")
+    table.add_column("Dosiernomo", style="bold")
+    table.add_column("Grandeco", justify="right")
+    table.add_column("MIME-tipo", style="dim")
+    
+    for ald in aldonajoj:
+        grandeco_str = _format_grandeco(ald["grandeco"])
+        table.add_row(
+            str(ald["id"]),
+            ald["dosiernomo"],
+            grandeco_str,
+            ald["mime_tipo"],
+        )
+    
+    console.print(table)
+
+
+@app.command("malfermi-aldonajon")
+def malfermi_aldonajon_cmd(aldonajo_id: int) -> None:
+    """Open an attachment with the system default app."""
+    _malfermi_aldonajon(aldonajo_id)
+    typer.echo(f"[v] Malfermis aldonaĵon #{aldonajo_id}.")
+
+
+def _format_grandeco(bytes_count: int) -> str:
+    """Format file size in human-readable format."""
+    if bytes_count < 1024:
+        return f"{bytes_count} B"
+    elif bytes_count < 1024 * 1024:
+        return f"{bytes_count / 1024:.1f} KB"
+    else:
+        return f"{bytes_count / (1024 * 1024):.1f} MB"
 
 
 def _find_terminal_editor() -> str:

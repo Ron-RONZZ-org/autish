@@ -149,31 +149,32 @@ class TestParseImapMessage:
 
     def test_basic_parse(self):
         raw = self._make_raw()
-        msg = _parse_imap_message(raw, konto_id=1, dosierujo_id=1)
+        msg, aldonajoj = _parse_imap_message(raw, konto_id=1, dosierujo_id=1)
         assert msg["de"] == "sender@example.com"
         assert msg["al"] == ["rcpt@example.com"]
         assert msg["subjekto"] == "Test"
         assert "Hello" in (msg["korpo"] or "")
         assert msg["konto_id"] == 1
+        assert aldonajoj == []
 
     def test_message_id_extracted(self):
         raw = self._make_raw()
-        msg = _parse_imap_message(raw, konto_id=1, dosierujo_id=None)
+        msg, _ = _parse_imap_message(raw, konto_id=1, dosierujo_id=None)
         assert msg["message_id"] == "<test-123@example.com>"
 
     def test_unicode_subject(self):
         raw = self._make_raw(subject="Saluton Ĉiuj")
-        msg = _parse_imap_message(raw, konto_id=1, dosierujo_id=None)
+        msg, _ = _parse_imap_message(raw, konto_id=1, dosierujo_id=None)
         assert "Saluton" in (msg["subjekto"] or "")
 
     def test_uid_stored(self):
         raw = self._make_raw()
-        msg = _parse_imap_message(raw, konto_id=2, dosierujo_id=3, uid="42")
+        msg, _ = _parse_imap_message(raw, konto_id=2, dosierujo_id=3, uid="42")
         assert msg["uid"] == "42"
 
     def test_date_parsed(self):
         raw = self._make_raw(date="Mon, 01 Jan 2024 12:00:00 +0000")
-        msg = _parse_imap_message(raw, konto_id=1, dosierujo_id=None)
+        msg, _ = _parse_imap_message(raw, konto_id=1, dosierujo_id=None)
         assert msg["ricevita_je"] is not None
         assert "2024" in msg["ricevita_je"]
 
@@ -190,7 +191,7 @@ class TestParseImapMessage:
             b"\r\n"
             b"Hello\r\n"
         )
-        msg = _parse_imap_message(raw, konto_id=1, dosierujo_id=1)
+        msg, _ = _parse_imap_message(raw, konto_id=1, dosierujo_id=1)
         assert msg["in_reply_to"] == "<root@example.com>"
         assert "<mid@example.com>" in (msg["references_hdr"] or "")
 
