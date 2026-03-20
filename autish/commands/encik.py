@@ -80,7 +80,7 @@ _CREATE_ENCIK = """
 CREATE TABLE IF NOT EXISTS encik (
     uuid        TEXT PRIMARY KEY,
     titolo      TEXT NOT NULL,
-    definio     TEXT NOT NULL DEFAULT '',
+    difinio     TEXT NOT NULL DEFAULT '',
     terminologio TEXT NOT NULL DEFAULT '{}',
     difinoj     TEXT NOT NULL DEFAULT '{}',
     enhavo      TEXT NOT NULL DEFAULT '',
@@ -105,7 +105,7 @@ _ISO_690_TIPOJ: dict[str, str] = {
 
 _ALLOWED_ENC_PLAIN_KEYS: frozenset[str] = frozenset({
     "terminologio",
-    "definio",
+    "difinio",
     "titolo",
     "superklaso",
     "ligilo",
@@ -180,14 +180,14 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
         titolo = str(d.get("titolo") or "").strip()
         d["terminologio"] = {"eo": titolo} if titolo else {}
     if "difinoj" not in d:
-        definio = str(d.get("definio") or "").strip()
-        d["difinoj"] = {"eo": definio} if definio else {}
+        difinio = str(d.get("difinio") or "").strip()
+        d["difinoj"] = {"eo": difinio} if difinio else {}
     if "enhavo" not in d:
         d["enhavo"] = ""
     if not d.get("titolo"):
         d["titolo"] = next(iter(d.get("terminologio", {}).values()), "")
-    if not d.get("definio"):
-        d["definio"] = next(iter(d.get("difinoj", {}).values()), "")
+    if not d.get("difinio"):
+        d["difinio"] = next(iter(d.get("difinoj", {}).values()), "")
     return d
 
 
@@ -252,14 +252,14 @@ def _insert_entry(entry: dict) -> None:
     try:
         conn.execute(
             "INSERT INTO encik"
-            " (uuid, titolo, definio, terminologio, difinoj, enhavo,"
+            " (uuid, titolo, difinio, terminologio, difinoj, enhavo,"
             " superklaso, ligilo, fonto,"
             " kreita_je, modifita_je)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 entry["uuid"],
                 entry["titolo"],
-                entry.get("definio", ""),
+                entry.get("difinio", ""),
                 json.dumps(entry.get("terminologio", {}), ensure_ascii=False),
                 json.dumps(entry.get("difinoj", {}), ensure_ascii=False),
                 entry.get("enhavo", ""),
@@ -280,12 +280,12 @@ def _update_entry(entry: dict) -> None:
     try:
         conn.execute(
             """UPDATE encik SET
-               titolo=?, definio=?, terminologio=?, difinoj=?, enhavo=?,
+               titolo=?, difinio=?, terminologio=?, difinoj=?, enhavo=?,
                superklaso=?, ligilo=?, fonto=?, modifita_je=?
                WHERE uuid=?""",
             (
                 entry["titolo"],
-                entry.get("definio", ""),
+                entry.get("difinio", ""),
                 json.dumps(entry.get("terminologio", {}), ensure_ascii=False),
                 json.dumps(entry.get("difinoj", {}), ensure_ascii=False),
                 entry.get("enhavo", ""),
@@ -359,7 +359,7 @@ def _entry_to_enc(entry: dict) -> str:
 
     return _ENC_TEMPLATE.format(
         terminologio=_lang_map_lines("terminologio", terminologio),
-        difinoj=_lang_map_lines("definio", difinoj),
+        difinoj=_lang_map_lines("difinio", difinoj),
         enhavo=enhavo,
         superklaso=_toml_list(superklaso),
         ligilo=_toml_list(ligilo),
@@ -410,21 +410,21 @@ def _parse_enc_file(path: Path) -> dict:
     terminologio, difinoj = _collect_lang_fields(data)
     if not terminologio and title_from_comment:
         terminologio = {"eo": title_from_comment}
-    if not difinoj and isinstance(data.get("definio"), str):
-        maybe = data.get("definio", "").strip()
+    if not difinoj and isinstance(data.get("difinio"), str):
+        maybe = data.get("difinio", "").strip()
         if maybe:
             difinoj["eo"] = maybe
 
     if not _has_minimum_term_definition_pair(terminologio, difinoj):
         raise ValueError(
             "Nevalida .enc: bezonata almenaŭ unu lingvo kun ambaŭ "
-            "terminologio.xx kaj definio.xx."
+            "terminologio.xx kaj difinio.xx."
         )
 
     titolo = next(iter(terminologio.values()))
-    definio = difinoj.get(next(iter(terminologio.keys())), "")
-    if not definio:
-        definio = next(iter(difinoj.values()))
+    difinio = difinoj.get(next(iter(terminologio.keys())), "")
+    if not difinio:
+        difinio = next(iter(difinoj.values()))
 
     # superklaso / ligilo: list of [title, uuid] pairs
     superklaso = _normalise_pairs(data.get("superklaso", []))
@@ -442,7 +442,7 @@ def _parse_enc_file(path: Path) -> dict:
 
     return {
         "titolo": titolo,
-        "definio": definio,
+        "difinio": difinio,
         "terminologio": terminologio,
         "difinoj": difinoj,
         "enhavo": enhavo,
@@ -479,12 +479,12 @@ def _extract_enhavo_block(raw: str) -> tuple[str, str]:
 
 
 def _normalize_multiline_value_spacing(raw: str) -> str:
-    """Accept extra spacing/newlines between '=' and triple-quoted definio values.
+    """Accept extra spacing/newlines between '=' and triple-quoted difinio values.
 
-    This tolerance is intentionally scoped to definio.* as requested by issue behavior.
+    This tolerance is intentionally scoped to difinio.* as requested by issue behavior.
     """
     pattern = re.compile(
-        r"(^\s*(?:definio(?:\.[A-Za-z0-9_-]+)?)\s*=)\s*\n+\s*\"\"\"",
+        r"(^\s*(?:difinio(?:\.[A-Za-z0-9_-]+)?)\s*=)\s*\n+\s*\"\"\"",
         re.MULTILINE,
     )
     return pattern.sub(r'\1 """', raw)
@@ -528,7 +528,7 @@ def _build_parse_hints(error_text: str, line: str) -> list[str]:
             "Uzu validan TOML-sintekson: ŝlosilo = valoro "
             '(ekz. terminologio.eo = "RS232").'
         ),
-        "Kontrolu kampnomojn: terminologio.xx, definio.xx, superklaso, ligilo, fonto.",
+        "Kontrolu kampnomojn: terminologio.xx, difinio.xx, superklaso, ligilo, fonto.",
     ]
     if "invalid value" in lowered:
         hints.append(
@@ -550,7 +550,7 @@ def _build_parse_hints(error_text: str, line: str) -> list[str]:
     ):
         hints.append(
             "Por plurlinia teksto (`\"\"\"`), metu la malferman `\"\"\"` sur la "
-            "sama linio kiel `=` (ekz. definio.fr = \"\"\"...)."
+            "sama linio kiel `=` (ekz. difinio.fr = \"\"\"...)."
         )
     if "=" not in line:
         hints.append("Ĉiu kampolinio devus aspekti kiel: nomo = valoro")
@@ -558,7 +558,7 @@ def _build_parse_hints(error_text: str, line: str) -> list[str]:
 
 
 def _validate_enc_keys(data: dict) -> None:
-    allowed_dotted_prefixes = {"terminologio", "definio"}
+    allowed_dotted_prefixes = {"terminologio", "difinio"}
     for key in data:
         if "." in key:
             prefix = key.split(".", 1)[0]
@@ -567,7 +567,7 @@ def _validate_enc_keys(data: dict) -> None:
             suggestion = _suggest_enc_dotted_key(key)
             raise ValueError(
                 f"Nevalida .enc: nekonata kampo '{key}'. "
-                f"Uzu ekz. terminologio.xx aŭ definio.xx.{suggestion}"
+                f"Uzu ekz. terminologio.xx aŭ difinio.xx.{suggestion}"
             )
         if key not in _ALLOWED_ENC_PLAIN_KEYS:
             suggestion = _suggest_enc_key(key, _ALLOWED_ENC_PLAIN_KEYS_SORTED)
@@ -587,7 +587,7 @@ def _suggest_enc_dotted_key(key: str) -> str:
     prefix = key.split(".", 1)[0].strip().lower()
     if not prefix:
         return ""
-    match = get_close_matches(prefix, ["terminologio", "definio"], n=1, cutoff=0.6)
+    match = get_close_matches(prefix, ["terminologio", "difinio"], n=1, cutoff=0.6)
     if not match:
         return ""
     return f" Ĉu vi celis '{match[0]}.eo'?"
@@ -604,7 +604,7 @@ def _collect_lang_fields(data: dict) -> tuple[dict[str, str], dict[str, str]]:
             lang = key.split(".", 1)[1].strip().lower()
             if lang and value.strip():
                 terminologio[lang] = value.strip()
-        if key.startswith("definio."):
+        if key.startswith("difinio."):
             lang = key.split(".", 1)[1].strip().lower()
             if lang and value.strip():
                 difinoj[lang] = value.strip()
@@ -614,9 +614,9 @@ def _collect_lang_fields(data: dict) -> tuple[dict[str, str], dict[str, str]]:
             if str(value).strip():
                 terminologio[str(lang).strip().lower()] = str(value).strip()
 
-    definio_obj = data.get("definio")
-    if not difinoj and isinstance(definio_obj, dict):
-        for lang, value in definio_obj.items():
+    difinio_obj = data.get("difinio")
+    if not difinoj and isinstance(difinio_obj, dict):
+        for lang, value in difinio_obj.items():
             if str(value).strip():
                 difinoj[str(lang).strip().lower()] = str(value).strip()
 
@@ -687,14 +687,14 @@ def _display_entry(
     panel_lines.append(f"  [dim]{'uuid:':<14}[/dim] {uid_short}")
     panel_lines.append(f"  [dim]{'lingvo:':<14}[/dim] {selected_lang or '-'}")
 
-    definio = (
+    difinio = (
         difinoj.get(selected_lang)
-        or entry.get("definio", "")
+        or entry.get("difinio", "")
         or next(iter(difinoj.values()), "")
     ).strip()
-    if definio:
-        panel_lines.append(f"  [dim]{'definio:':<14}[/dim]")
-        for ln in definio.splitlines():
+    if difinio:
+        panel_lines.append(f"  [dim]{'difinio:':<14}[/dim]")
+        for ln in difinio.splitlines():
             panel_lines.append(f"    {ln}")
 
     if montri_cxion and terminologio:
@@ -783,19 +783,19 @@ def _render_entry_html(
         or entry.get("titolo", "")
         or next(iter(terminologio.values()), "")
     )
-    definio = (
+    difinio = (
         difinoj.get(selected_lang)
-        or entry.get("definio", "")
+        or entry.get("difinio", "")
         or next(iter(difinoj.values()), "")
     ).strip()
-    definio_html = _markdown_to_html_fragment(definio) if definio else ""
+    difinio_html = _markdown_to_html_fragment(difinio) if difinio else ""
 
     rows: list[tuple[str, str]] = [
         ("uuid", escape((entry.get("uuid") or "")[:8])),
         ("lingvo", escape(selected_lang or "-")),
     ]
-    if definio_html:
-        rows.append(("definio", definio_html))
+    if difinio_html:
+        rows.append(("difinio", difinio_html))
 
     if montri_cxion and terminologio:
         terms = "<br>".join(
@@ -1155,7 +1155,7 @@ def aldoni(
         ...,
         help=(
             "Vojo al .enc dosiero. Formato: terminologio.xx = \"...\", "
-            "definio.xx = \"...\", laŭvola "
+            "difinio.xx = \"...\", laŭvola "
             '"""libera teksto""", superklaso/ligilo = [["Titolo", "uuid"]], '
             "fonto = [{title=\"...\", author=\"...\", year=\"...\", type=\"lib\"}]."
         ),
@@ -1189,7 +1189,7 @@ def aldoni(
             return
         existing.update(
             titolo=parsed["titolo"],
-            definio=parsed["definio"],
+            difinio=parsed["difinio"],
             terminologio=parsed["terminologio"],
             difinoj=parsed["difinoj"],
             enhavo=parsed["enhavo"],
@@ -1266,7 +1266,7 @@ def modifi(
 
     entry.update(
         titolo=parsed["titolo"],
-        definio=parsed["definio"],
+        difinio=parsed["difinio"],
         terminologio=parsed["terminologio"],
         difinoj=parsed["difinoj"],
         enhavo=parsed["enhavo"],

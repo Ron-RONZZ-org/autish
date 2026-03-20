@@ -44,14 +44,18 @@ from typing import Any
 _ESC = 27
 _ENTER = ord("\n")
 _CR = ord("\r")
+_CTRL_B = 2   # page-up   (like vim)
 _CTRL_C = 3
 _CTRL_D = 4
+_CTRL_F = 6   # page-down (like vim)
 _CTRL_H = 8
-_TAB = ord("\t")
+_CTRL_K = 11  # kill line forward
 _CTRL_R = 18
 _CTRL_S = 19
-_CTRL_F = 6   # page-down (like vim)
-_CTRL_B = 2   # page-up   (like vim)
+_CTRL_U = 21  # kill line backward
+_CTRL_W = 23  # kill word backward
+_CTRL_Y = 25  # yank (paste)
+_TAB = ord("\t")
 
 _CTRL_LEFT_KEYS = {443, 545, 548, 553, 554}
 _CTRL_RIGHT_KEYS = {444, 560, 563, 558, 559, 569}
@@ -218,6 +222,9 @@ _HELP_LINES = [
 class LineEditor:
     """Minimal single-line vim-style editor for compose form fields."""
 
+    # Class-level kill register (shared clipboard for kill operations)
+    _kill_register: str = ""
+
     def __init__(self, value: str = "", insert_mode: bool = True) -> None:
         self.chars: list[str] = list(value)
         self.pos: int = len(self.chars)
@@ -302,6 +309,25 @@ class LineEditor:
                 if self.pos > 0:
                     del self.chars[self.pos - 1]
                     self.pos -= 1
+            elif key == _CTRL_U:  # kill line backward
+                killed = self.chars[:self.pos]
+                LineEditor._kill_register = "".join(killed)
+                del self.chars[:self.pos]
+                self.pos = 0
+            elif key == _CTRL_W:  # kill word backward
+                start_pos = _word_left(self.value, self.pos)
+                killed = self.chars[start_pos:self.pos]
+                LineEditor._kill_register = "".join(killed)
+                del self.chars[start_pos:self.pos]
+                self.pos = start_pos
+            elif key == _CTRL_K:  # kill line forward
+                killed = self.chars[self.pos:]
+                LineEditor._kill_register = "".join(killed)
+                del self.chars[self.pos:]
+            elif key == _CTRL_Y:  # yank (paste)
+                for c in LineEditor._kill_register:
+                    self.chars.insert(self.pos, c)
+                    self.pos += 1
             elif _is_ctrl_left(key):
                 self.pos = _word_left(self.value, self.pos)
             elif _is_ctrl_right(key):

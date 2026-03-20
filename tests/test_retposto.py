@@ -968,6 +968,36 @@ class TestRetpostoLineEditor:
         ed.handle_key(ord("V"))
         assert ed.mode == "VISUAL_LINE"
 
+    def test_ctrl_u_kills_line_backward(self):
+        ed = LineEditor("hello world")
+        ed.pos = 6  # after "hello "
+        ed.handle_key(21)  # Ctrl+U
+        assert ed.value == "world"
+        assert ed.pos == 0
+
+    def test_ctrl_w_kills_word_backward(self):
+        ed = LineEditor("hello world test")
+        ed.pos = 11  # after "hello world"
+        ed.handle_key(23)  # Ctrl+W
+        assert ed.value == "hello  test"  # space before word remains
+        assert ed.pos == 6
+
+    def test_ctrl_k_kills_line_forward(self):
+        ed = LineEditor("hello world")
+        ed.pos = 6  # after "hello "
+        ed.handle_key(11)  # Ctrl+K
+        assert ed.value == "hello "
+        assert ed.pos == 6
+
+    def test_ctrl_y_yanks_killed_text(self):
+        ed = LineEditor("hello world")
+        ed.pos = 6
+        ed.handle_key(21)  # Ctrl+U to kill (removes "hello ")
+        assert ed.value == "world"
+        ed.handle_key(25)  # Ctrl+Y to yank (restore "hello ")
+        assert ed.value == "hello world"
+        assert ed.pos == 6
+
 
 def _make_tui_for_keys() -> RetpostoTUI:
     stdscr = _FakeStdScr()
