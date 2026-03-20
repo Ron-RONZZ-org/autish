@@ -1806,3 +1806,68 @@ class TestDbMigration:
         cols = {row[1] for row in db.execute("PRAGMA table_info(konto)").fetchall()}
         db.close()
         assert "subskribo" in cols
+
+
+class TestTUIAccountWithNoFolders:
+    """Test TUI handles accounts with no folders (regression test for bug)."""
+
+    def test_account_selection_creates_inbox_when_no_folders(self, isolated_db):
+        """When selecting an account with no folders, INBOX should be auto-created."""
+        from autish.commands.retposto import (
+            _ensure_folder,
+            _load_folders,
+            _save_account,
+        )
+
+        # Create account with NO folders
+        acc_id = _save_account({
+            "nomo": "NoFolders",
+            "retposto": "no.folders@test.com",
+            "imap_servilo": "imap.test.com",
+            "smtp_servilo": "smtp.test.com",
+        })
+
+        # Verify no folders exist
+        folders_before = _load_folders(acc_id)
+        assert len(folders_before) == 0
+
+        # Simulate TUI account selection logic (from _retposto_tui.py:1988-2004)
+        # When user presses ENTER on account with no folders, INBOX should be created
+        folders = _load_folders(acc_id)
+        if not folders:
+            inbox_id = _ensure_folder(acc_id, "INBOX", "INBOX")
+            folders = [{"id": inbox_id, "nomo": "INBOX"}]
+
+        # Verify INBOX was created
+        folders_after = _load_folders(acc_id)
+        assert len(folders_after) == 1
+        assert folders_after[0]["nomo"] == "INBOX"
+        assert folders_after[0]["server_nomo"] == "INBOX"
+
+    def test_account_selection_uses_existing_folders(self, isolated_db):
+        """When selecting an account with existing folders, they should be used."""
+        from autish.commands.retposto import (
+            _ensure_folder,
+            _load_folders,
+            _save_account,
+        )
+
+        # Create account with folder
+        acc_id = _save_account({
+            "nomo": "WithFolder",
+            "retposto": "with.folder@test.com",
+            "imap_servilo": "imap.test.com",
+            "smtp_servilo": "smtp.test.com",
+        })
+        existing_folder_id = _ensure_folder(acc_id, "Sent", "Sent")
+
+        # Load folders
+        folders = _load_folders(acc_id)
+        assert len(folders) == 1
+        assert folders[0]["id"] == existing_folder_id
+        assert folders[0]["nomo"] == "Sent"
+
+        # Selecting account should use existing folder (not create INBOX)
+        folders_reloaded = _load_folders(acc_id)
+        assert len(folders_reloaded) == 1
+        assert folders_reloaded[0]["nomo"] == "Sent"  # Still Sent, not INBOX

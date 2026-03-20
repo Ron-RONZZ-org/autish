@@ -1987,13 +1987,27 @@ class RetpostoTUI:
                 if sel:
                     if sel["type"] == "account":
                         folders = self._load_folders(sel["acc_id"])
-                        if folders:
-                            self._message_panel.load(
-                                konto_id=sel["acc_id"],
-                                dosierujo_id=folders[0]["id"],
-                            )
-                            self._focus = "list"
+                        if not folders:
+                            # Account has no folders - create default INBOX
+                            if self._ensure_folder:
+                                inbox_id = self._ensure_folder(
+                                    sel["acc_id"], "INBOX", "INBOX"
+                                )
+                                self._folder_panel._refresh_items()
+                                folders = [{"id": inbox_id, "nomo": "INBOX"}]
+                            else:
+                                self._set_status(
+                                    "Neniu dosierujo trovita por tiu konto.",
+                                    transient=True,
+                                )
+                                return False
+                        self._message_panel.load(
+                            konto_id=sel["acc_id"],
+                            dosierujo_id=folders[0]["id"],
+                        )
+                        self._focus = "list"
                         return False
+                    # Folder item selected (not account)
                     folder_label = (sel.get("label") or "").strip().lower()
                     spamo = folder_label in ("spam", "junk")
                     self._message_panel.load(
