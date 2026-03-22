@@ -20,7 +20,7 @@ from autish.utils import echo_padded
 app = typer.Typer(
     help="Wi-Fi management commands.",
     no_args_is_help=True,
-    context_settings={"help_option_names": ["-h", "--help"]},
+    context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
 
 

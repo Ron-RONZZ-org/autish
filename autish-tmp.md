@@ -1,52 +1,22 @@
-À TESTER
-# Feature improvements
+COPILOT CLI
+# bug fix
 
-## register direct commands
+- critical: `sekurkopio auto` is not working ! I have a 60 minutes, keep maximum of 5 backup strategy set up, yet no backup except the initial one is done !
+  - verify what is happening in the background and fix it !
+  (autish-py3.12) rongzhou@libres:~/kodo/autish$ systemctl --user status autish-sekurkopio.timer
+  journalctl --user -u autish-sekurkopio.service -f
+● autish-sekurkopio.timer - Autish automatic backup timer
+     Loaded: loaded (/home/rongzhou/.config/systemd/user/autish-sekurkopio.timer; enabled; preset: enabled)
+     Active: active (waiting) since Sun 2026-03-22 14:37:42 CET; 3h 2min ago
+    Trigger: Sun 2026-03-22 18:37:36 CET; 57min left
+   Triggers: ● autish-sekurkopio.service
 
-- e.g., `retposto` works as `autish retposto` once autish installed
-- `bluhdento` as `autish bluhdento`
-- ...
+Mar 22 14:37:42 libres systemd[1359]: Started autish-sekurkopio.timer - Autish automatic backup timer.
+Mar 22 14:37:42 libres systemd[1359]: Starting autish-sekurkopio.service - Autish automatic backup service...
+Mar 22 14:37:42 libres sekurkopio[47538]: [*] 2026-03-22T13:37:42.939188+00:00
+Mar 22 14:37:42 libres sekurkopio[47538]: [*] Komencante aŭtomatan sekurkopion...
+Mar 22 14:37:49 libres sekurkopio[47538]: [✓] Sekurkopio kreita: autish_backup_20260322T133742.aut
+Mar 22 14:37:49 libres systemd[1359]: Finished autish-sekurkopio.service - Autish automatic backup service.
+Mar 22 14:37:49 libres systemd[1359]: autish-sekurkopio.service: Consumed 6.230s CPU time.
 
-## portability
-
-- vorto: add `vorto importi/eksporti` CLI commands to import/export all entries as one file for backup/transfer
-  - eksporti
-    - non-sensitive data, so optional password encryption `--pasvorto /-p {password}` 
-  - importi
-    - `--pasvorto/-p` to give password, if not specified but encrypted export ask interactively
-- retposto: add `retposto importi/eksporti` CLI commands to import/export all email configs as one `toml`file for portability
-  - eksporti
-    - since password is sensitive data, requires password encryption `--pasvorto /-p {password}`, if not specifed ask interactively
-    - enforce strong password policy (8 char, minimum 1 upper case letter, 1 lower case letter and 1 number)
-  - importi
-    - `--pasvorto/-p` to give password, if not specified but encrypted export ask interactively
-
-## data security & backup : `autish sekurkopio`
-
-- `eksporti {path/url}`: export all `autish` user data as a `.7z` (default) or `zip file` `--formato/-f zip`
-  - since password is sensitive data, requires password encryption `--pasvorto /-p {password}`, if not specifed ask interactively
-  - enforce strong password policy (8 char, minimum 1 upper case letter, 1 lower case letter and 1 number)
-- `importi {path/url}`: restore user data from exports
-  - `--pasvorto/-p` to give password, if not specified but encrypted export ask interactively
-  - `--anstatauigi/-A` overwrite existing, default is add to existing
-    - special caution: ask user to type the word `anstataŭigi` to confirm
-      - accept `anstatauigi` without accent
-- `auto {path}`: automatically backup all user data to an encrypted `.aut` file
-  - `--intervalo/-i {minutes}` default 60
-  - create folder if not existing
-  - `--nombro/-n {max number of copies}: keep at most latest n copies
-  - display backup strategy summaries for J/n confirmation
-  - if user calls simply `auto`
-    - existing backup strategy: show summary
-    - if `--nombro/-n` or `--intervalo/-i` passed, J/n modification confirmation
-    - if no backup strategy, asks whether user would like to create on interactively (J/n)
-- safe guarding
-  - ask for user confirmation (j/N) before any irreversible/hardly reversible changes
-  - `historio`: save a record of last 5 changes
-    -  without argument: show a summary of last 5 changes
-    - `malfari {number of operations}` to undo last changes
-        - my proposed method : copy on write, i.e. create a copy before irreversible/hardly reversible changes
-        - more efficient ideas ?
-        - again user (j/N) confirmation, with changes to be undone summarised
-
-
+  - for info, I am running autish from source with poetry virtual environement. Any additional work required to make it work while running from source in dev mode ?

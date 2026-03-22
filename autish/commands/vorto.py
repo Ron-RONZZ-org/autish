@@ -38,7 +38,7 @@ app = typer.Typer(
     help="Mia Vorto — personal wordbook microapp.",
     no_args_is_help=False,
     invoke_without_command=True,
-    context_settings={"help_option_names": ["-h", "--help"]},
+    context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
 
 console = Console()
@@ -143,6 +143,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
         ("uzoj", "[]"),
         ("etikedoj", "{}"),
         ("ligiloj", "[]"),
+        ("tipo", "[]"),  # Parse tipo as JSON list
     ):
         raw = d.get(col) or default
         try:
@@ -153,6 +154,11 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
         d.get("difinoj") or [],
         d.get("uzoj") or [],
     )
+    # Ensure tipo is always a list (handle legacy single-string values)
+    if isinstance(d.get("tipo"), str):
+        d["tipo"] = [d["tipo"]] if d["tipo"] else []
+    elif not isinstance(d.get("tipo"), list):
+        d["tipo"] = []
     return d
 
 
@@ -163,7 +169,8 @@ def _dict_to_params(entry: dict) -> tuple:
         entry["teksto"],
         entry.get("lingvo"),
         entry.get("kategorio"),
-        entry.get("tipo"),
+        # Serialize tipo as JSON list
+        json.dumps(entry.get("tipo") or [], ensure_ascii=False),
         entry.get("temo"),
         entry.get("tono"),
         entry.get("nivelo"),
@@ -194,6 +201,12 @@ _TIPO_MAP: dict[str, str] = {
     "substantivo-vira": "substantivo-vira",
     "ve": "verbo",
     "verbo": "verbo",
+    "vt": "verbo-transitiva",
+    "transitiva": "verbo-transitiva",
+    "verbo-transitiva": "verbo-transitiva",
+    "vn": "verbo-netransitiva",
+    "netransitiva": "verbo-netransitiva",
+    "verbo-netransitiva": "verbo-netransitiva",
     "aj": "adjektivo",
     "adjektivo": "adjektivo",
     "av": "adverbo",
@@ -394,10 +407,26 @@ def _detect_kategorio(teksto: str) -> str:
     return "frazo"
 
 
-def _normalize_tipo(tipo: str | None) -> str | None:
+def _normalize_tipo(tipo: str | None) -> list[str] | None:
+    """Normalize tipo string into a list of normalized tipo values.
+    
+    Accepts comma or semicolon-separated tipos, e.g.:
+    - "aj,su" → ["adjektivo", "substantivo-neŭtra"]
+    - "vt;aj" → ["verbo-transitiva", "adjektivo"]
+    """
     if not tipo:
         return None
-    return _TIPO_MAP.get(tipo.lower(), tipo)
+    # Split by comma or semicolon, strip whitespace
+    parts = [p.strip() for p in re.split(r'[,;]', tipo) if p.strip()]
+    if not parts:
+        return None
+    # Normalize each part
+    normalized = []
+    for part in parts:
+        norm = _TIPO_MAP.get(part.lower(), part)
+        if norm and norm not in normalized:  # Avoid duplicates
+            normalized.append(norm)
+    return normalized if normalized else None
 
 
 def _normalize_tono(tono: str | None) -> str | None:
@@ -593,9 +622,15 @@ def _display_entry(entry: dict, all_entries: list[dict] | None = None) -> None:
 
     _row("lingvo:", entry.get("lingvo") or "")
     kategorio = entry.get("kategorio") or ""
-    tipo = entry.get("tipo") or ""
-    tipo_str = kategorio + ("/" + tipo if tipo else "")
-    _row("tipo:", tipo_str)
+    tipos = entry.get("tipo") or []
+    # Join multiple tipos with commas
+    tipo_str = (
+        ", ".join(tipos)
+        if isinstance(tipos, list)
+        else str(tipos) if tipos else ""
+    )
+    tipo_full = kategorio + ("/" + tipo_str if tipo_str else "")
+    _row("tipo:", tipo_full)
     _row("temo:", entry.get("temo") or "")
     _row("tono:", entry.get("tono") or "")
     nivelo = entry.get("nivelo")
@@ -667,15 +702,21 @@ def _display_results(entries: list[dict]) -> None:
     for e in entries:
         uid_short = e["uuid"][:8]
         kategorio = e.get("kategorio") or ""
-        tipo = e.get("tipo") or ""
-        tipo_str = kategorio + ("/" + tipo if tipo else "")
+        tipos = e.get("tipo") or []
+        # Join multiple tipos with commas
+        tipo_str_list = (
+            ", ".join(tipos)
+            if isinstance(tipos, list)
+            else str(tipos) if tipos else ""
+        )
+        tipo_full = kategorio + ("/" + tipo_str_list if tipo_str_list else "")
         date_str = (e.get("kreita_je") or "")[:10]
         nivelo = e.get("nivelo")
         table.add_row(
             uid_short,
             e["teksto"],
             e.get("lingvo") or "",
-            tipo_str,
+            tipo_full,
             f"{nivelo:.1f}" if nivelo is not None else "",
             date_str,
         )
@@ -748,10 +789,11 @@ def aldoni(
         None,
         "-t",
         "--tipo",
-        help="Subtype: substantivo-neŭtra/su, substantivo-ina/sui, "
-        "substantivo-vira/suv, verbo/ve, adjektivo/aj, adverbo/av, "
+        help="Subtype (comma-separated for multiple): substantivo-neŭtra/su, "
+        "substantivo-ina/sui, substantivo-vira/suv, verbo/ve, "
+        "verbo-transitiva/vt, verbo-netransitiva/vn, adjektivo/aj, adverbo/av, "
         "parola/pa, skriba/sk, citaĵo/ci, ŝerco/ŝe, proverbo/pr, poemo/po, "
-        "ekzemplo/ek.",
+        "ekzemplo/ek. Example: --tipo 'aj,su' for adjective and noun.",
     ),
     temo: str | None = typer.Option(None, "--temo", help="Theme (free text)."),
     tono: str | None = typer.Option(
@@ -911,7 +953,7 @@ def vidi(
         help="UUID (or prefix) of the entry to view. Omit to list latest 50.",
     ),
     inverse: bool = typer.Option(
-        False, "-i", "--inverse", help="List oldest 50 first (only without UUID)."
+        False, "-i", "--inversa", help="List oldest 50 first (only without UUID)."
     ),
 ) -> None:
     """View a wordbank entry, or list the latest 50 entries when called
@@ -1083,6 +1125,12 @@ def serci(
     tipo: str | None = typer.Option(None, "-t", "--tipo", help="Filter by subtype."),
     temo: str | None = typer.Option(None, "--temo", help="Filter by theme."),
     tono: str | None = typer.Option(None, "--tono", help="Filter by tonality."),
+    autoro: str | None = typer.Option(
+        None, "-a", "--autoro", help="Filter by author."
+    ),
+    verko: str | None = typer.Option(
+        None, "-v", "--verko", help="Filter by work (format: 'Title:Year')."
+    ),
     nivelo_min: float | None = typer.Option(
         None, "--nivelo-min", help="Minimum lexical level."
     ),
@@ -1134,18 +1182,35 @@ def serci(
     if lingvo:
         results = [e for e in results if e.get("lingvo") == lingvo]
     if tipo:
-        norm = _normalize_tipo(tipo)
-        results = [
-            e
-            for e in results
-            if e.get("tipo") == norm or e.get("kategorio") == norm
-        ]
+        norm = _normalize_tipo(tipo)  # Returns list[str] or None
+        if norm:
+            results = [
+                e
+                for e in results
+                if (
+                    # Match if any normalized tipo matches any entry tipo
+                    (
+                        isinstance(e.get("tipo"), list)
+                        and any(t in e.get("tipo") for t in norm)
+                    )
+                    # Or match kategorio (for backward compat)
+                    or e.get("kategorio") in norm
+                )
+            ]
     if temo:
         low_temo = temo.lower()
         results = [e for e in results if low_temo in (e.get("temo") or "").lower()]
     if tono:
         norm_tono = _normalize_tono(tono)
         results = [e for e in results if e.get("tono") == norm_tono]
+    if autoro:
+        low_autoro = autoro.lower()
+        results = [
+            e for e in results if low_autoro in (e.get("autoro") or "").lower()
+        ]
+    if verko:
+        low_verko = verko.lower()
+        results = [e for e in results if low_verko in (e.get("verko") or "").lower()]
     if nivelo_min is not None:
         results = [e for e in results if (e.get("nivelo") or 0) >= nivelo_min]
     if nivelo_max is not None:

@@ -18,7 +18,7 @@ from autish.utils import echo_padded
 app = typer.Typer(
     help="Print current local time and day of week.",
     invoke_without_command=True,
-    context_settings={"help_option_names": ["-h", "--help"]},
+    context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
 
 _UTC_MIN = -12

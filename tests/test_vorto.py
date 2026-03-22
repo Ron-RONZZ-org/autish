@@ -86,35 +86,47 @@ class TestDetectKategorio:
 
 class TestNormalizeTipo:
     def test_full_name_unchanged(self):
-        assert _normalize_tipo("substantivo") == "substantivo-neŭtra"
-        assert _normalize_tipo("substantivo-ina") == "substantivo-ina"
-        assert _normalize_tipo("substantivo-vira") == "substantivo-vira"
+        assert _normalize_tipo("substantivo") == ["substantivo-neŭtra"]
+        assert _normalize_tipo("substantivo-ina") == ["substantivo-ina"]
+        assert _normalize_tipo("substantivo-vira") == ["substantivo-vira"]
 
     def test_abbreviation_expanded(self):
-        assert _normalize_tipo("su") == "substantivo-neŭtra"
-        assert _normalize_tipo("sui") == "substantivo-ina"
-        assert _normalize_tipo("suv") == "substantivo-vira"
-        assert _normalize_tipo("suf") == "substantivo-ina"
-        assert _normalize_tipo("sum") == "substantivo-vira"
-        assert _normalize_tipo("ve") == "verbo"
-        assert _normalize_tipo("aj") == "adjektivo"
-        assert _normalize_tipo("av") == "adverbo"
-        assert _normalize_tipo("pa") == "parola"
-        assert _normalize_tipo("sk") == "skriba"
-        assert _normalize_tipo("ci") == "citaĵo"
-        assert _normalize_tipo("pr") == "proverbo"
-        assert _normalize_tipo("po") == "poemo"
-        assert _normalize_tipo("ek") == "ekzemplo"
+        assert _normalize_tipo("su") == ["substantivo-neŭtra"]
+        assert _normalize_tipo("sui") == ["substantivo-ina"]
+        assert _normalize_tipo("suv") == ["substantivo-vira"]
+        assert _normalize_tipo("suf") == ["substantivo-ina"]
+        assert _normalize_tipo("sum") == ["substantivo-vira"]
+        assert _normalize_tipo("ve") == ["verbo"]
+        assert _normalize_tipo("vt") == ["verbo-transitiva"]
+        assert _normalize_tipo("vn") == ["verbo-netransitiva"]
+        assert _normalize_tipo("aj") == ["adjektivo"]
+        assert _normalize_tipo("av") == ["adverbo"]
+        assert _normalize_tipo("pa") == ["parola"]
+        assert _normalize_tipo("sk") == ["skriba"]
+        assert _normalize_tipo("ci") == ["citaĵo"]
+        assert _normalize_tipo("pr") == ["proverbo"]
+        assert _normalize_tipo("po") == ["poemo"]
+        assert _normalize_tipo("ek") == ["ekzemplo"]
 
     def test_none_returns_none(self):
         assert _normalize_tipo(None) is None
 
     def test_unknown_returned_as_is(self):
-        assert _normalize_tipo("custom") == "custom"
+        assert _normalize_tipo("custom") == ["custom"]
 
     def test_case_insensitive(self):
-        assert _normalize_tipo("SU") == "substantivo-neŭtra"
-        assert _normalize_tipo("Verbo") == "verbo"
+        assert _normalize_tipo("SU") == ["substantivo-neŭtra"]
+        assert _normalize_tipo("Verbo") == ["verbo"]
+
+    def test_multiple_tipos_comma_separated(self):
+        assert _normalize_tipo("aj,su") == ["adjektivo", "substantivo-neŭtra"]
+        assert _normalize_tipo("vt, aj") == ["verbo-transitiva", "adjektivo"]
+
+    def test_multiple_tipos_semicolon_separated(self):
+        assert _normalize_tipo("aj;su") == ["adjektivo", "substantivo-neŭtra"]
+
+    def test_no_duplicates_in_multiple_tipos(self):
+        assert _normalize_tipo("aj,aj,su") == ["adjektivo", "substantivo-neŭtra"]
 
 
 class TestNormalizeTono:
@@ -264,7 +276,7 @@ class TestAldoni:
             )
         entry = mock_save.call_args[0][0][0]
         assert entry["lingvo"] == "en"
-        assert entry["tipo"] == "substantivo-neŭtra"
+        assert entry["tipo"] == ["substantivo-neŭtra"]
         assert entry["nivelo"] == 3.0
         assert "a greeting" in entry["difinoj"]
 
@@ -596,6 +608,46 @@ class TestSerci:
         assert result.exit_code == 0
         assert "similajn kongruojn" not in result.output
         assert "0 rezulto" in result.output
+
+    def test_autoro_filter(self):
+        entries = [
+            _make_entry(uuid=SAMPLE_UUID, teksto="hello", autoro="Smith"),
+            _make_entry(uuid=SAMPLE_UUID2, teksto="world", autoro="Jones"),
+        ]
+        with patch(_LOAD, return_value=entries):
+            result = runner.invoke(app, ["vorto", "serci", "--autoro", "Smith"])
+        assert result.exit_code == 0
+        assert "hello" in result.output
+        assert "world" not in result.output
+
+    def test_autoro_filter_case_insensitive(self):
+        entries = [
+            _make_entry(uuid=SAMPLE_UUID, teksto="hello", autoro="Smith"),
+        ]
+        with patch(_LOAD, return_value=entries):
+            result = runner.invoke(app, ["vorto", "serci", "--autoro", "smith"])
+        assert result.exit_code == 0
+        assert "hello" in result.output
+
+    def test_verko_filter(self):
+        entries = [
+            _make_entry(uuid=SAMPLE_UUID, teksto="hello", verko="Book:2020"),
+            _make_entry(uuid=SAMPLE_UUID2, teksto="world", verko="Novel:2019"),
+        ]
+        with patch(_LOAD, return_value=entries):
+            result = runner.invoke(app, ["vorto", "serci", "--verko", "Book"])
+        assert result.exit_code == 0
+        assert "hello" in result.output
+        assert "world" not in result.output
+
+    def test_verko_filter_partial_match(self):
+        entries = [
+            _make_entry(uuid=SAMPLE_UUID, teksto="hello", verko="Book:2020"),
+        ]
+        with patch(_LOAD, return_value=entries):
+            result = runner.invoke(app, ["vorto", "serci", "--verko", "2020"])
+        assert result.exit_code == 0
+        assert "hello" in result.output
 
 
 class TestForigi:

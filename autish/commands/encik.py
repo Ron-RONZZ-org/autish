@@ -60,7 +60,7 @@ app = typer.Typer(
     help="Encik — personal knowledge management microapp.",
     no_args_is_help=False,
     invoke_without_command=True,
-    context_settings={"help_option_names": ["-h", "--help"]},
+    context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
 
 console = Console()
@@ -344,10 +344,17 @@ def _entry_to_enc(entry: dict) -> str:
             return "[]"
         parts = []
         for s in lst:
-            items = ", ".join(
-                f'{k} = {json.dumps(v)}' for k, v in s.items() if v
-            )
-            parts.append(f"{{{items}}}")
+            # Output in Esperanto format with proper types
+            items = []
+            for k, v in s.items():
+                if not v:
+                    continue
+                if k == "jaro":
+                    # Output jaro as integer without quotes
+                    items.append(f"{k} = {v}")
+                else:
+                    items.append(f'{k} = {json.dumps(v)}')
+            parts.append(f"{{{', '.join(items)}}}")
         return "[" + ", ".join(parts) + "]"
 
     def _lang_map_lines(prefix: str, mapping: dict[str, str]) -> str:
@@ -435,9 +442,27 @@ def _parse_enc_file(path: Path) -> dict:
     raw_fonto = data.get("fonto", data.get("source", []))
     for item in raw_fonto:
         if isinstance(item, dict):
-            normalized = {k: str(v) for k, v in item.items()}
-            if normalized.get("type"):
-                normalized["type"] = _normalize_fonto_tipo(normalized["type"])
+            normalized = {}
+            for k, v in item.items():
+                # Accept both English and Esperanto field names
+                key_lower = k.lower()
+                if key_lower in ("title", "titolo"):
+                    normalized["titolo"] = str(v)
+                elif key_lower in ("author", "autoro"):
+                    normalized["autoro"] = str(v)
+                elif key_lower in ("year", "jaro"):
+                    # Enforce integer for year/jaro
+                    try:
+                        normalized["jaro"] = int(v)
+                    except (ValueError, TypeError) as e:
+                        raise ValueError(
+                            f"Nevalida fonto.jaro: {v!r}. Devas esti entjero."
+                        ) from e
+                elif key_lower in ("type", "tipo"):
+                    normalized["tipo"] = _normalize_fonto_tipo(str(v))
+                else:
+                    # Preserve other fields as-is (like title.en, title.fr, etc.)
+                    normalized[k] = str(v)
             fonto.append(normalized)
 
     return {
@@ -733,16 +758,16 @@ def _display_entry(
         panel_lines.append(f"  [dim]{'fonto:':<14}[/dim]")
         for s in fonto:
             parts = []
-            if s.get("author"):
-                parts.append(s["author"])
-            if s.get("year"):
-                parts.append(f"({s['year']})")
-            if s.get("title"):
-                parts.append(f'"{s["title"]}"')
-            if s.get("type"):
-                parts.append(f"tipo={s['type']}")
+            if s.get("autoro"):
+                parts.append(s["autoro"])
+            if s.get("jaro"):
+                parts.append(f"({s['jaro']})")
+            if s.get("titolo"):
+                parts.append(f'"{s["titolo"]}"')
+            if s.get("tipo"):
+                parts.append(f"tipo={s['tipo']}")
             title_lang_items = sorted(
-                (k, v) for k, v in s.items() if k.startswith("title.")
+                (k, v) for k, v in s.items() if k.startswith("titolo.")
             )
             for k, v in title_lang_items:
                 parts.append(f"{k}={json.dumps(v, ensure_ascii=False)}")
@@ -1157,7 +1182,9 @@ def aldoni(
             "Vojo al .enc dosiero. Formato: terminologio.xx = \"...\", "
             "difinio.xx = \"...\", laŭvola "
             '"""libera teksto""", superklaso/ligilo = [["Titolo", "uuid"]], '
-            "fonto = [{title=\"...\", author=\"...\", year=\"...\", type=\"lib\"}]."
+            "fonto = [{titolo=\"...\", autoro=\"...\", jaro=2020, tipo=\"libroj\"}]. "
+            "Validaj tipoj: libroj, artikoloj, retejoj, filmoj, tezoj, raportoj, "
+            "podkastoj, prelegoj (aŭ aliasoj: lib, art, ret, fil, tez, rap, pod, pre)."
         ),
     ),
 ) -> None:
@@ -1439,3 +1466,82 @@ def serci(
         typer.echo(f"Paralela ({root['titolo']}) — max {max_r}:")
         for e in results:
             typer.echo(f"  #{e['uuid'][:8]}  {e['titolo']}")
+
+
+@app.command("ls")
+def ls(
+    ctx: typer.Context,
+    pagho: int = typer.Option(
+        1, "-p", "--pagho", help="Page number (1-indexed).", min=1
+    ),
+    inversa: bool = typer.Option(
+        False, "-i", "--inversa", help="List from oldest instead of newest."
+    ),
+    per_pagho: int = typer.Option(
+        10, "--per-pagho", help="Number of entries per page.", min=1, max=100
+    ),
+) -> None:
+    """List encik entries with pagination.
+    
+    By default, shows the newest 10 entries. Use -p to paginate and -i to reverse order.
+    """
+    conn = _get_conn()
+    try:
+        # Get total count
+        total = conn.execute("SELECT COUNT(*) FROM encik").fetchone()[0]
+        
+        if total == 0:
+            typer.echo("Neniu eniro en la datumbazo.")
+            raise typer.Exit(code=0)
+        
+        # Calculate pagination
+        offset = (pagho - 1) * per_pagho
+        if offset >= total:
+            max_pages = (total + per_pagho - 1) // per_pagho
+            typer.echo(
+                f"Paĝo {pagho} ne ekzistas (nur {max_pages} paĝo(j)).",
+                err=True
+            )
+            raise typer.Exit(code=1)
+        
+        # Fetch entries with sorting
+        order = "ASC" if inversa else "DESC"
+        rows = conn.execute(
+            f"""SELECT uuid, titolo, kreita_je, modifita_je
+                FROM encik
+                ORDER BY kreita_je {order}
+                LIMIT ? OFFSET ?""",
+            (per_pagho, offset),
+        ).fetchall()
+        
+        # Display as table
+        table = Table(
+            show_header=True,
+            header_style="dim",
+            border_style="dim",
+            expand=False,
+        )
+        table.add_column("UUID", style="dim", width=10, no_wrap=True)
+        table.add_column("Titolo", min_width=30)
+        table.add_column("Kreita", width=12)
+        table.add_column("Modifita", width=12)
+        
+        for row in rows:
+            uid_short = row[0][:8]
+            titolo = row[1]
+            kreita = row[2][:10] if row[2] else ""
+            modifita = row[3][:10] if row[3] else ""
+            table.add_row(uid_short, titolo, kreita, modifita)
+        
+        # Display summary and table
+        start_idx = offset + 1
+        end_idx = min(offset + per_pagho, total)
+        total_pages = (total + per_pagho - 1) // per_pagho
+        
+        console.print(
+            f"[dim]Montras {start_idx}-{end_idx} el {total} eniro(j) | "
+            f"Paĝo {pagho}/{total_pages}[/dim]"
+        )
+        console.print(table)
+    finally:
+        conn.close()

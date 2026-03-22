@@ -28,7 +28,7 @@ import typer
 app = typer.Typer(
     help="Execute a command and copy its output to clipboard.",
     invoke_without_command=True,
-    context_settings={"help_option_names": ["-h", "--help"]},
+    context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
 
 _CACHE_FILE = Path(tempfile.gettempdir()) / f"autish_kp_{getpass.getuser()}.txt"

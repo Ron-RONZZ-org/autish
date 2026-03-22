@@ -26,7 +26,7 @@ app = typer.Typer(
     name="md",
     help="Markdown utilities: view in browser, export, and import.",
     no_args_is_help=True,
-    context_settings={"help_option_names": ["-h", "--help"]},
+    context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
 
 console = Console()

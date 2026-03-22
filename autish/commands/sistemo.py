@@ -20,7 +20,7 @@ from autish.utils import echo_padded
 app = typer.Typer(
     help="Print system information.",
     invoke_without_command=True,
-    context_settings={"help_option_names": ["-h", "--help"]},
+    context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
 
 

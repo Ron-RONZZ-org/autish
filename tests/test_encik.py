@@ -175,15 +175,45 @@ class TestParseEncFile:
         enc.write_text(
             'terminologio.eo = "Book"\ndifinio.eo = "x"\n'
             "fonto = ["
-            '{title = "Great Book", author = "A. Author", year = "2020", type = "lib"}'
+            '{titolo = "Great Book", autoro = "A. Author", jaro = 2020, tipo = "lib"}'
             "]\n",
             encoding="utf-8",
         )
         parsed = _parse_enc_file(enc)
         assert len(parsed["fonto"]) == 1
-        assert parsed["fonto"][0]["title"] == "Great Book"
-        assert parsed["fonto"][0]["author"] == "A. Author"
-        assert parsed["fonto"][0]["type"] == "libroj"
+        assert parsed["fonto"][0]["titolo"] == "Great Book"
+        assert parsed["fonto"][0]["autoro"] == "A. Author"
+        assert parsed["fonto"][0]["jaro"] == 2020
+        assert parsed["fonto"][0]["tipo"] == "libroj"
+
+    def test_source_list_accepts_english_fields(self, tmp_path):
+        """Backward compatibility: accept English field names too."""
+        enc = tmp_path / "test.enc"
+        enc.write_text(
+            'terminologio.eo = "Book"\ndifinio.eo = "x"\n'
+            "fonto = ["
+            '{title = "Great Book", author = "A. Author", year = 2020, type = "lib"}'
+            "]\n",
+            encoding="utf-8",
+        )
+        parsed = _parse_enc_file(enc)
+        assert len(parsed["fonto"]) == 1
+        # Should be normalized to Esperanto
+        assert parsed["fonto"][0]["titolo"] == "Great Book"
+        assert parsed["fonto"][0]["autoro"] == "A. Author"
+        assert parsed["fonto"][0]["jaro"] == 2020
+        assert parsed["fonto"][0]["tipo"] == "libroj"
+
+    def test_fonto_jaro_must_be_integer(self, tmp_path):
+        """Test that jaro must be a valid integer."""
+        enc = tmp_path / "test.enc"
+        enc.write_text(
+            'terminologio.eo = "Book"\ndifinio.eo = "x"\n'
+            'fonto = [{titolo = "Book", jaro = "not a number"}]\n',
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="Nevalida fonto.jaro"):
+            _parse_enc_file(enc)
 
     def test_missing_title_raises(self, tmp_path):
         enc = tmp_path / "test.enc"
@@ -285,15 +315,15 @@ class TestParseEncFile:
             encoding="utf-8",
         )
         parsed = _parse_enc_file(enc)
-        assert parsed["fonto"][0]["type"] == "filmoj"
-        assert parsed["fonto"][0]["title"] == "Old"
+        assert parsed["fonto"][0]["tipo"] == "filmoj"
+        assert parsed["fonto"][0]["titolo"] == "Old"
 
     def test_invalid_fonto_type_raises(self, tmp_path):
         enc = tmp_path / "bad_type.enc"
         enc.write_text(
             'terminologio.eo = "Type"\n'
             'difinio.eo = "Difino"\n'
-            'fonto = [{title = "Book", type = "invalid"}]\n',
+            'fonto = [{titolo = "Book", tipo = "invalid"}]\n',
             encoding="utf-8",
         )
         with pytest.raises(ValueError, match="Nevalida fonto.type"):
@@ -675,3 +705,31 @@ class TestVortoAldoniDifinoHelpText:
         result = runner.invoke(app, ["vorto", "aldoni", "--help"])
         assert result.exit_code == 0
         assert "{definition}:*{example}*" in result.output
+
+
+class TestEncikLs:
+    """Test the encik ls command."""
+
+    def test_ls_command_exists(self):
+        """Test that encik ls command exists and runs."""
+        result = runner.invoke(app, ["encik", "ls", "--help"])
+        assert result.exit_code == 0
+        assert "List encik entries" in result.output or "ls" in result.output
+
+    def test_ls_pagination_option(self):
+        """Test that pagination option is available."""
+        result = runner.invoke(app, ["encik", "ls", "--help"])
+        assert result.exit_code == 0
+        assert "--pagho" in result.output or "-p" in result.output
+
+    def test_ls_inversa_option(self):
+        """Test that --inversa option is available."""
+        result = runner.invoke(app, ["encik", "ls", "--help"])
+        assert result.exit_code == 0
+        assert "--inversa" in result.output or "-i" in result.output
+
+    def test_ls_per_pagho_option(self):
+        """Test that --per-pagho option is available."""
+        result = runner.invoke(app, ["encik", "ls", "--help"])
+        assert result.exit_code == 0
+        assert "--per-pagho" in result.output

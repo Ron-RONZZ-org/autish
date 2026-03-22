@@ -503,7 +503,7 @@ _FORM_FIELDS = [
     ("teksto",     "Teksto (vorto/frazo)"),
     ("lingvo",     "Lingvo (eo/en/…)"),
     ("difinoj",    "Difino(j) — sep: ;"),
-    ("tipo",       "Tipo (su/ve/aj/av/…)"),
+    ("tipo",       "Tipo (su/ve/vt/vn/aj/av/…) — sep: ,"),
     ("temo",       "Temo"),
     ("tono",       "Tono (nf/fo/am)"),
     ("nivelo",     "Nivelo 1–10"),
@@ -1641,13 +1641,19 @@ class VortoTUI:
         # line in BOLD (title_rows=1) to give it a "heading" appearance.
         lines.append(f"  {teksto}  #{uid_short}")
         kategorio = entry.get("kategorio") or ""
-        tipo = entry.get("tipo") or ""
-        tipo_str = (
-            (kategorio + ("/" + tipo if tipo else ""))
-            if (kategorio or tipo) else ""
+        tipos = entry.get("tipo") or []
+        # Join multiple tipos with commas
+        tipo_str_list = (
+            ", ".join(tipos)
+            if isinstance(tipos, list)
+            else str(tipos) if tipos else ""
         )
-        if tipo_str:
-            lines.append(f"  {tipo_str}")
+        tipo_full = (
+            (kategorio + ("/" + tipo_str_list if tipo_str_list else ""))
+            if (kategorio or tipo_str_list) else ""
+        )
+        if tipo_full:
+            lines.append(f"  {tipo_full}")
         lines.append("")
         lines.append("─" * 40)
         lines.append("")
@@ -1719,7 +1725,11 @@ class VortoTUI:
             "teksto": entry.get("teksto") or "",
             "lingvo": entry.get("lingvo") or "",
             "difinoj": entry.get("difinoj") or [],
-            "tipo": entry.get("tipo") or "",
+            "tipo": (
+                ", ".join(entry.get("tipo"))
+                if isinstance(entry.get("tipo"), list)
+                else str(entry.get("tipo")) if entry.get("tipo") else ""
+            ),
             "temo": entry.get("temo") or "",
             "tono": entry.get("tono") or "",
             "nivelo": (

@@ -60,14 +60,14 @@ app = typer.Typer(
     ),
     no_args_is_help=False,
     invoke_without_command=True,
-    context_settings={"help_option_names": ["-h", "--help"]},
+    context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
 
 kontakto_app = typer.Typer(
     name="kontakto",
     help="Manage contacts (koresponda listo).",
     no_args_is_help=True,
-    context_settings={"help_option_names": ["-h", "--help"]},
+    context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
 app.add_typer(kontakto_app, name="kontakto")
 
@@ -75,7 +75,7 @@ filtro_app = typer.Typer(
     name="filtro",
     help="Manage Sieve-style message filters.",
     no_args_is_help=True,
-    context_settings={"help_option_names": ["-h", "--help"]},
+    context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
 app.add_typer(filtro_app, name="filtro")
 
@@ -2047,6 +2047,8 @@ def _launch_tui() -> None:
             rename_folder=_rename_folder,
             move_folder=_move_folder,
             load_conversation=_load_conversation_messages,
+            load_aldonajoj=_load_aldonajoj,
+            malfermi_aldonajon=_malfermi_aldonajon,
         )
         tui.run()
 
@@ -3468,6 +3470,64 @@ def malfermi_aldonajon_cmd(aldonajo_id: int) -> None:
     """Open an attachment with the system default app."""
     _malfermi_aldonajon(aldonajo_id)
     typer.echo(f"[v] Malfermis aldonaĵon #{aldonajo_id}.")
+
+
+@app.command("marki-legita")
+def marki_legita_cmd(
+    dosierujo_id: int = typer.Option(
+        None, "--dosierujo", "-d", help="Folder ID (required)"
+    ),
+    konto_id: int = typer.Option(
+        None, "--konto", "-k", help="Account ID (optional)"
+    ),
+) -> None:
+    """Mark all messages in a folder as read.
+    
+    Example:
+        retposto marki-legita --dosierujo 5
+        retposto marki-legita -d 5 -k 1
+    """
+    if dosierujo_id is None:
+        typer.echo(
+            "Eraro: --dosierujo/-d estas deviga.",
+            err=True
+        )
+        raise typer.Exit(code=1)
+    
+    with _get_db() as con:
+        # Count unread messages
+        if konto_id:
+            unread_count = con.execute(
+                """SELECT COUNT(*) FROM mesago
+                   WHERE dosierujo_id = ? AND konto_id = ? AND legita = 0""",
+                (dosierujo_id, konto_id),
+            ).fetchone()[0]
+        else:
+            unread_count = con.execute(
+                """SELECT COUNT(*) FROM mesago
+                   WHERE dosierujo_id = ? AND legita = 0""",
+                (dosierujo_id,),
+            ).fetchone()[0]
+        
+        if unread_count == 0:
+            typer.echo("Ĉiuj mesaĝoj en tiu dosierujo jam estas legita.")
+            return
+        
+        # Mark all as read
+        if konto_id:
+            con.execute(
+                """UPDATE mesago SET legita = 1
+                   WHERE dosierujo_id = ? AND konto_id = ? AND legita = 0""",
+                (dosierujo_id, konto_id),
+            )
+        else:
+            con.execute(
+                """UPDATE mesago SET legita = 1
+                   WHERE dosierujo_id = ? AND legita = 0""",
+                (dosierujo_id,),
+            )
+    
+    typer.echo(f"[✓] Markis {unread_count} mesaĝo(j)n kiel legita(j)n.")
 
 
 def _format_grandeco(bytes_count: int) -> str:

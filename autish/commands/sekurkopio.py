@@ -23,7 +23,7 @@ app = typer.Typer(
     name="sekurkopio",
     help="Sekurkopio — backup & restore all autish user data.",
     no_args_is_help=True,
-    context_settings={"help_option_names": ["-h", "--help"]},
+    context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
 
 console = Console()
@@ -506,6 +506,367 @@ def auto(
                 encoding="utf-8",
             )
             typer.echo(f"[v] Gvido konservita al: {hint_path}")
+    
+    # Show instructions for setting up automatic backups
+    typer.echo("\n" + "=" * 60)
+    typer.echo("AVERTO: Aŭtomata sekurkopio estas agordita sed ne aktiva!")
+    typer.echo("=" * 60)
+    typer.echo(
+        "\nPor ke sekurkopioj okazu aŭtomate, vi devas agordi unu el:\n"
+        "  1. systemd timer (Debian/Ubuntu):\n"
+        "     sekurkopio install-systemd\n"
+        "  2. cron job (ĉiuj sistemoj):\n"
+        "     sekurkopio install-cron\n"
+        "  3. Manlibra daemono (rulu en aparta terminalo):\n"
+        "     sekurkopio daemon\n"
+    )
+
+
+@app.command("daemon")
+def daemon_cmd(
+    password_file: str | None = typer.Option(
+        None,
+        "-p",
+        "--password-file",
+        help="Path to file containing encryption password (one line).",
+    ),
+    once: bool = typer.Option(
+        False,
+        "--once",
+        help="Run one backup and exit (for systemd/cron).",
+    ),
+) -> None:
+    """Run automatic backup daemon.
+    
+    Without --once: runs continuously in foreground, performing backups
+    at the configured interval. Press Ctrl+C to stop.
+    
+    With --once: performs one backup immediately and exits (for systemd/cron).
+    
+    The password must be provided via --password-file for unattended operation.
+    """
+    import signal
+    import time
+    
+    strategy = _load_auto_strategy()
+    if not strategy or not strategy.get("aktiva"):
+        typer.echo(
+            "Eraro: Neniu aktiva aŭtomata strategio.\n"
+            "Rulu: sekurkopio auto [dosierujo]",
+            err=True,
+        )
+        raise typer.Exit(1)
+    
+    if not password_file:
+        typer.echo(
+            "Eraro: --password-file estas deviga por daemono.\n"
+            "Kreu dosieron kun la cifran pasvorton (unu linio) kaj pasu ĝin.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    
+    # Read password from file
+    try:
+        password = Path(password_file).expanduser().read_text(encoding="utf-8").strip()
+    except FileNotFoundError as e:
+        typer.echo(f"Eraro: Pasvorta dosiero ne trovita: {password_file}", err=True)
+        raise typer.Exit(1) from e
+    
+    if not password:
+        typer.echo("Eraro: Pasvorta dosiero estas malplena.", err=True)
+        raise typer.Exit(1)
+    
+    dosierujo = Path(strategy["dosierujo"])
+    intervalo_min = strategy["intervalo"]
+    nombro = strategy["nombro"]
+    
+    if once:
+        # Single backup for systemd/cron
+        try:
+            typer.echo(f"[*] {datetime.now(timezone.utc).isoformat()}")
+            typer.echo("[*] Komencante aŭtomatan sekurkopion...")
+            
+            out = _do_auto_backup(dosierujo, password, nombro)
+            _push_history("auto-daemon", {"dosiero": str(out)})
+            
+            typer.echo(f"[✓] Sekurkopio kreita: {out.name}")
+        except Exception as e:
+            typer.echo(f"[!] Eraro dum sekurkopio: {e}", err=True)
+            raise typer.Exit(1) from e
+        return
+    
+    # Continuous daemon mode
+    typer.echo(
+        f"[*] Sekurkopio daemono startita.\n"
+        f"    Dosierujo : {dosierujo}\n"
+        f"    Intervalo : {intervalo_min} min\n"
+        f"    Maks. kopioj: {nombro}\n"
+    )
+    
+    # Set up signal handlers for graceful shutdown
+    shutdown_requested = False
+    
+    def signal_handler(signum, frame):
+        nonlocal shutdown_requested
+        shutdown_requested = True
+        typer.echo("\n[!] Haltigo petita. Atendante...")
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Track last backup time
+    last_backup_time = 0.0
+    intervalo_sec = intervalo_min * 60
+    
+    typer.echo(f"[*] Unua sekurkopio post {intervalo_min} min...")
+    
+    while not shutdown_requested:
+        now = time.time()
+        
+        # Check if it's time for a backup
+        if now - last_backup_time >= intervalo_sec:
+            try:
+                typer.echo(f"\n[*] {datetime.now(timezone.utc).isoformat()}")
+                typer.echo("[*] Komencante aŭtomatan sekurkopion...")
+                
+                out = _do_auto_backup(dosierujo, password, nombro)
+                _push_history("auto-daemon", {"dosiero": str(out)})
+                
+                typer.echo(f"[✓] Sekurkopio kreita: {out.name}")
+                last_backup_time = now
+                
+            except Exception as e:
+                typer.echo(f"[!] Eraro dum sekurkopio: {e}", err=True)
+                # Continue running even if one backup fails
+        
+        # Sleep in small increments to allow for responsive shutdown
+        for _ in range(60):  # Check every second for 60 seconds
+            if shutdown_requested:
+                break
+            time.sleep(1)
+    
+    typer.echo("[✓] Daemono haltigita.")
+
+
+@app.command("install-systemd")
+def install_systemd_cmd() -> None:
+    """Generate and install systemd user service and timer for automatic backups.
+    
+    This creates:
+    - ~/.config/systemd/user/autish-sekurkopio.service
+    - ~/.config/systemd/user/autish-sekurkopio.timer
+    
+    And enables the timer to run automatically.
+    """
+    strategy = _load_auto_strategy()
+    if not strategy or not strategy.get("aktiva"):
+        typer.echo(
+            "Eraro: Neniu aktiva aŭtomata strategio.\n"
+            "Rulu: sekurkopio auto [dosierujo]",
+            err=True,
+        )
+        raise typer.Exit(1)
+    
+    intervalo_min = strategy["intervalo"]
+    
+    # Prompt for password file location
+    typer.echo(
+        "\n[!] Vi bezonos dosieron enhavanta la cifran pasvorton.\n"
+        "    Tio estas necesa por neatendata operacio.\n"
+    )
+    default_pw_file = str(Path.home() / ".config" / "autish" / "backup_password.txt")
+    pw_file = typer.prompt(
+        "Dosiero por pasvorto",
+        default=default_pw_file,
+    ).strip()
+    
+    pw_path = Path(pw_file).expanduser()
+    
+    if not pw_path.exists():
+        if _confirm_esperante("Dosiero ne ekzistas. Ĉu krei ĝin?", default_yes=True):
+            pw = typer.prompt("Pasvorto", hide_input=True, confirmation_prompt=True)
+            pw_path.parent.mkdir(parents=True, exist_ok=True)
+            pw_path.write_text(pw, encoding="utf-8")
+            pw_path.chmod(0o600)  # Read/write for owner only
+            typer.echo(f"[✓] Pasvorto konservita al: {pw_path}")
+        else:
+            typer.echo("Nuligita.")
+            raise typer.Exit(0)
+    
+    # Create systemd unit files
+    systemd_dir = Path.home() / ".config" / "systemd" / "user"
+    systemd_dir.mkdir(parents=True, exist_ok=True)
+    
+    service_file = systemd_dir / "autish-sekurkopio.service"
+    timer_file = systemd_dir / "autish-sekurkopio.timer"
+    
+    # Get the path to the sekurkopio command
+    import shutil
+    sekurkopio_bin = shutil.which("sekurkopio") or "sekurkopio"
+    
+    service_content = f"""[Unit]
+Description=Autish automatic backup service
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart={sekurkopio_bin} daemon --password-file {pw_path} --once
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
+"""
+    
+    timer_content = f"""[Unit]
+Description=Autish automatic backup timer
+Requires=autish-sekurkopio.service
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec={intervalo_min}min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+    
+    service_file.write_text(service_content, encoding="utf-8")
+    timer_file.write_text(timer_content, encoding="utf-8")
+    
+    typer.echo(f"[✓] Systemd dosieroj kreitaj:\n  {service_file}\n  {timer_file}")
+    
+    # Enable and start the timer
+    import subprocess
+    
+    try:
+        subprocess.run(
+            ["systemctl", "--user", "daemon-reload"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["systemctl", "--user", "enable", "autish-sekurkopio.timer"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["systemctl", "--user", "start", "autish-sekurkopio.timer"],
+            check=True,
+            capture_output=True,
+        )
+        typer.echo("[✓] Systemd timer ebligita kaj startita.")
+        typer.echo(
+            "\nPor vidi staton:\n"
+            "  systemctl --user status autish-sekurkopio.timer\n"
+            "  journalctl --user -u autish-sekurkopio.service -f"
+        )
+    except subprocess.CalledProcessError as e:
+        typer.echo(
+            f"[!] Averto: Ne povis aŭtomate ebligi/starti la timer: {e}\n"
+            "Manlibraj paŝoj:\n"
+            "  systemctl --user daemon-reload\n"
+            "  systemctl --user enable autish-sekurkopio.timer\n"
+            "  systemctl --user start autish-sekurkopio.timer",
+            err=True,
+        )
+
+
+@app.command("install-cron")
+def install_cron_cmd() -> None:
+    """Add a cron job for automatic backups.
+    
+    This adds a line to the user's crontab to run the backup daemon.
+    """
+    strategy = _load_auto_strategy()
+    if not strategy or not strategy.get("aktiva"):
+        typer.echo(
+            "Eraro: Neniu aktiva aŭtomata strategio.\n"
+            "Rulu: sekurkopio auto [dosierujo]",
+            err=True,
+        )
+        raise typer.Exit(1)
+    
+    intervalo_min = strategy["intervalo"]
+    
+    # Prompt for password file location
+    typer.echo(
+        "\n[!] Vi bezonos dosieron enhavanta la cifran pasvorton.\n"
+        "    Tio estas necesa por neatendata operacio.\n"
+    )
+    default_pw_file = str(Path.home() / ".config" / "autish" / "backup_password.txt")
+    pw_file = typer.prompt(
+        "Dosiero por pasvorto",
+        default=default_pw_file,
+    ).strip()
+    
+    pw_path = Path(pw_file).expanduser()
+    
+    if not pw_path.exists():
+        if _confirm_esperante("Dosiero ne ekzistas. Ĉu krei ĝin?", default_yes=True):
+            pw = typer.prompt("Pasvorto", hide_input=True, confirmation_prompt=True)
+            pw_path.parent.mkdir(parents=True, exist_ok=True)
+            pw_path.write_text(pw, encoding="utf-8")
+            pw_path.chmod(0o600)  # Read/write for owner only
+            typer.echo(f"[✓] Pasvorto konservita al: {pw_path}")
+        else:
+            typer.echo("Nuligita.")
+            raise typer.Exit(0)
+    
+    # Get the path to sekurkopio
+    import shutil
+    sekurkopio_bin = shutil.which("sekurkopio") or "sekurkopio"
+    
+    # Generate cron schedule expression
+    cron_expr = f"*/{intervalo_min} * * * *"  # Every N minutes
+    cron_cmd = f"{sekurkopio_bin} daemon --password-file {pw_path} --once"
+    cron_line = f"{cron_expr} {cron_cmd} >/dev/null 2>&1\n"
+    
+    typer.echo(f"\nAldononta cron linion:\n{cron_line}")
+    
+    if not _confirm_esperante("Ĉu aldoni ĉi tion al via crontab?", default_yes=True):
+        typer.echo("Nuligita.")
+        raise typer.Exit(0)
+    
+    import subprocess
+    
+    try:
+        # Get current crontab
+        result = subprocess.run(
+            ["crontab", "-l"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        current_crontab = result.stdout if result.returncode == 0 else ""
+        
+        # Check if entry already exists
+        if "autish-sekurkopio" in current_crontab or sekurkopio_bin in current_crontab:
+            typer.echo("[!] Sekurkopio jam estas en crontab. Nuligita.")
+            return
+        
+        # Append new line
+        new_crontab = current_crontab + f"# autish-sekurkopio\n{cron_line}"
+        
+        # Install new crontab
+        subprocess.run(
+            ["crontab", "-"],
+            input=new_crontab,
+            text=True,
+            check=True,
+        )
+        
+        typer.echo("[✓] Cron job aldonita.")
+        typer.echo("\nPor vidi vian crontab:\n  crontab -l")
+        
+    except subprocess.CalledProcessError as e:
+        typer.echo(f"[!] Eraro: {e}", err=True)
+        typer.echo(
+            f"\nManlibra paŝo:\n  crontab -e\n"
+            f"Aldonu: {cron_line}",
+            err=True,
+        )
+        raise typer.Exit(1) from e
 
 
 @app.command("historio")

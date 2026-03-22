@@ -20,7 +20,7 @@ import typer
 app = typer.Typer(
     help="Start an interactive autish shell (no need to type 'autish' each time).",
     invoke_without_command=True,
-    context_settings={"help_option_names": ["-h", "--help"]},
+    context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
 
 _PROMPT = "autish> "

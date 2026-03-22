@@ -25,14 +25,14 @@ app = typer.Typer(
     name="uzanto",
     help="Uzanto — user profile and master-password management.",
     no_args_is_help=True,
-    context_settings={"help_option_names": ["-h", "--help"]},
+    context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
 
 profilo_app = typer.Typer(
     name="profilo",
     help="Manage user profile (profilo).",
     no_args_is_help=True,
-    context_settings={"help_option_names": ["-h", "--help"]},
+    context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
 app.add_typer(profilo_app, name="profilo")
 

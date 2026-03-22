@@ -180,16 +180,25 @@ _HELP_LINES = [
     "    f            Plusendi (forward) elektitan mesaĝon",
     "    x            Forigi elektitan mesaĝon (rubujo)",
     "    X            Forigi definitive",
-    "    d            Movi mesaĝon al dosierujo",
-    "    y            Kopii mesaĝon al dosierujo",
+    "    D            Movi mesaĝon al dosierujo",
+    "    Y            Kopii mesaĝon al dosierujo",
     "    u            Restigi forigitan mesaĝon",
     "    s            Marki kiel spamon",
     "    S            Malfermi spam-panelon",
     "    *            Marki kun stelo (favorita)",
+    "    M            Marki ĉiujn en dosierujo kiel legita",
     "    1-9          Agordi prioritaton (1=malalta … 9=alta)",
     "    m/M          Movi konton supren/suben (en konta linio)",
     "    nl/ns        Krei lokan/servilan dosierujon",
     "    p            Preni novan poŝton (fetch)",
+    "",
+    "  TEKSTA ELEKTO (en mesaĝa vidilo)",
+    "    v            Komenci/fini VISUAL-CHAR reĝimon",
+    "    V            Komenci/fini VISUAL-LINE reĝimon",
+    "    y            Kopii elektitan tekston al tondujo",
+    "",
+    "  ALDONAĴOJ (en mesaĝa vidilo)",
+    "    a            Listigi/malfermi aldonaĵojn",
     "",
     "  SERĈO",
     "    /            Komenci serĉon en aktiva panelo",
@@ -1195,7 +1204,7 @@ class MessageReader:
     def draw(self) -> None:
         h, w = self.stdscr.getmaxyx()
         self.stdscr.erase()
-        content_h = h - 2
+        content_h = h - 3  # 1 title row + 2 status rows
 
         # Title
         subj = (self.msg.get("subjekto") or "")[:w - 4]
@@ -1269,7 +1278,7 @@ class MessageReader:
 
         if has_conv:
             divider_x = body_w - 1
-            for row in range(h - 1):
+            for row in range(h - 2):  # Stop before 2-line status bar
                 _safe_addstr(self.stdscr, row, divider_x, "│", curses.A_DIM)
 
             conv_x = body_w
@@ -1313,11 +1322,13 @@ class MessageReader:
                     attr,
                 )
 
-        # Status bar
+        # Status bar (may use 2 lines if terminal is narrow)
         if self._mode == "SEARCH":
             status = f"/{self._search_buf}█"
+            status_lines = [status]
         elif self._mode == "COMMAND":
             status = f":{self._cmd_buf}█"
+            status_lines = [status]
         else:
             if self._visual_mode == "char":
                 mode_label = "[VISUAL-CHAR]"
@@ -1325,14 +1336,27 @@ class MessageReader:
                 mode_label = "[VISUAL-LINE]"
             else:
                 mode_label = "[NORMAL]"
-            status = (
-                f"{mode_label}  j/k:↕  gg/G:⇕  h/l:↔  v/V:VIDA  Ctrl+←/→:vorto  "
-                f"r:respondi  R:respondi-ciujn  f:plusendi  x:forigi  d:movi  "
-                f"y:kopii  s:spamo  :HTML  :h/:help  Tab:fokuso  q:reen"
+            # Split hints into 2 lines to avoid overflow
+            line1 = f"{mode_label}  j/k:↕  gg/G:⇕  h/l:↔  v/V:VIDA  Ctrl+←/→:vorto"
+            # Show different hints for VISUAL mode vs NORMAL mode
+            if self._visual_mode:
+                line2 = (
+                    "y:kopii-tekston  Esc:nuligi-elekton  :h/:help  q:reen"
+                )
+            else:
+                line2 = (
+                    "r:respondi  R:respondi-ciujn  f:plusendi  x:forigi  D:movi  "
+                    "Y:kopii  a:aldonaĵoj  :h/:help  q:reen"
+                )
+            status_lines = [line1, line2]
+        
+        # Render status bar (use last 2 rows if we have 2 status lines)
+        status_rows = min(len(status_lines), 2)
+        for i, line in enumerate(status_lines[-status_rows:]):
+            row = h - status_rows + i
+            _safe_addstr(
+                self.stdscr, row, 0, line[:w - 1].ljust(w - 1), curses.A_REVERSE
             )
-        _safe_addstr(
-            self.stdscr, h - 1, 0, status[:w - 1].ljust(w - 1), curses.A_REVERSE
-        )
 
         if focused_cursor:
             try:
@@ -1570,10 +1594,41 @@ class MessageReader:
             return f"priority:{ch}"
         elif ch == "d":
             self._prev_ch = ""
+            # In VISUAL mode, 'd' doesn't do anything (reserved for future cut)
+            # Use 'D' to move message
+            if self._visual_mode:
+                return None
+            return "move"
+        elif ch == "D":
+            self._prev_ch = ""
+            # Uppercase D always moves message, even in VISUAL mode
             return "move"
         elif ch == "y":
             self._prev_ch = ""
+            # In VISUAL mode, 'y' copies selected text to clipboard
+            if self._visual_mode:
+                try:
+                    import pyperclip
+                    text = self._get_visual_text()
+                    if text:
+                        pyperclip.copy(text)
+                        # Clear visual mode after yank
+                        self._visual_mode = ""
+                        return "yank_text"  # Signal successful copy
+                except ImportError:
+                    # If pyperclip not available, do nothing
+                    pass
+                return None
+            # In NORMAL mode, 'y' does nothing (use 'Y' to copy message)
+            return None
+        elif ch == "Y":
+            self._prev_ch = ""
+            # Uppercase Y always copies message, even in VISUAL mode
             return "copy"
+        elif ch == "a":
+            self._prev_ch = ""
+            # List/open attachments
+            return "attachments"
 
         self._prev_ch = ch
         return None
@@ -1597,6 +1652,31 @@ class MessageReader:
         if row == bottom:
             return (0, c_col) if c_row == bottom else (0, a_col)
         return (0, max(0, line_len - 1))
+
+    def _get_visual_text(self) -> str:
+        """Extract text from current VISUAL selection."""
+        if not self._visual_mode:
+            return ""
+        
+        lines = []
+        top = min(self._visual_anchor_row, self._row)
+        bot = max(self._visual_anchor_row, self._row)
+        
+        for row in range(top, bot + 1):
+            if row >= len(self._lines):
+                break
+            line = self._lines[row]
+            
+            if self._visual_mode == "line":
+                # Full line selection
+                lines.append(line)
+            else:
+                # Character selection
+                start_col, end_col = self._visual_bounds_for_row(row, len(line))
+                if start_col <= end_col and start_col < len(line):
+                    lines.append(line[start_col:end_col + 1])
+        
+        return "\n".join(lines)
 
     def _search_key(self, key: int, ch: str) -> str | None:
         if key in (_ENTER, _CR):
@@ -1665,6 +1745,8 @@ class RetpostoTUI:
         update_account: Callable[[int, dict], None] | None = None,
         load_messages_spam: Callable[..., list[dict]] | None = None,
         load_conversation: Callable[[dict], list[dict]] | None = None,
+        load_aldonajoj: Callable[[int], list[dict]] | None = None,
+        malfermi_aldonajon: Callable[[int], None] | None = None,
     ) -> None:
         self.stdscr = stdscr
         self._load_accounts = load_accounts
@@ -1693,6 +1775,8 @@ class RetpostoTUI:
         self._update_account = update_account
         self._load_messages_spam = load_messages_spam
         self._load_conversation = load_conversation
+        self._load_aldonajoj = load_aldonajoj
+        self._malfermi_aldonajon = malfermi_aldonajon
 
         # Panels
         self._folder_panel = FolderPanel(stdscr, load_accounts, load_folders)
@@ -1876,8 +1960,8 @@ class RetpostoTUI:
             )
         return (
             "j/k:↕  Enter:legi  Shift+Tab:kontoj  c/r/R/f:komponi  "
-            "x:forigi  d:movi  y:kopii  s:spamo  S:spamo-listo  *:stelo  "
-            "/:serĉi  :h/:help"
+            "x:forigi  D:movi  Y:kopii  s:spamo  S:spamo-listo  *:stelo  "
+            "p:preni  /:serĉi  :h/:help"
         )
 
     def _handle_key(self, key: int) -> bool:
@@ -1966,13 +2050,16 @@ class RetpostoTUI:
         elif ch == "*" and self._focus == "list":
             self._action_star()
             return False
+        elif ch == "M" and self._focus == "list":
+            self._action_mark_all_read()
+            return False
         elif ch == "p":
             self._action_fetch()
             return False
-        elif ch == "d" and self._focus == "list":
+        elif ch in ("d", "D") and self._focus == "list":
             self._action_move()
             return False
-        elif ch == "y" and self._focus == "list":
+        elif ch in ("y", "Y") and self._focus == "list":
             self._action_copy()
             return False
         elif ch and ch in "123456789" and self._focus == "list":
@@ -2086,6 +2173,8 @@ class RetpostoTUI:
             self._action_create_local_folder()
         elif cmd in ("ns", "kf"):
             self._action_create_server_folder()
+        elif cmd in ("ml", "marki-legita", "mark-all-read"):
+            self._action_mark_all_read()
         else:
             self._status_msg = f"Nekonata komando: :{cmd}"
         return False
@@ -2122,17 +2211,41 @@ class RetpostoTUI:
                 if self._compose_forward(msg) == "cancel":
                     continue
             elif result == "delete":
+                # Remember cursor position before deletion
+                old_cursor = self._message_panel._cursor
                 self._delete_message(msg["id"], False)
                 self._set_status("Sendita al rubujo.", transient=True)
                 self._refresh_list()
+                # Restore cursor position (or clamp to new list bounds)
+                if self._message_panel._messages:
+                    new_cursor = min(
+                        old_cursor, len(self._message_panel._messages) - 1
+                    )
+                    self._message_panel._cursor = new_cursor
+                return
             elif result == "delete_perm":
+                # Remember cursor position before deletion
+                old_cursor = self._message_panel._cursor
                 self._delete_message(msg["id"], True)
                 self._set_status("Definitive forigita.", transient=True)
                 self._refresh_list()
+                # Restore cursor position (or clamp to new list bounds)
+                if self._message_panel._messages:
+                    new_cursor = min(
+                        old_cursor, len(self._message_panel._messages) - 1
+                    )
+                    self._message_panel._cursor = new_cursor
+                return
             elif result == "spam":
                 self._mark_spam(msg)
             elif result == "star":
                 self._toggle_star(msg)
+            elif result == "yank_text":
+                self._set_status("Teksto kopiita al tondujo.", transient=True)
+                continue
+            elif result == "attachments":
+                self._action_attachments(msg)
+                continue
             elif result == "move":
                 self._action_move()
             elif result == "copy":
@@ -2466,9 +2579,17 @@ class RetpostoTUI:
             return
         label = "definitive forigi" if permanent else "forigi"
         if self._prompt_confirm_inline(f"{label} ĉi tiun mesaĝon? (J/n)"):
+            # Remember cursor position before deletion
+            old_cursor = self._message_panel._cursor
             self._delete_message(msg["id"], permanent)
             self._set_status("Forigita.", transient=True)
             self._refresh_list()
+            # Restore cursor position (or clamp to new list bounds)
+            if self._message_panel._messages:
+                new_cursor = min(
+                    old_cursor, len(self._message_panel._messages) - 1
+                )
+                self._message_panel._cursor = new_cursor
         else:
             self._set_status("Nuligita.", transient=True)
 
@@ -2513,6 +2634,46 @@ class RetpostoTUI:
         msg = self._message_panel.selected()
         if msg:
             self._toggle_star(msg)
+
+    def _action_mark_all_read(self) -> None:
+        """Mark all messages in the current folder as read."""
+        params = self._message_panel._params
+        if not params:
+            self._set_status("Neniu dosierujo elektita.", transient=True)
+            return
+        
+        konto_id = params.get("konto_id")
+        dosierujo_id = params.get("dosierujo_id")
+        
+        if not dosierujo_id:
+            self._set_status("Neniu dosierujo elektita.", transient=True)
+            return
+        
+        # Get count of unread messages
+        from autish.commands.retposto import _get_db
+        with _get_db() as con:
+            unread_count = con.execute(
+                """SELECT COUNT(*) FROM mesago
+                   WHERE konto_id = ? AND dosierujo_id = ? AND legita = 0""",
+                (konto_id, dosierujo_id),
+            ).fetchone()[0]
+            
+            if unread_count == 0:
+                self._set_status("Ĉiuj mesaĝoj jam legitaj.", transient=True)
+                return
+            
+            # Update all unread messages
+            con.execute(
+                """UPDATE mesago SET legita = 1
+                   WHERE konto_id = ? AND dosierujo_id = ? AND legita = 0""",
+                (konto_id, dosierujo_id),
+            )
+        
+        self._set_status(
+            f"Markis {unread_count} mesaĝo(j)n kiel legita(j)n.",
+            transient=True
+        )
+        self._refresh_list()
 
     def _action_priority(self, p: int) -> None:
         msg = self._message_panel.selected()
@@ -2579,6 +2740,80 @@ class RetpostoTUI:
         self._last_folder_target = (folder_name, account_id)
         self._folder_panel._refresh_items()
         self._refresh_list()
+
+    def _action_attachments(self, msg: dict) -> None:
+        """List and open message attachments."""
+        if not self._load_aldonajoj or not self._malfermi_aldonajon:
+            self._set_status("[!] Aldonaĵoj ne subtenataj.", transient=True)
+            return
+        
+        aldonajoj = self._load_aldonajoj(msg["id"])
+        if not aldonajoj:
+            self._set_status("Neniu aldonaĵo en ĉi tiu mesaĝo.", transient=True)
+            return
+        
+        # If only one attachment, open it directly
+        if len(aldonajoj) == 1:
+            try:
+                self._malfermi_aldonajon(aldonajoj[0]["id"])
+                self._set_status(
+                    f"Malfermis: {aldonajoj[0]['dosiernomo']}", transient=True
+                )
+            except Exception as e:
+                self._set_status(f"[!] Eraro: {e}", transient=True)
+            return
+        
+        # Multiple attachments - show selection menu
+        import curses
+        h, w = self.stdscr.getmaxyx()
+        menu_h = min(len(aldonajoj) + 4, h - 4)
+        menu_w = min(60, w - 4)
+        top = (h - menu_h) // 2
+        left = (w - menu_w) // 2
+        
+        win = curses.newwin(menu_h, menu_w, top, left)
+        win.keypad(True)
+        cursor = 0
+        
+        while True:
+            win.erase()
+            win.box()
+            _safe_addstr(win, 0, 2, " Aldonaĵoj ", curses.A_BOLD)
+            
+            for i, att in enumerate(aldonajoj):
+                y = i + 2
+                if y >= menu_h - 1:
+                    break
+                label = f"{i+1}. {att['dosiernomo']}"
+                attr = curses.A_REVERSE if i == cursor else curses.A_NORMAL
+                _safe_addstr(win, y, 2, label[:menu_w-4], attr)
+            
+            _safe_addstr(
+                win, menu_h - 1, 2,
+                "Enter:malfermi  q:nuligi"[:menu_w-4],
+                curses.A_DIM
+            )
+            win.noutrefresh()
+            curses.doupdate()
+            
+            key = win.getch()
+            if key == ord("q") or key == _ESC:
+                break
+            elif key == ord("j") or key == curses.KEY_DOWN:
+                cursor = min(cursor + 1, len(aldonajoj) - 1)
+            elif key == ord("k") or key == curses.KEY_UP:
+                cursor = max(cursor - 1, 0)
+            elif key in (_ENTER, _CR):
+                try:
+                    self._malfermi_aldonajon(aldonajoj[cursor]["id"])
+                    self._set_status(
+                        f"Malfermis: {aldonajoj[cursor]['dosiernomo']}",
+                        transient=True
+                    )
+                    break
+                except Exception as e:
+                    self._set_status(f"[!] Eraro: {e}", transient=True)
+                    break
 
     def _action_fetch(self) -> None:
         if self._fetching:
