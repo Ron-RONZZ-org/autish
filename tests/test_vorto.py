@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import uuid
 from unittest.mock import patch
 
+from rich.console import Group
+from rich.text import Text
 from typer.testing import CliRunner
 
 from autish.commands.vorto import (
@@ -89,6 +92,7 @@ class TestNormalizeTipo:
         assert _normalize_tipo("substantivo") == ["substantivo-neŭtra"]
         assert _normalize_tipo("substantivo-ina") == ["substantivo-ina"]
         assert _normalize_tipo("substantivo-vira") == ["substantivo-vira"]
+        assert _normalize_tipo("refleksiva-verbo") == ["refleksiva-verbo"]
 
     def test_abbreviation_expanded(self):
         assert _normalize_tipo("su") == ["substantivo-neŭtra"]
@@ -99,6 +103,7 @@ class TestNormalizeTipo:
         assert _normalize_tipo("ve") == ["verbo"]
         assert _normalize_tipo("vt") == ["verbo-transitiva"]
         assert _normalize_tipo("vn") == ["verbo-netransitiva"]
+        assert _normalize_tipo("vr") == ["refleksiva-verbo"]
         assert _normalize_tipo("aj") == ["adjektivo"]
         assert _normalize_tipo("av") == ["adverbo"]
         assert _normalize_tipo("pa") == ["parola"]
@@ -360,6 +365,23 @@ class TestAldoni:
         assert len(saved_stack) == 1
         assert saved_stack[0]["op"] == "aldoni"
 
+    def test_difino_with_bang_character_is_stored_verbatim(self):
+        with (
+            patch(_LOAD, return_value=[]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            result = runner.invoke(
+                app,
+                ["vorto", "aldoni", "hello-bang", "-d", "!grave"],
+                env={**os.environ, "HISTCONTROL": "ignoredups"},
+            )
+        assert result.exit_code == 0
+        entry = mock_save.call_args[0][0][0]
+        assert entry["difinoj"] == ["!grave"]
+
 
 class TestVidi:
     def test_displays_entry(self):
@@ -368,6 +390,15 @@ class TestVidi:
             result = runner.invoke(app, ["vorto", "vidi", SAMPLE_UUID])
         assert result.exit_code == 0
         assert "hello" in result.output
+        assert "kreita:" not in result.output
+        assert "modifita:" not in result.output
+
+    def test_vidi_a_shows_timestamps(self):
+        entry = _make_entry()
+        with patch(_LOAD, return_value=[entry]):
+            result = runner.invoke(app, ["vorto", "vidi", SAMPLE_UUID, "-a"])
+        assert result.exit_code == 0
+        assert "kreita:" in result.output
 
     def test_uuid_prefix_works(self):
         entry = _make_entry()
@@ -398,9 +429,34 @@ class TestVidi:
             _display_entry(entry, [entry, linked])
         panel = mock_print.call_args[0][0]
         rendered = panel.renderable
-        assert "[bold]1. short def[/bold]" in rendered
-        assert "bonjour:" in rendered
-        assert "..." in rendered
+        assert isinstance(rendered, Group)
+        md = rendered.renderables[2]
+        assert md.__class__.__name__ == "Markdown"
+        assert "**1. short def**" in md.markup
+        assert "[**bonjour**: a very long description" in md.markup
+        assert "](file://" in md.markup
+
+    def test_display_entry_renders_markdown_in_difino_and_uzo(self):
+        entry = _make_entry(
+            difinoj=["(de l'allemand _ambivalent_) qui présente une ambivalence"],
+            uzoj=["_ekzemplo_ de uzo"],
+        )
+        with patch("autish.commands.vorto.console.print") as mock_print:
+            _display_entry(entry, [entry])
+        panel = mock_print.call_args[0][0]
+        rendered = panel.renderable
+        assert isinstance(rendered, Group)
+        assert isinstance(rendered.renderables[0], Text)
+        assert rendered.renderables[0].plain.endswith(f"#{SAMPLE_UUID[:8]}")
+        assert rendered.renderables[0].spans[-1].style == "dim"
+        md = rendered.renderables[2]
+        assert md.__class__.__name__ == "Markdown"
+        assert "en - vorto/substantivo-neŭtra" in md.markup
+        assert (
+            "**1. (de l'allemand _ambivalent_) "
+            "qui présente une ambivalence**"
+        ) in md.markup
+        assert "*_ekzemplo_ de uzo*" in md.markup
 
 
 class TestModifi:
@@ -694,6 +750,35 @@ class TestForigi:
         saved_stack = mock_save_undo.call_args[0][0]
         assert saved_stack[-1]["op"] == "forigi"
         assert saved_stack[-1]["uuid"] == SAMPLE_UUID
+
+    def test_deletes_entry_with_hash_uuid_prefix(self):
+        entry = _make_entry()
+        with (
+            patch(_LOAD, return_value=[entry]),
+            patch(_MOVE_TO_RUBUJO) as mock_move,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            result = runner.invoke(app, ["vorto", "forigi", "#aaaaaaaa"])
+        assert result.exit_code == 0
+        mock_move.assert_called_once_with(entry)
+
+    def test_warns_about_broken_ligilo_references(self):
+        entry = _make_entry(uuid=SAMPLE_UUID, teksto="a")
+        referencer = _make_entry(uuid=SAMPLE_UUID2, teksto="b", ligiloj=[SAMPLE_UUID])
+        with (
+            patch(_LOAD, return_value=[entry, referencer]),
+            patch(_MOVE_TO_RUBUJO),
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=False),
+        ):
+            result = runner.invoke(app, ["vorto", "forigi", SAMPLE_UUID])
+        assert result.exit_code == 0
+        assert "Averto" in result.output
+        assert "rompos referencojn" in result.output
+        assert "ligilo" in result.output
 
 
 class TestMalfari:

@@ -34,6 +34,7 @@ import time
 import webbrowser
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 
@@ -52,6 +53,7 @@ _CTRL_H = 8
 _CTRL_K = 11  # kill line forward
 _CTRL_R = 18
 _CTRL_S = 19
+_CTRL_A = 1
 _CTRL_U = 21  # kill line backward
 _CTRL_W = 23  # kill word backward
 _CTRL_Y = 25  # yank (paste)
@@ -102,6 +104,16 @@ def _key_to_char(key: int) -> str:
     """Convert an integer key code to a Unicode character if possible."""
     if key <= 0:
         return ""
+    if key in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_LEFT, curses.KEY_RIGHT):
+        return ""
+    if key in (
+        curses.KEY_HOME,
+        curses.KEY_END,
+        curses.KEY_PPAGE,
+        curses.KEY_NPAGE,
+        curses.KEY_BTAB,
+    ):
+        return ""
     if _is_ctrl_left(key) or _is_ctrl_right(key):
         return ""
     try:
@@ -119,6 +131,11 @@ def _is_ctrl_left(key: int) -> bool:
 
 def _is_ctrl_right(key: int) -> bool:
     return key in _CTRL_RIGHT_KEYS
+
+
+def _unwrap_wrapped_mail_urls(text: str) -> str:
+    """Join soft-wrapped URLs split by spaces/newlines in plain-text messages."""
+    return re.sub(r"(https?://\S+)\s+(\S+)", r"\1\2", text)
 
 
 def _word_left(text: str, pos: int) -> int:
@@ -178,13 +195,20 @@ _HELP_LINES = [
     "    r            Respondi al elektita mesaĝo",
     "    R            Respondi al ĉiuj ricevontoj",
     "    f            Plusendi (forward) elektitan mesaĝon",
+    "    e            Redakti skizon (nur en Drafts dosierujo)",
     "    x            Forigi elektitan mesaĝon (rubujo)",
     "    X            Forigi definitive",
     "    D            Movi mesaĝon al dosierujo",
     "    Y            Kopii mesaĝon al dosierujo",
     "    u            Restigi forigitan mesaĝon",
     "    s            Marki kiel spamon",
-    "    S            Malfermi spam-panelon",
+    "    m            Marki elektitan/elektitajn kiel legita",
+    "    S            Spam-panelo",
+    "    Ctrl+S       (en OUTBOX-listo) Sendi elektitajn",
+    "    Ctrl+Shift+S (en OUTBOX-listo) Sendi ĉiujn",
+    "    Space        Ŝalti elekton de aktuala mesaĝo",
+    "    v ... v      Elekti intervalon inter du pozicioj",
+    "    Esc          Nuligi nunan mesaĝ-elekton",
     "    *            Marki kun stelo (favorita)",
     "    M            Marki ĉiujn en dosierujo kiel legita",
     "    1-9          Agordi prioritaton (1=malalta … 9=alta)",
@@ -198,7 +222,7 @@ _HELP_LINES = [
     "    y            Kopii elektitan tekston al tondujo",
     "",
     "  ALDONAĴOJ (en mesaĝa vidilo)",
-    "    a            Listigi/malfermi aldonaĵojn",
+    "    Ctrl+A       Listigi/malfermi aldonaĵojn",
     "",
     "  SERĈO",
     "    /            Komenci serĉon en aktiva panelo",
@@ -215,7 +239,18 @@ _HELP_LINES = [
     "  KOMPONI",
     "    Tab          Salti al sekva kampo",
     "    Shift+Tab    Salti al antaŭa kampo",
+    "    De (from)    Elekti sendantan konton",
+    "    Prioritato   h/k=malpli, l/j=pli (aŭ tajpu 1..9/alta/normala/malalta)",
+    "    Legokonfirmo Space/j/n por jes/ne",
+    "    De/Al/Cc/Bcc ↑/↓:elekti proponon  Ctrl+Tab:fokusi  1-9:elekti  Esc:reen",
+    "    Ctrl+S       (en OUTBOX-listo) Sendi elektitan",
+    "    Ctrl+Shift+S (aŭ S en OUTBOX-listo) Sendi ĉiujn",
     "    m            Ŝalti/malŝalti markdown-reĝimon",
+    "    Ctrl+A       Aldoni aldonaĵon per dosier-vojo",
+    "    :a           Aldoni aldonaĵon (demando)",
+    "    :aldoni <p>  Aldoni aldonaĵon per rekta vojo",
+    "    :w           Konservi skizon (resti en komponilo)",
+    "    :wq          Konservi skizon kaj fermi komponilon",
     "    Ctrl+D / Esc Nuligi",
     "    Ctrl+S       Sendi mesaĝon",
     "",
@@ -433,10 +468,13 @@ class LineEditor:
 # ──────────────────────────────────────────────────────────────────────────────
 
 _COMPOSE_FIELDS = [
+    ("de", "From (de)"),
     ("al", "To (al)"),
     ("cc", "Cc"),
     ("bcc", "Bcc"),
     ("subjekto", "Subjekto"),
+    ("prioritato", "Prioritato (alta/normala/malalta)"),
+    ("legokonfirmo", "Legokonfirmo (jes/ne)"),
     ("korpo", "Korpo"),
 ]
 
@@ -449,15 +487,19 @@ class ComposePanel:
         stdscr: Any,
         initial: dict[str, str] | None = None,
         contact_completer: Callable[[str], list[str]] | None = None,
+        from_completer: Callable[[str], list[str]] | None = None,
     ) -> None:
         self.stdscr = stdscr
         initial = initial or {}
         # Create line editors for each header field
         self._editors: dict[str, LineEditor] = {
+            "de": LineEditor(initial.get("de", "")),
             "al": LineEditor(initial.get("al", "")),
             "cc": LineEditor(initial.get("cc", "")),
             "bcc": LineEditor(initial.get("bcc", "")),
             "subjekto": LineEditor(initial.get("subjekto", "")),
+            "prioritato": LineEditor(initial.get("prioritato", "normala")),
+            "legokonfirmo": LineEditor(initial.get("legokonfirmo", "ne")),
         }
         # Korpo uses a multiline textarea (list of LineEditors)
         korpo_text = initial.get("korpo", "")
@@ -469,17 +511,27 @@ class ComposePanel:
         self._current_field: int = 0  # index into _COMPOSE_FIELDS
         self._body_row: int = 0
         self._completer = contact_completer
+        self._from_completer = from_completer
         self._status: str = (
-            "Tab/Shift+Tab:kampo  v/V:VIDA  m:markdown  "
-            ":wq sendi  :w skizo  :html antaŭvido  :q nuligi  Ctrl+S"
+            "Tab/Shift+Tab:kampo  m:markdown  Ctrl+A:aldonajxo  "
+            ":wq skizo+fermi  :w skizo  :h helpo  :q nuligi  Ctrl+S"
         )
         self._complete_list: list[str] = []
         self._complete_idx: int = -1
+        self._autocomplete_pick_mode: bool = False
+        self._autocomplete_pick_buf: str = ""
         self._dd_pending: bool = False
         self._body_scroll: int = 0
+        self._body_prev_ch: str = ""
+        self._body_visual_mode: str = ""  # "", "char", "line"
+        self._body_visual_anchor_row: int | None = None
+        self._body_visual_anchor_col: int | None = None
         self._mode: str = "FIELD"  # FIELD | CMD
         self._cmd_buf: str = ""
         self._markdown_enabled: bool = False
+        self._attachments: list[str] = []
+        self._status_deadline: float | None = None
+        self._status_transient_value: str = ""
 
     def _field_names(self) -> list[str]:
         return [k for k, _ in _COMPOSE_FIELDS]
@@ -495,20 +547,60 @@ class ComposePanel:
 
     def get_values(self) -> dict[str, str]:
         return {
+            "de": self._editors["de"].value,
             "al": self._editors["al"].value,
             "cc": self._editors["cc"].value,
             "bcc": self._editors["bcc"].value,
             "subjekto": self._editors["subjekto"].value,
+            "prioritato": self._editors["prioritato"].value,
+            "legokonfirmo": self._editors["legokonfirmo"].value,
             "korpo": "\n".join(e.value for e in self._body_lines),
         }
+
+    def attachment_paths(self) -> list[str]:
+        return list(self._attachments)
+
+    def add_attachment(self, raw_path: str) -> tuple[bool, str]:
+        path = Path(raw_path).expanduser()
+        if not path.exists():
+            return False, f"[!] Dosiero ne trovita: {path}"
+        if not path.is_file():
+            return False, f"[!] Ne estas dosiero: {path}"
+        real = str(path.resolve())
+        if real in self._attachments:
+            return False, "[!] Aldonaĵo jam ekzistas."
+        self._attachments.append(real)
+        return True, f"[✓] Aldonita aldonaĵo: {path.name}"
+
+    def _set_status(self, message: str, *, transient: bool = False) -> None:
+        self._status = message
+        if transient:
+            self._status_transient_value = message
+            self._status_deadline = time.monotonic() + 3.0
+        else:
+            self._status_deadline = None
+            self._status_transient_value = ""
+
+    def _current_status(self) -> str:
+        if (
+            self._status_deadline is not None
+            and time.monotonic() >= self._status_deadline
+            and self._status == self._status_transient_value
+        ):
+            self._status = ""
+            self._status_deadline = None
+            self._status_transient_value = ""
+        return self._status
 
     def draw(self) -> None:
         h, w = self.stdscr.getmaxyx()
         self.stdscr.erase()
 
         md_flag = " [MD]" if self._markdown_enabled else ""
+        att_flag = f" [A:{len(self._attachments)}]" if self._attachments else ""
         header = (
-            f" ✉  Komponi{md_flag} — Ctrl+S:sendi  m:markdown  :w skizo  :q nuligi "
+            f" ✉  Komponi{md_flag}{att_flag} — "
+            "Ctrl+S:sendi  m:markdown  Ctrl+A:aldonajxo  :w skizo  :q nuligi "
         )
         _safe_addstr(self.stdscr, 0, 0, header[:w - 1].ljust(w - 1), curses.A_REVERSE)
 
@@ -572,9 +664,44 @@ class ComposePanel:
             else:
                 _safe_addstr(self.stdscr, scr_row, 0, " " * (w - 1))
 
+            # Global VISUAL selection highlight across multiple body lines.
+            if li < len(self._body_lines):
+                self._draw_body_visual_selection(li, scr_row, w - 1)
+
         # Autocomplete hint
+        field_name = _COMPOSE_FIELDS[self._current_field][0]
         if self._complete_list:
             hint = "  ".join(self._complete_list[:5])
+            _safe_addstr(
+                self.stdscr, h - 2, 0,
+                hint[:w - 1].ljust(w - 1), curses.A_DIM
+            )
+            if self._autocomplete_pick_mode:
+                hint2 = f"Numer-elekto: {self._autocomplete_pick_buf} (1-9/Esc)"
+            else:
+                hint2 = "↑/↓:elekti proponon  Ctrl+Tab:fokusi  1-9:elekti"
+            _safe_addstr(
+                self.stdscr, h - 2, max(0, w - len(hint2) - 1),
+                hint2[:w - 1], curses.A_DIM
+            )
+        elif field_name == "prioritato":
+            hint = (
+                "Prioritato: h/k=malpli  l/j=pli  "
+                "(aŭ tajpu 1..9/alta/normala/malalta)"
+            )
+            _safe_addstr(
+                self.stdscr, h - 2, 0,
+                hint[:w - 1].ljust(w - 1), curses.A_DIM
+            )
+        elif field_name == "legokonfirmo":
+            hint = "Legokonfirmo: Space/j=jes  n=ne"
+            _safe_addstr(
+                self.stdscr, h - 2, 0,
+                hint[:w - 1].ljust(w - 1), curses.A_DIM
+            )
+        elif self._attachments:
+            short = [Path(p).name for p in self._attachments]
+            hint = "Aldonaĵoj: " + ", ".join(short)
             _safe_addstr(
                 self.stdscr, h - 2, 0,
                 hint[:w - 1].ljust(w - 1), curses.A_DIM
@@ -585,13 +712,17 @@ class ComposePanel:
             status_line = f":{self._cmd_buf}█"
         else:
             ed = self._current_editor()
-            if ed is not None and ed.mode == "INSERT":
+            if self._is_body() and self._body_visual_mode == "char":
+                mode_pfx = "-- VISUAL --  "
+            elif self._is_body() and self._body_visual_mode == "line":
+                mode_pfx = "-- VISUAL LINE --  "
+            elif ed is not None and ed.mode == "INSERT":
                 mode_pfx = "-- INSERT --  "
             elif ed is not None and ed.mode == "NORMAL":
                 mode_pfx = "-- NORMAL --  "
             else:
                 mode_pfx = ""
-            status_line = mode_pfx + self._status
+            status_line = mode_pfx + self._current_status()
         status_line = status_line[:w - 1].ljust(w - 1)
         _safe_addstr(
             self.stdscr, h - 1, 0,
@@ -606,6 +737,177 @@ class ComposePanel:
 
         self.stdscr.refresh()
 
+    def _draw_body_visual_selection(
+        self, line_index: int, screen_row: int, width: int
+    ) -> None:
+        if (
+            not self._body_visual_mode
+            or self._body_visual_anchor_row is None
+            or self._body_visual_anchor_col is None
+            or width <= 0
+        ):
+            return
+        current = self._body_lines[self._body_row]
+        anchor_row = self._body_visual_anchor_row
+        anchor_col = self._body_visual_anchor_col
+        current_row = self._body_row
+        current_col = current.pos
+        lo_row = min(anchor_row, current_row)
+        hi_row = max(anchor_row, current_row)
+        if line_index < lo_row or line_index > hi_row:
+            return
+
+        ed = self._body_lines[line_index]
+        text = ed.value
+        view_start = ed._view_start  # internal render state used for clipping
+        visible = text[view_start: view_start + width].ljust(width)[:width]
+
+        if self._body_visual_mode == "line":
+            start_idx, end_idx = 0, width - 1
+        else:
+            if anchor_row == current_row:
+                sel_start = min(anchor_col, current_col)
+                sel_end = max(anchor_col, current_col)
+                if line_index != anchor_row:
+                    return
+            elif line_index == anchor_row:
+                sel_start = anchor_col
+                sel_end = len(text)
+                if anchor_row > current_row:
+                    sel_start = 0
+                    sel_end = anchor_col
+            elif line_index == current_row:
+                sel_start = 0
+                sel_end = current_col
+                if anchor_row > current_row:
+                    sel_start = current_col
+                    sel_end = len(text)
+            else:
+                sel_start = 0
+                sel_end = len(text)
+            lo = min(sel_start, sel_end)
+            hi = max(sel_start, sel_end)
+            start_idx = max(0, lo - view_start)
+            end_idx = min(width - 1, hi - view_start)
+            if end_idx < 0 or start_idx > width - 1:
+                return
+
+        for i in range(start_idx, end_idx + 1):
+            char = visible[i] if i < len(visible) else " "
+            _safe_addstr(self.stdscr, screen_row, i, char, curses.A_STANDOUT)
+
+    def _clear_body_visual(self) -> None:
+        self._body_visual_mode = ""
+        self._body_visual_anchor_row = None
+        self._body_visual_anchor_col = None
+
+    def _body_visual_bounds_for_row(
+        self, row: int, line_len: int
+    ) -> tuple[int, int]:
+        """Return inclusive [start, end] bounds for one row in VISUAL-CHAR mode."""
+        anchor_row = self._body_visual_anchor_row
+        anchor_col = self._body_visual_anchor_col
+        if anchor_row is None or anchor_col is None:
+            return (0, -1)
+        cur_row = self._body_row
+        cur_col = self._body_lines[cur_row].pos
+        if line_len <= 0:
+            return (0, -1)
+        last = line_len - 1
+
+        if anchor_row == cur_row:
+            lo = min(anchor_col, cur_col)
+            hi = max(anchor_col, cur_col)
+            return (max(0, min(lo, last)), max(0, min(hi, last)))
+
+        top = min(anchor_row, cur_row)
+        bottom = max(anchor_row, cur_row)
+        if row < top or row > bottom:
+            return (0, -1)
+        if row == top:
+            start = anchor_col if anchor_row == top else cur_col
+            return (max(0, min(start, last)), last)
+        if row == bottom:
+            end = cur_col if cur_row == bottom else anchor_col
+            return (0, max(0, min(end, last)))
+        return (0, last)
+
+    def _body_visual_text(self) -> str:
+        if not self._body_visual_mode:
+            return ""
+        anchor_row = self._body_visual_anchor_row or 0
+        top = min(anchor_row, self._body_row)
+        bottom = max(anchor_row, self._body_row)
+        out: list[str] = []
+        for row in range(top, bottom + 1):
+            if row >= len(self._body_lines):
+                break
+            text = self._body_lines[row].value
+            if self._body_visual_mode == "line":
+                out.append(text)
+                continue
+            start_col, end_col = self._body_visual_bounds_for_row(row, len(text))
+            if start_col <= end_col:
+                out.append(text[start_col:end_col + 1])
+        return "\n".join(out)
+
+    def _delete_body_visual_selection(self) -> None:
+        if not self._body_visual_mode:
+            return
+        anchor_row = self._body_visual_anchor_row or 0
+        cur_row = self._body_row
+        top = min(anchor_row, cur_row)
+        bottom = max(anchor_row, cur_row)
+
+        if self._body_visual_mode == "line":
+            del self._body_lines[top:bottom + 1]
+            if not self._body_lines:
+                self._body_lines = [LineEditor("")]
+            self._body_row = min(top, len(self._body_lines) - 1)
+            self._body_lines[self._body_row].pos = min(
+                self._body_lines[self._body_row].pos,
+                len(self._body_lines[self._body_row].chars),
+            )
+            return
+
+        anchor_col = self._body_visual_anchor_col or 0
+        cur_col = self._body_lines[cur_row].pos
+        if (cur_row, cur_col) < (anchor_row, anchor_col):
+            start_row, start_col = cur_row, cur_col
+            end_row, end_col = anchor_row, anchor_col
+        else:
+            start_row, start_col = anchor_row, anchor_col
+            end_row, end_col = cur_row, cur_col
+
+        start_text = self._body_lines[start_row].value
+        end_text = self._body_lines[end_row].value
+        if start_text:
+            start_col = max(0, min(start_col, len(start_text) - 1))
+        else:
+            start_col = 0
+        if end_text:
+            end_col = max(0, min(end_col, len(end_text) - 1))
+        else:
+            end_col = -1
+
+        if start_row == end_row:
+            text = self._body_lines[start_row].value
+            if text and end_col >= start_col:
+                self._body_lines[start_row].value = (
+                    text[:start_col] + text[end_col + 1:]
+                )
+                self._body_lines[start_row].pos = min(
+                    start_col, len(self._body_lines[start_row].chars)
+                )
+            return
+
+        prefix = self._body_lines[start_row].value[:start_col]
+        suffix = end_text[end_col + 1:] if end_col >= 0 else end_text
+        merged = LineEditor(prefix + suffix, insert_mode=False)
+        merged.pos = len(prefix)
+        self._body_lines[start_row:end_row + 1] = [merged]
+        self._body_row = start_row
+
     def handle_key(self, key: int) -> str | None:
         """Returns 'send', 'cancel', or None to keep composing."""
         ch = _key_to_char(key)
@@ -613,6 +915,52 @@ class ComposePanel:
 
         if self._mode == "CMD":
             return self._cmd_key(key, ch)
+
+        # Header autocomplete numeric-pick mode:
+        # Ctrl+Tab enters suggestion-focus mode; 1-9 accepts; Esc cancels.
+        if not self._is_body():
+            field_name = _COMPOSE_FIELDS[self._current_field][0]
+            if (
+                field_name in ("de", "al", "cc", "bcc")
+                and self._complete_list
+                and key in (curses.KEY_BTAB, _TAB)
+            ):
+                self._autocomplete_pick_mode = True
+                self._autocomplete_pick_buf = ""
+                self._set_status("Numer-elekto aktiva: tajpu 1-9 aŭ Esc por nuligi.")
+                return None
+            if self._autocomplete_pick_mode:
+                if key == _ESC:
+                    self._autocomplete_pick_mode = False
+                    self._autocomplete_pick_buf = ""
+                    self._set_status("Numer-elekto nuligita.", transient=True)
+                    return None
+                if ch and ch in "123456789":
+                    picked = int(ch)
+                    self._autocomplete_pick_buf = ch
+                    if picked > len(self._complete_list):
+                        self._set_status("Numero ekster intervalo.", transient=True)
+                        return None
+                    chosen = self._complete_list[picked - 1]
+                    if ed is not None and ed.mode != "NORMAL":
+                        ed.mode = "NORMAL"
+                    if field_name in ("al", "cc", "bcc"):
+                        parts = ed.value.split(",") if ed is not None else [""]
+                        parts[-1] = (" " + chosen) if len(parts) > 1 else chosen
+                        merged = ",".join(parts).strip()
+                        if merged and not merged.endswith(","):
+                            merged += ", "
+                        if ed is not None:
+                            ed.value = merged
+                    elif ed is not None:
+                        ed.value = chosen
+                    self._autocomplete_pick_mode = False
+                    self._autocomplete_pick_buf = ""
+                    self._complete_list = []
+                    self._complete_idx = -1
+                    self._set_status("Propono akceptita.", transient=True)
+                    return None
+                return None
 
         # Global shortcuts
         if key == _CTRL_C or key == _CTRL_D:
@@ -631,8 +979,10 @@ class ComposePanel:
             if ed is not None and ed.mode == "INSERT":
                 ed.handle_key(key)
             else:
-                self._status = "Uzu :wq por sendi aŭ :q por nuligi."
+                self._set_status("Uzu :wq por sendi aŭ :q por nuligi.", transient=True)
             self._complete_list = []
+            self._autocomplete_pick_mode = False
+            self._autocomplete_pick_buf = ""
             self._dd_pending = False
             return None
 
@@ -640,19 +990,26 @@ class ComposePanel:
         if key == _TAB:
             self._current_field = (self._current_field + 1) % len(_COMPOSE_FIELDS)
             self._complete_list = []
+            self._autocomplete_pick_mode = False
+            self._autocomplete_pick_buf = ""
             return None
         if key == curses.KEY_BTAB:
             self._current_field = (self._current_field - 1) % len(_COMPOSE_FIELDS)
             self._complete_list = []
+            self._autocomplete_pick_mode = False
+            self._autocomplete_pick_buf = ""
             return None
         if ch == "m" and ed is not None and ed.mode == "NORMAL":
             self._markdown_enabled = not self._markdown_enabled
-            self._status = (
+            self._set_status(
                 "[✓] Markdown aktiva"
                 if self._markdown_enabled
-                else "[✓] Markdown malaktiva"
+                else "[✓] Markdown malaktiva",
+                transient=True,
             )
             return None
+        if key == _CTRL_A:
+            return "prompt_attachment"
 
         # Body multiline handling
         if self._is_body():
@@ -691,26 +1048,68 @@ class ComposePanel:
             self._current_field = (self._current_field + 1) % len(_COMPOSE_FIELDS)
             return None
 
-        # Autocomplete for al/cc/bcc fields
+        # Autocomplete for sender/recipient fields
         field_name = _COMPOSE_FIELDS[self._current_field][0]
-        if field_name in ("al", "cc", "bcc") and self._completer:
-            if ch and ch.isprintable():
-                ed.handle_key(key)
-                partial = ed.value.split(",")[-1].strip()
-                if len(partial) >= 2:
-                    self._complete_list = self._completer(partial)
+        if field_name == "prioritato":
+            if ch in ("h", "l", "j", "k", " "):
+                opts = ["malalta", "normala", "alta"]
+                cur = (ed.value or "normala").strip().lower()
+                if cur not in opts:
+                    cur = "normala"
+                idx = opts.index(cur)
+                if ch in ("h", "k"):
+                    idx = max(0, idx - 1)
                 else:
-                    self._complete_list = []
+                    idx = min(len(opts) - 1, idx + 1)
+                ed.value = opts[idx]
+                self._set_status("Prioritato: malalta/normala/alta", transient=True)
+            return None
+        if field_name == "legokonfirmo":
+            if ch in (" ", "j", "J", "y", "Y"):
+                ed.value = "jes"
+            elif ch in ("n", "N"):
+                ed.value = "ne"
+            elif key in (_ENTER, _CR):
+                ed.value = "ne" if (ed.value or "").strip().lower() == "jes" else "jes"
+            self._set_status("Legokonfirmo: jes/ne", transient=True)
+            return None
+        active_completer: Callable[[str], list[str]] | None = None
+        if field_name == "de":
+            active_completer = self._from_completer
+        elif field_name in ("al", "cc", "bcc"):
+            active_completer = self._completer
+        if active_completer:
+            if key == curses.KEY_UP and self._complete_list:
+                self._complete_idx = (self._complete_idx - 1) % len(
+                    self._complete_list
+                )
+                chosen = self._complete_list[self._complete_idx]
+                if field_name in ("al", "cc", "bcc"):
+                    parts = ed.value.split(",")
+                    parts[-1] = " " + chosen
+                    ed.value = ",".join(parts)
+                else:
+                    ed.value = chosen
                 return None
             if key == curses.KEY_DOWN and self._complete_list:
                 self._complete_idx = (self._complete_idx + 1) % len(
                     self._complete_list
                 )
                 chosen = self._complete_list[self._complete_idx]
-                parts = ed.value.split(",")
-                parts[-1] = " " + chosen
-                ed.value = ",".join(parts)
+                if field_name in ("al", "cc", "bcc"):
+                    parts = ed.value.split(",")
+                    parts[-1] = " " + chosen
+                    ed.value = ",".join(parts)
+                else:
+                    ed.value = chosen
                 return None
+            ed.handle_key(key)
+            partial = ed.value.split(",")[-1].strip()
+            if len(partial) >= 1:
+                self._complete_list = active_completer(partial)
+            else:
+                self._complete_list = []
+            return None
 
         ed.handle_key(key)
         return None
@@ -720,15 +1119,28 @@ class ComposePanel:
             cmd = self._cmd_buf.strip()
             self._mode = "FIELD"
             self._cmd_buf = ""
-            if cmd in ("wq", "send"):
-                return "send"
+            if cmd in ("wq",):
+                return "draft_quit"
             if cmd in ("w", "draft", "skizo"):
-                return "draft"
+                return "draft_stay"
+            if cmd in ("send",):
+                return "send"
             if cmd in ("html",):
                 return "html_preview"
+            if cmd in ("a", "aldoni-aldonajon"):
+                return "prompt_attachment"
+            if cmd.startswith("aldoni "):
+                ok, msg = self.add_attachment(cmd.split(" ", 1)[1].strip())
+                self._set_status(msg, transient=True)
+                return None
+            if cmd in ("h", "help", "helpo"):
+                return "help"
             if cmd in ("q", "q!", "quit", "cancel"):
                 return "cancel"
-            self._status = f"Nekonata komando: :{cmd} (uzu :wq, :w aŭ :q)"
+            self._set_status(
+                f"Nekonata komando: :{cmd} (uzu :wq, :w, :send, :h aŭ :q)",
+                transient=True,
+            )
             return None
         if _is_backspace(key):
             if self._cmd_buf:
@@ -752,6 +1164,28 @@ class ComposePanel:
         n_lines = len(self._body_lines)
         h, _ = self.stdscr.getmaxyx()
         body_page_h = max(1, h - len(_COMPOSE_FIELDS) - 3)
+        self._body_prev_ch = self._body_prev_ch if ch == "g" else ""
+
+        def _move_to_row(target_row: int) -> None:
+            prev_col = self._body_lines[self._body_row].pos
+            self._body_row = max(0, min(target_row, n_lines - 1))
+            cur = self._body_lines[self._body_row]
+            cur.pos = min(prev_col, len(cur.chars))
+
+        # Start/stop body visual modes (cross-line).
+        if ed.mode == "NORMAL" and ch == "v":
+            self._body_visual_mode = "char"
+            self._body_visual_anchor_row = self._body_row
+            self._body_visual_anchor_col = ed.pos
+            return None
+        if ed.mode == "NORMAL" and ch == "V":
+            self._body_visual_mode = "line"
+            self._body_visual_anchor_row = self._body_row
+            self._body_visual_anchor_col = ed.pos
+            return None
+        if key == _ESC and self._body_visual_mode:
+            self._clear_body_visual()
+            return None
 
         if key in (_ENTER, _CR):
             if ed.mode == "INSERT":
@@ -776,13 +1210,15 @@ class ComposePanel:
                 self._body_row -= 1
                 return None
 
-        if key == curses.KEY_UP and self._body_row > 0:
+        if key == curses.KEY_UP:
             self._dd_pending = False
-            self._body_row -= 1
+            if self._body_row > 0:
+                self._body_row -= 1
             return None
-        if key == curses.KEY_DOWN and self._body_row < n_lines - 1:
+        if key == curses.KEY_DOWN:
             self._dd_pending = False
-            self._body_row += 1
+            if self._body_row < n_lines - 1:
+                self._body_row += 1
             return None
         if key == curses.KEY_PPAGE or key == _CTRL_B:
             self._dd_pending = False
@@ -801,6 +1237,25 @@ class ComposePanel:
         if ch == "k" and ed.mode == "NORMAL" and self._body_row > 0:
             self._dd_pending = False
             self._body_row -= 1
+            return None
+        if ch == "j" and self._body_visual_mode and self._body_row < n_lines - 1:
+            self._dd_pending = False
+            _move_to_row(self._body_row + 1)
+            return None
+        if ch == "k" and self._body_visual_mode and self._body_row > 0:
+            self._dd_pending = False
+            _move_to_row(self._body_row - 1)
+            return None
+        if ch == "g" and (self._body_visual_mode or ed.mode == "NORMAL"):
+            if self._body_prev_ch == "g":
+                self._body_prev_ch = ""
+                _move_to_row(0)
+                return None
+            self._body_prev_ch = "g"
+            return None
+        if ch == "G" and (self._body_visual_mode or ed.mode == "NORMAL"):
+            self._body_prev_ch = ""
+            _move_to_row(n_lines - 1)
             return None
 
         # Ctrl+→ cross-line: continue to next line when at end of current
@@ -842,6 +1297,45 @@ class ComposePanel:
             return None
 
         self._dd_pending = False
+        if self._body_visual_mode:
+            cur = self._body_lines[self._body_row]
+            cur_text = cur.value
+            cur_pos = cur.pos
+            if ch == "h" or key == curses.KEY_LEFT:
+                cur.pos = max(0, cur_pos - 1)
+                return None
+            if ch == "l" or key == curses.KEY_RIGHT:
+                cur.pos = min(len(cur_text), cur_pos + 1)
+                return None
+            if _is_ctrl_left(key) or ch == "b":
+                cur.pos = _word_left(cur_text, cur_pos)
+                return None
+            if _is_ctrl_right(key) or ch == "w":
+                cur.pos = _word_right(cur_text, cur_pos)
+                return None
+            if ch == "0":
+                cur.pos = 0
+                return None
+            if ch == "$":
+                cur.pos = max(0, len(cur_text) - 1)
+                return None
+            if ch == "y":
+                try:
+                    import pyperclip
+                    text = self._body_visual_text()
+                    if text:
+                        pyperclip.copy(text)
+                except ImportError:
+                    pass
+                self._clear_body_visual()
+                self._set_status("Elekto kopiita.", transient=True)
+                return None
+            if ch == "d":
+                self._delete_body_visual_selection()
+                self._clear_body_visual()
+                self._set_status("Elekto forigita.", transient=True)
+                return None
+            return None
         ed.handle_key(key)
         return None
 
@@ -1000,6 +1494,7 @@ class MessagePanel:
         self._forigita: bool = False
         self._search_query: str = ""
         self._all_messages: list[dict] = []
+        self._selected_ids: set[int] = set()
 
     def load(
         self,
@@ -1061,12 +1556,20 @@ class MessagePanel:
             unread = not msg.get("legita", False)
             stelo = msg.get("stelo", False)
             spamo = msg.get("spamo", False)
+            legokonfirmo_petita = "read-receipt-requested" in (
+                msg.get("etikedoj") or []
+            )
+            selected = int(msg.get("id", -1)) in self._selected_ids
 
             flag = _fmt_priority(msg.get("prioritato"))
+            if selected:
+                flag = "✓"
             if stelo:
                 flag = "★"
             if spamo:
                 flag = "⚠"
+            elif legokonfirmo_petita:
+                flag = "↵"
 
             sender = (msg.get("de") or "")[:22]
             subject = msg.get("subjekto") or ""
@@ -1092,6 +1595,9 @@ class MessagePanel:
         _safe_addstr(win, h - 1, 0, count_str[:w - 1].ljust(w - 1), curses.A_DIM)
 
         win.noutrefresh()
+
+    def current_index(self) -> int:
+        return self._cursor
 
     def handle_key(self, key: int) -> str | None:
         ch = chr(key) if 0 < key < 256 else ""
@@ -1150,15 +1656,23 @@ def _message_to_lines(msg: dict) -> list[str]:
     prio = msg.get("prioritato", 5)
     if prio != 5:
         lines.append(f"  Prioritato: {prio}")
+    if "read-receipt-requested" in (msg.get("etikedoj") or []):
+        lines.append("  Legokonfirmo petita: jes")
     aldonajoj = msg.get("aldonajoj") or []
     if aldonajoj:
         lines.append(f"  Aldonaĵoj: {', '.join(aldonajoj)}")
     lines.append("  " + "─" * 60)
     lines.append("")
 
-    body = msg.get("korpo") or ""
+    body = _unwrap_wrapped_mail_urls(msg.get("korpo") or "")
     for line in body.split("\n"):
-        for wrapped in (textwrap.wrap(line, 76) if line.strip() else [""]):
+        for wrapped in (
+            textwrap.wrap(
+                line, 76, break_long_words=False, break_on_hyphens=False
+            )
+            if line.strip()
+            else [""]
+        ):
             lines.append("  " + wrapped)
 
     return lines
@@ -1345,8 +1859,8 @@ class MessageReader:
                 )
             else:
                 line2 = (
-                    "r:respondi  R:respondi-ciujn  f:plusendi  x:forigi  D:movi  "
-                    "Y:kopii  a:aldonaĵoj  :h/:help  q:reen"
+                    "r/R/f:x  D/Y:movi/kopii  i/I/a/A:redakti-skizon  "
+                    "Ctrl+A:aldonaĵoj  :h/:help  q:reen"
                 )
             status_lines = [line1, line2]
         
@@ -1427,6 +1941,8 @@ class MessageReader:
                     return "html"
                 if cmd in ("h", "help", "helpo"):
                     return "help"
+                if cmd in ("q", "quit"):
+                    return "quit"
                 return None
             if _is_backspace(key):
                 self._cmd_buf = self._cmd_buf[:-1]
@@ -1442,7 +1958,7 @@ class MessageReader:
             self._pane_focus = "conv" if self._pane_focus == "body" else "body"
             return None
         if self._pane_focus == "conv":
-            if ch == "q" or key in (_CTRL_C, _CTRL_D):
+            if key in (_CTRL_C, _CTRL_D):
                 self._prev_ch = ""
                 return "quit"
             if key == _ESC:
@@ -1476,7 +1992,7 @@ class MessageReader:
         if n:
             self._row = min(self._row, n - 1)
 
-        if ch == "q" or key in (_CTRL_C, _CTRL_D):
+        if key in (_CTRL_C, _CTRL_D):
             self._prev_ch = ""
             return "quit"
         if key == _ESC:
@@ -1599,6 +2115,18 @@ class MessageReader:
             if self._visual_mode:
                 return None
             return "move"
+        elif ch == "i":
+            self._prev_ch = ""
+            return "edit_draft"
+        elif ch == "I":
+            self._prev_ch = ""
+            return "edit_draft_top"
+        elif ch == "a":
+            self._prev_ch = ""
+            return "edit_draft_after"
+        elif ch == "A":
+            self._prev_ch = ""
+            return "edit_draft_end"
         elif ch == "D":
             self._prev_ch = ""
             # Uppercase D always moves message, even in VISUAL mode
@@ -1625,10 +2153,14 @@ class MessageReader:
             self._prev_ch = ""
             # Uppercase Y always copies message, even in VISUAL mode
             return "copy"
-        elif ch == "a":
+        elif key == _CTRL_A:
             self._prev_ch = ""
             # List/open attachments
             return "attachments"
+        elif ch == "e":
+            self._prev_ch = ""
+            # Legacy key for draft edit
+            return "edit_draft"
 
         self._prev_ch = ch
         return None
@@ -1734,6 +2266,7 @@ class RetpostoTUI:
         add_spam_block: Callable[[str], None],
         is_spam: Callable[[str], bool],
         ensure_folder: Callable[..., int],
+        find_drafts_folder: Callable[[int], int | None] | None = None,
         copy_message: Callable[[int, int, int], int | None] | None = None,
         move_account_order: Callable[[int, int], bool] | None = None,
         rename_folder: Callable[[int, str], None] | None = None,
@@ -1764,6 +2297,7 @@ class RetpostoTUI:
         self._add_spam_block = add_spam_block
         self._is_spam = is_spam
         self._ensure_folder = ensure_folder
+        self._find_drafts_folder = find_drafts_folder
         self._copy_message = copy_message
         self._move_account_order = move_account_order
         self._rename_folder = rename_folder
@@ -1795,6 +2329,8 @@ class RetpostoTUI:
         self._fetching: bool = False
         self._last_folder_target: tuple[str, int] | None = None
         self._pending_prefix: str = ""
+        self._selected_message_ids: set[int] = set()
+        self._message_visual_anchor: int | None = None
 
         # Initial load
         self._load_initial()
@@ -1895,6 +2431,7 @@ class RetpostoTUI:
             return
 
         self._folder_panel.draw(folder_win, self._focus == "folder")
+        self._message_panel._selected_ids = set(self._selected_message_ids)
         self._message_panel.draw(list_win, self._focus == "list")
 
         # Vertical divider
@@ -1935,9 +2472,9 @@ class RetpostoTUI:
             status = (
                 self._current_status()
                 or (
-                    "NORMAL  a:aldoni-konton  h:helpo  q:eliri  |  : komando"
+                    "NORMAL  a:aldoni-konton  h:helpo  :q:eliri  |  : komando"
                     if not accounts
-                    else "NORMAL  a h q  |  : komando  |  / serĉi"
+                    else "NORMAL  a h :q  |  : komando  |  / serĉi"
                 )
             )
         _safe_addstr(
@@ -1952,16 +2489,25 @@ class RetpostoTUI:
                 return (
                     "j/k:↕  Enter:malfermi  Tab:mesaĝoj  m/M:movi-konton  "
                     "K:dosierujoj  nl/ns:krei-dosierujon  /:serĉi  "
-                    ":h/:help  q:eliri"
+                    ":h/:help  :q:eliri"
                 )
             return (
                 "j/k:↕  Enter:malfermi  Tab:mesaĝoj  K:dosierujoj  "
-                "nl/ns:krei-dosierujon  /:serĉi  :h/:help  q:eliri"
+                "nl/ns:krei-dosierujon  /:serĉi  :h/:help  :q:eliri"
+            )
+        if self._is_outbox_context():
+            return (
+                "j/k:↕  Enter:legi  Shift+Tab:kontoj  "
+                "SPACE/v:elekti  Esc:nuligi-elekton  "
+                "Ctrl+S:sendi-elektitajn  Ctrl+Shift+S:sendi-ĉiujn  "
+                "x:forigi  D:movi  Y:kopii  /:serĉi  :h/:help"
             )
         return (
             "j/k:↕  Enter:legi  Shift+Tab:kontoj  c/r/R/f:komponi  "
-            "x:forigi  D:movi  Y:kopii  s:spamo  S:spamo-listo  *:stelo  "
-            "p:preni  /:serĉi  :h/:help"
+            "SPACE/v:elekti  Esc:nuligi-elekton  m:marki-legita  "
+            "x:forigi  D:movi  Y:kopii  "
+            "s:spamo  S:spamo-listo  *:stelo  "
+            "p:preni  /:serĉi  :h/:help  (De/Prioritato/Legokonfirmo en komponilo)"
         )
 
     def _handle_key(self, key: int) -> bool:
@@ -1971,10 +2517,20 @@ class RetpostoTUI:
             return self._cmd_key(key, ch)
 
         # Global keys
-        if ch == "q" or key in (_CTRL_C, _CTRL_D):
+        if key in (_CTRL_C, _CTRL_D):
             return True
         if key == _ESC:
-            self._set_status("Premu q por eliri.", transient=True)
+            if (
+                self._focus == "list"
+                and (
+                    self._selected_message_ids
+                    or self._message_visual_anchor is not None
+                )
+            ):
+                self._clear_message_selection()
+                self._set_status("Mesaĝ-elekto nuligita.", transient=True)
+                return False
+            self._set_status("Uzu :q por eliri.", transient=True)
             return False
         if ch == ":":
             self._mode = "COMMAND"
@@ -2041,8 +2597,14 @@ class RetpostoTUI:
         elif ch == "s" and self._focus == "list":
             self._action_spam()
             return False
+        elif ch == "m" and self._focus == "list":
+            self._action_mark_read_selected()
+            return False
         elif ch == "S":
-            self._show_spam_pane()
+            if self._focus == "list" and self._is_outbox_context():
+                self._action_resend_all_outbox()
+            else:
+                self._show_spam_pane()
             return False
         elif ch == "K" and self._focus == "folder":
             self._show_folder_manager()
@@ -2064,6 +2626,15 @@ class RetpostoTUI:
             return False
         elif ch and ch in "123456789" and self._focus == "list":
             self._action_priority(int(ch))
+            return False
+        elif key == _CTRL_S and self._focus == "list" and self._is_outbox_context():
+            self._action_resend_selected_outbox()
+            return False
+        elif ch == " " and self._focus == "list":
+            self._toggle_current_message_selection()
+            return False
+        elif ch == "v" and self._focus == "list":
+            self._toggle_message_visual_range_selection()
             return False
 
         # Panel-specific keys
@@ -2109,7 +2680,17 @@ class RetpostoTUI:
                 self._move_selected_account(1)
         else:
             # List panel keys
+            prev_cursor = self._message_panel.current_index()
             result = self._message_panel.handle_key(key)
+            if self._message_visual_anchor is not None:
+                new_cursor = self._message_panel.current_index()
+                if new_cursor != prev_cursor:
+                    start = min(prev_cursor, new_cursor)
+                    end = max(prev_cursor, new_cursor)
+                    msgs = self._message_panel._messages
+                    for i in range(start, end + 1):
+                        if 0 <= i < len(msgs):
+                            self._selected_message_ids.add(int(msgs[i]["id"]))
             if result == "open":
                 self._open_message()
                 return False
@@ -2246,6 +2827,22 @@ class RetpostoTUI:
             elif result == "attachments":
                 self._action_attachments(msg)
                 continue
+            elif result == "edit_draft":
+                if self._edit_draft(msg, placement="cursor") == "done":
+                    return
+                continue
+            elif result == "edit_draft_top":
+                if self._edit_draft(msg, placement="line_start") == "done":
+                    return
+                continue
+            elif result == "edit_draft_after":
+                if self._edit_draft(msg, placement="after_cursor") == "done":
+                    return
+                continue
+            elif result == "edit_draft_end":
+                if self._edit_draft(msg, placement="line_end") == "done":
+                    return
+                continue
             elif result == "move":
                 self._action_move()
             elif result == "copy":
@@ -2318,7 +2915,8 @@ class RetpostoTUI:
         self._set_status("[✓] HTML-antaŭvido malfermita.", transient=True)
 
     def _compose_new(self) -> None:
-        self._run_compose({})
+        default_from = self._default_compose_from_address()
+        self._run_compose({"de": default_from})
 
     def _compose_reply(self, msg: dict | None = None) -> str:
         if msg is None:
@@ -2326,8 +2924,8 @@ class RetpostoTUI:
         if not msg:
             self._status_msg = "Neniu elektita mesaĝo."
             return "done"
-        accounts = self._load_accounts()
-        sig = self._load_signature(accounts[0]) if accounts else ""
+        acc = self._selected_account_for_compose()
+        sig = self._load_signature(acc)[0] if acc else ""
         body_quote = "\n".join(
             "> " + line for line in (msg.get("korpo") or "").split("\n")
         )
@@ -2339,11 +2937,13 @@ class RetpostoTUI:
             x for x in [msg.get("references_hdr"), msg.get("message_id")] if x
         ).strip()
         return self._run_compose({
+            "de": self._default_compose_from_address(),
             "al": ", ".join(to_targets),
             "subjekto": "Re: " + (msg.get("subjekto") or ""),
             "korpo": f"\n--- Originala mesaĝo ---\n{body_quote}\n{sig}",
             "_in_reply_to": msg.get("message_id") or "",
             "_references_hdr": refs,
+            "_focus_body": "1",
         })
 
     def _compose_reply_all(self, msg: dict | None = None) -> str:
@@ -2352,8 +2952,8 @@ class RetpostoTUI:
         if not msg:
             self._status_msg = "Neniu elektita mesaĝo."
             return "done"
-        accounts = self._load_accounts()
-        sig = self._load_signature(accounts[0]) if accounts else ""
+        acc = self._selected_account_for_compose()
+        sig = self._load_signature(acc)[0] if acc else ""
         body_quote = "\n".join(
             "> " + line for line in (msg.get("korpo") or "").split("\n")
         )
@@ -2366,12 +2966,14 @@ class RetpostoTUI:
         ).strip()
         return self._run_compose(
             {
+                "de": self._default_compose_from_address(),
                 "al": ", ".join(to_targets),
                 "cc": ", ".join(cc_targets),
                 "subjekto": "Re: " + (msg.get("subjekto") or ""),
                 "korpo": f"\n--- Originala mesaĝo ---\n{body_quote}\n{sig}",
                 "_in_reply_to": msg.get("message_id") or "",
                 "_references_hdr": refs,
+                "_focus_body": "1",
             }
         )
 
@@ -2422,32 +3024,86 @@ class RetpostoTUI:
             "> " + line for line in (msg.get("korpo") or "").split("\n")
         )
         return self._run_compose({
+            "de": self._default_compose_from_address(),
             "subjekto": "Fwd: " + (msg.get("subjekto") or ""),
             "korpo": f"\n\n--- Plusendita mesaĝo ---\n{body_fwd}",
+            "_focus_body": "1",
         })
 
-    def _load_signature(self, acc: dict) -> str:
-        """Load signature text for the given account (file path or URL)."""
+    def _selected_account_for_compose(self) -> dict | None:
+        sel = self._folder_panel.selected() or {}
+        accounts = self._load_accounts()
+        if sel.get("acc_id") is not None:
+            return next(
+                (a for a in accounts if int(a.get("id", -1)) == int(sel["acc_id"])),
+                accounts[0] if accounts else None,
+            )
+        msg = self._message_panel.selected()
+        if msg and msg.get("konto_id") is not None:
+            return next(
+                (
+                    a
+                    for a in accounts
+                    if int(a.get("id", -1)) == int(msg.get("konto_id", -1))
+                ),
+                accounts[0] if accounts else None,
+            )
+        return accounts[0] if accounts else None
+
+    def _default_compose_from_address(self) -> str:
+        acc = self._selected_account_for_compose()
+        return str((acc or {}).get("retposto") or "")
+
+    def _extract_email_address(self, raw: str) -> str:
+        text = raw.strip()
+        if "<" in text and ">" in text:
+            inner = text.split("<", 1)[1].split(">", 1)[0].strip()
+            return inner.lower()
+        return text.lower()
+
+    def _split_compose_recipients(self, raw: str) -> list[str]:
+        out: list[str] = []
+        for part in raw.split(","):
+            item = self._extract_email_address(part)
+            if item and "@" in item:
+                out.append(item)
+        return out
+
+    def _load_signature(self, acc: dict) -> tuple[str, str | None]:
+        """Load signature as (plain_text, optional_html)."""
         import urllib.request
         from pathlib import Path
 
+        def _looks_like_html(text: str) -> bool:
+            return bool(re.search(r"<[a-zA-Z][^>]*>", text))
+
+        def _strip_html(text: str) -> str:
+            without_tags = re.sub(r"<[^>]+>", "", text)
+            return html_mod.unescape(without_tags)
+
         sig_src = acc.get("subskribo") or ""
         if not sig_src:
-            return ""
+            return ("", None)
         sig_src = sig_src.strip()
         try:
             if sig_src.startswith("https://"):
                 with urllib.request.urlopen(sig_src, timeout=5) as resp:  # noqa: S310
-                    return "\n\n-- \n" + resp.read().decode("utf-8", errors="replace")
+                    content = resp.read().decode("utf-8", errors="replace")
+                    if _looks_like_html(content):
+                        return ("\n\n-- \n" + _strip_html(content), content)
+                    return ("\n\n-- \n" + content, None)
             if sig_src.startswith("http://"):
                 # HTTP (non-TLS) signatures are intentionally rejected for security.
-                return ""
+                return ("", None)
             p = Path(sig_src).expanduser()
             if p.exists():
-                return "\n\n-- \n" + p.read_text(encoding="utf-8", errors="replace")
+                content = p.read_text(encoding="utf-8", errors="replace")
+                if p.suffix.lower() in (".html", ".htm") or _looks_like_html(content):
+                    return ("\n\n-- \n" + _strip_html(content), content)
+                return ("\n\n-- \n" + content, None)
         except Exception:
             pass
-        return ""
+        return ("", None)
 
     def _run_compose(self, initial: dict[str, str]) -> str:
         accounts = self._load_accounts()
@@ -2455,20 +3111,71 @@ class RetpostoTUI:
             self._status_msg = "Neniuj kontoj. Uzu: retposto aldoni-konton"
             return "done"
 
-        acc = accounts[0]
+        acc = self._selected_account_for_compose() or accounts[0]
 
         # Prepend signature if configured
-        if "korpo" not in initial or not initial.get("korpo", "").strip():
-            sig = self._load_signature(acc)
+        sig_text, sig_html = self._load_signature(acc)
+        if (
+            ("korpo" not in initial or not initial.get("korpo", "").strip())
+            and not sig_html
+        ):
+            sig = sig_text
             if sig:
                 initial = {**initial, "korpo": (initial.get("korpo") or "") + sig}
 
         def _completer(partial: str) -> list[str]:
-            return [
-                c["retposto"] for c in self._find_contact(partial)
-            ]
+            suggestions: list[str] = []
+            for c in self._find_contact(partial):
+                addr = str(c.get("retposto") or "").strip()
+                if not addr:
+                    continue
+                name = str(c.get("nomo") or "").strip()
+                label = f"{name} <{addr}>" if name else addr
+                if label not in suggestions:
+                    suggestions.append(label)
+            return suggestions
 
-        panel = ComposePanel(self.stdscr, initial, _completer)
+        def _from_completer(partial: str) -> list[str]:
+            suggestions: list[str] = []
+            partial_low = partial.lower()
+            for item in accounts:
+                addr = str(item.get("retposto") or "").strip()
+                if not addr:
+                    continue
+                if partial_low and partial_low not in addr.lower():
+                    continue
+                name = str(item.get("nomo") or "").strip()
+                label = f"{name} <{addr}>" if name else addr
+                if label not in suggestions:
+                    suggestions.append(label)
+            return suggestions
+
+        default_from = str(initial.get("de") or "").strip() or (
+            str(acc.get("retposto") or "").strip()
+        )
+        compose_initial = {**initial, "de": default_from}
+        panel = ComposePanel(
+            self.stdscr,
+            compose_initial,
+            _completer,
+            _from_completer,
+        )
+        if str(initial.get("_focus_body") or "").strip() and panel._body_lines:
+            panel._current_field = len(panel._field_names()) - 1
+            panel._body_row = 0
+            panel._body_lines[0].mode = "INSERT"
+        placement = str(initial.get("_edit_placement") or "").strip()
+        if placement and panel._body_lines:
+            panel._current_field = len(panel._field_names()) - 1
+            panel._body_row = 0
+            body_ed = panel._body_lines[0]
+            body_ed.mode = "INSERT"
+            if placement == "line_start":
+                body_ed.pos = 0
+            elif placement == "line_end":
+                body_ed.pos = len(body_ed.chars)
+            elif placement == "after_cursor":
+                body_ed.pos = min(len(body_ed.chars), body_ed.pos + 1)
         sending = False
         try:
             curses.curs_set(0)
@@ -2482,33 +3189,84 @@ class RetpostoTUI:
                 if result == "cancel":
                     self._set_status("Nuligita.", transient=True)
                     return "cancel"
+                if result == "help":
+                    self._show_help_screen()
+                    continue
+                if result == "prompt_attachment":
+                    path = self._prompt_compose_inline(
+                        panel, "Aldonaĵo dosier-vojo"
+                    )
+                    if not path:
+                        panel._set_status("Nuligita.", transient=True)
+                        continue
+                    ok, msg = panel.add_attachment(path)
+                    panel._set_status(msg, transient=True)
+                    continue
                 if result == "html_preview":
                     vals = panel.get_values()
                     self._open_compose_html_preview(
                         vals, markdown_enabled=panel.markdown_enabled()
                     )
                     continue
-                if result == "draft":
+                if result in ("draft_quit", "draft_stay"):
                     vals = panel.get_values()
-                    al_list = [a.strip() for a in vals["al"].split(",") if a.strip()]
-                    cc_list = [a.strip() for a in vals["cc"].split(",") if a.strip()]
-                    bcc_list = [a.strip() for a in vals["bcc"].split(",") if a.strip()]
-                    folder_id = self._ensure_folder(acc["id"], "Malnetoj", "Drafts")
+                    from_addr = self._extract_email_address(vals["de"])
+                    valid_from = {
+                        str(a.get("retposto") or "").strip().lower() for a in accounts
+                    }
+                    if not from_addr or from_addr not in valid_from:
+                        panel._set_status(
+                            "[!] Nevalida De-adreso. Uzu unu el viaj kontoj.",
+                            transient=True,
+                        )
+                        continue
+                    sender_acc = next(
+                        (
+                            a
+                            for a in accounts
+                            if str(a.get("retposto") or "").strip().lower()
+                            == from_addr
+                        ),
+                        None,
+                    )
+                    if sender_acc is None:
+                        panel._set_status(
+                            "[!] Nevalida De-adreso. Uzu unu el viaj kontoj.",
+                            transient=True,
+                        )
+                        continue
+                    al_list = self._split_compose_recipients(vals["al"])
+                    cc_list = self._split_compose_recipients(vals["cc"])
+                    bcc_list = self._split_compose_recipients(vals["bcc"])
+                    # Try to find existing drafts folder first
+                    folder_id = None
+                    if self._find_drafts_folder:
+                        folder_id = self._find_drafts_folder(sender_acc["id"])
+                    # Fall back to creating "Malnetoj" if no drafts folder found
+                    if folder_id is None:
+                        folder_id = self._ensure_folder(
+                            sender_acc["id"], "Malnetoj", "Drafts"
+                        )
                     msg_id = self._save_message(
                         {
-                            "konto_id": acc["id"],
+                            "konto_id": sender_acc["id"],
                             "dosierujo_id": folder_id,
-                            "de": acc.get("retposto") or "",
+                            "de": sender_acc.get("retposto") or "",
                             "al": al_list,
                             "cc": cc_list,
                             "bcc": bcc_list,
                             "subjekto": vals["subjekto"],
                             "korpo": vals["korpo"],
+                            "prioritato": self._parse_compose_priority(vals),
+                            "etikedoj": (
+                                ["read-receipt-requested"]
+                                if self._compose_read_receipt_requested(vals)
+                                else []
+                            ),
                             "legita": 1,
                             "stelo": 0,
                             "spamo": 0,
                             "forigita": 0,
-                            "prioritato": 5,
                         }
                     )
                     self._set_status(
@@ -2517,15 +3275,42 @@ class RetpostoTUI:
                     )
                     self._folder_panel._refresh_items()
                     self._refresh_list()
-                    return "done"
+                    if result == "draft_quit":
+                        return "done"
+                    continue
                 if result == "send":
                     if sending:
                         panel._status = "[!] Sendado jam en progreso..."
                         continue
                     vals = panel.get_values()
-                    al_list = [a.strip() for a in vals["al"].split(",") if a.strip()]
-                    cc_list = [a.strip() for a in vals["cc"].split(",") if a.strip()]
-                    bcc_list = [a.strip() for a in vals["bcc"].split(",") if a.strip()]
+                    from_addr = self._extract_email_address(vals["de"])
+                    valid_from = {
+                        str(a.get("retposto") or "").strip().lower() for a in accounts
+                    }
+                    if not from_addr or from_addr not in valid_from:
+                        panel._set_status(
+                            "[!] Nevalida De-adreso. Uzu unu el viaj kontoj.",
+                            transient=True,
+                        )
+                        continue
+                    sender_acc = next(
+                        (
+                            a
+                            for a in accounts
+                            if str(a.get("retposto") or "").strip().lower()
+                            == from_addr
+                        ),
+                        None,
+                    )
+                    if sender_acc is None:
+                        panel._set_status(
+                            "[!] Nevalida De-adreso. Uzu unu el viaj kontoj.",
+                            transient=True,
+                        )
+                        continue
+                    al_list = self._split_compose_recipients(vals["al"])
+                    cc_list = self._split_compose_recipients(vals["cc"])
+                    bcc_list = self._split_compose_recipients(vals["bcc"])
                     if not al_list:
                         panel._status = "[!] Aldonu ricevonton (campo 'Al')"
                         continue
@@ -2549,14 +3334,35 @@ class RetpostoTUI:
                                 "[!] Instalu `mistune` por markdown-subteno."
                             )
                             continue
+                    sender_sig_text, sender_sig_html = self._load_signature(sender_acc)
+                    plain_korpo = vals["korpo"]
+                    if sender_sig_text and plain_korpo:
+                        plain_korpo = f"{plain_korpo}{sender_sig_text}"
+                    elif sender_sig_text and not plain_korpo:
+                        plain_korpo = sender_sig_text.lstrip("\n")
+                    if sender_sig_html:
+                        if html_korpo:
+                            html_korpo = (
+                                f"{html_korpo}<br><br><hr>{sender_sig_html}"
+                            )
+                        else:
+                            body_html = html_mod.escape(vals["korpo"]).replace(
+                                "\n", "<br>\n"
+                            )
+                            html_korpo = (
+                                f"{body_html}<br><br><hr>{sender_sig_html}"
+                            )
                     ok = self._send_message(
-                        acc, al_list, vals["subjekto"],
-                        vals["korpo"],
+                        sender_acc, al_list, vals["subjekto"],
+                        plain_korpo,
                         cc_list,
                         bcc_list,
+                        aldonajoj=panel.attachment_paths(),
                         html_korpo=html_korpo,
                         in_reply_to=(initial.get("_in_reply_to") or None),
                         references_hdr=(initial.get("_references_hdr") or None),
+                        prioritato=self._parse_compose_priority(vals),
+                        peti_legokonfirmon=self._compose_read_receipt_requested(vals),
                     )
                     sending = False
                     if ok:
@@ -2565,7 +3371,36 @@ class RetpostoTUI:
                             transient=True,
                         )
                     else:
-                        self._status_msg = "[!] Eraro dum sendado."
+                        # Never lose user content: queue in OUTBOX for retry.
+                        folder_id = self._ensure_folder(
+                            sender_acc["id"], "OUTBOX", "OUTBOX"
+                        )
+                        self._save_message(
+                            {
+                                "konto_id": sender_acc["id"],
+                                "dosierujo_id": folder_id,
+                                "de": sender_acc.get("retposto") or "",
+                                "al": al_list,
+                                "cc": cc_list,
+                                "bcc": bcc_list,
+                                "subjekto": vals["subjekto"],
+                                "korpo": vals["korpo"],
+                                "prioritato": self._parse_compose_priority(vals),
+                                "etikedoj": (
+                                    ["read-receipt-requested"]
+                                    if self._compose_read_receipt_requested(vals)
+                                    else []
+                                ),
+                                "legita": 1,
+                                "stelo": 0,
+                                "spamo": 0,
+                                "forigita": 0,
+                            }
+                        )
+                        self._status_msg = (
+                            "[!] Eraro dum sendado. "
+                            "Mesaĝo konservita en OUTBOX."
+                        )
                     return "done"
         finally:
             try:
@@ -2573,16 +3408,120 @@ class RetpostoTUI:
             except curses.error:
                 pass
 
+    def _parse_compose_priority(self, vals: dict[str, str]) -> int:
+        raw = (vals.get("prioritato") or "").strip()
+        if not raw:
+            return 5
+        raw_low = raw.lower()
+        if raw_low in {"alta", "high", "h"}:
+            return 9
+        if raw_low in {"malalta", "low", "l"}:
+            return 1
+        if raw_low in {"normala", "normal", "n"}:
+            return 5
+        if raw.isdigit():
+            return max(1, min(9, int(raw)))
+        return 5
+
+    def _compose_read_receipt_requested(self, vals: dict[str, str]) -> bool:
+        raw = (vals.get("legokonfirmo") or "").strip().lower()
+        return raw in {"j", "jes", "y", "yes", "1", "true", "on"}
+
+    def _selected_folder_name(self) -> str:
+        sel = self._folder_panel.selected() or {}
+        return str(sel.get("label") or "").strip().lower()
+
+    def _is_outbox_context(self) -> bool:
+        name = self._selected_folder_name()
+        return name in {"outbox", "forirkesto"}
+
+    def _resend_from_outbox(self, msg: dict) -> bool:
+        accounts = self._load_accounts()
+        acc = next(
+            (
+                a
+                for a in accounts
+                if int(a.get("id", -1)) == int(msg.get("konto_id", -1))
+            ),
+            None,
+        )
+        if acc is None:
+            self._set_status("[!] Konto por OUTBOX-mesaĝo ne trovita.", transient=True)
+            return False
+        al_list = [
+            str(x).strip().lower() for x in (msg.get("al") or []) if str(x).strip()
+        ]
+        cc_list = [
+            str(x).strip().lower() for x in (msg.get("cc") or []) if str(x).strip()
+        ]
+        bcc_list = [
+            str(x).strip().lower() for x in (msg.get("bcc") or []) if str(x).strip()
+        ]
+        if not al_list:
+            self._set_status("[!] OUTBOX mesaĝo sen ricevonto.", transient=True)
+            return False
+        peti = "read-receipt-requested" in (msg.get("etikedoj") or [])
+        ok = self._send_message(
+            acc,
+            al_list,
+            msg.get("subjekto") or "",
+            msg.get("korpo") or "",
+            cc_list,
+            bcc_list,
+            prioritato=int(msg.get("prioritato") or 5),
+            peti_legokonfirmon=peti,
+        )
+        if ok:
+            self._delete_message(int(msg["id"]), True)
+            self._refresh_list()
+        return ok
+
+    def _action_resend_selected_outbox(self) -> None:
+        msgs = self._selected_or_current_messages()
+        if not msgs:
+            self._set_status("Neniu elektita OUTBOX-mesaĝo.", transient=True)
+            return
+        sent = 0
+        failed = 0
+        for msg in msgs:
+            if self._resend_from_outbox(msg):
+                sent += 1
+                self._selected_message_ids.discard(int(msg["id"]))
+            else:
+                failed += 1
+        self._set_status(
+            f"OUTBOX elektitaj: senditaj={sent}, malsukcesaj={failed}",
+            transient=True,
+        )
+
+    def _action_resend_all_outbox(self) -> None:
+        sent = 0
+        failed = 0
+        msgs = list(self._message_panel._messages)
+        for item in msgs:
+            if self._resend_from_outbox(item):
+                sent += 1
+            else:
+                failed += 1
+        self._set_status(
+            f"OUTBOX: senditaj={sent}, malsukcesaj={failed}",
+            transient=True,
+        )
+
     def _action_delete(self, permanent: bool = False) -> None:
-        msg = self._message_panel.selected()
-        if not msg:
+        msgs = self._selected_or_current_messages()
+        if not msgs:
             return
         label = "definitive forigi" if permanent else "forigi"
-        if self._prompt_confirm_inline(f"{label} ĉi tiun mesaĝon? (J/n)"):
+        if self._prompt_confirm_inline(
+            f"{label} {len(msgs)} mesaĝo(j)n? (J/n)"
+        ):
             # Remember cursor position before deletion
             old_cursor = self._message_panel._cursor
-            self._delete_message(msg["id"], permanent)
-            self._set_status("Forigita.", transient=True)
+            for msg in msgs:
+                self._delete_message(msg["id"], permanent)
+                self._selected_message_ids.discard(int(msg["id"]))
+            self._set_status(f"Forigita: {len(msgs)}", transient=True)
             self._refresh_list()
             # Restore cursor position (or clamp to new list bounds)
             if self._message_panel._messages:
@@ -2590,23 +3529,27 @@ class RetpostoTUI:
                     old_cursor, len(self._message_panel._messages) - 1
                 )
                 self._message_panel._cursor = new_cursor
+            self._message_visual_anchor = None
         else:
             self._set_status("Nuligita.", transient=True)
 
     def _action_spam(self) -> None:
-        msg = self._message_panel.selected()
-        if not msg:
+        msgs = self._selected_or_current_messages()
+        if not msgs:
             self._status_msg = "Neniu elektita mesaĝo."
             return
-        sender = msg.get("de") or ""
+        senders = sorted({str(m.get("de") or "") for m in msgs if m.get("de")})
         if not self._prompt_confirm_inline(
-            f"Marki kiel spamon kaj bloki '{sender}'? (J/n)"
+            f"Marki {len(msgs)} mesaĝo(j)n kiel spamon kaj bloki sendanto(j)n? (J/n)"
         ):
             return
-        self._add_spam_block(sender)
-        self._update_message_field(msg["id"], spamo=1)
-        msg["spamo"] = 1
-        self._set_status(f"Blokita kiel spamo: {sender}", transient=True)
+        for sender in senders:
+            self._add_spam_block(sender)
+        for msg in msgs:
+            self._update_message_field(msg["id"], spamo=1)
+            msg["spamo"] = 1
+            self._selected_message_ids.discard(int(msg["id"]))
+        self._set_status(f"Blokita kiel spamo: {len(msgs)}", transient=True)
         self._refresh_list()
 
     def _mark_spam(self, msg: dict) -> None:
@@ -2630,10 +3573,67 @@ class RetpostoTUI:
             transient=True,
         )
 
+    def _edit_draft(self, msg: dict, placement: str = "cursor") -> str:
+        """Edit a draft message and optionally send it."""
+        # Check if message is in a drafts folder
+        folder_id = msg.get("dosierujo_id")
+        if not folder_id:
+            self._set_status("[!] Mesaĝo ne estas skizo.", transient=True)
+            return "cancel"
+        
+        # Load folder info to check if it's a drafts folder
+        folders = self._load_folders(msg["konto_id"])
+        folder = next((f for f in folders if f["id"] == folder_id), None)
+        if not folder:
+            self._set_status("[!] Dosierujo ne trovita.", transient=True)
+            return "cancel"
+        
+        folder_name = folder.get("nomo", "").lower()
+        server_name = folder.get("server_nomo", "").lower()
+        is_draft = any(
+            draft_name in folder_name or draft_name in server_name
+            for draft_name in ["draft", "malnetoj", "skizo"]
+        )
+        
+        if not is_draft:
+            self._set_status(
+                "[!] Nur mesaĝoj en 'Drafts' dosierujo povas esti redaktitaj.",
+                transient=True,
+            )
+            return "cancel"
+        
+        # Prepare initial data for compose panel
+        al_str = ",".join(msg.get("al") or [])
+        cc_str = ",".join(msg.get("cc") or [])
+        bcc_str = ",".join(msg.get("bcc") or [])
+        
+        initial = {
+            "al": al_str,
+            "cc": cc_str,
+            "bcc": bcc_str,
+            "subjekto": msg.get("subjekto") or "",
+            "korpo": msg.get("korpo") or "",
+            "_edit_placement": placement,
+        }
+        
+        # Run compose panel
+        result = self._run_compose(initial)
+        
+        # If user sent or saved, delete the original draft
+        if result == "done":
+            self._delete_message(msg["id"], permanent=True)
+            self._refresh_list()
+            self._folder_panel._refresh_items()
+        
+        return result
+
     def _action_star(self) -> None:
-        msg = self._message_panel.selected()
-        if msg:
+        msgs = self._selected_or_current_messages()
+        if not msgs:
+            return
+        for msg in msgs:
             self._toggle_star(msg)
+        self._set_status(f"Stelo ŝanĝita por {len(msgs)} mesaĝo(j).", transient=True)
 
     def _action_mark_all_read(self) -> None:
         """Mark all messages in the current folder as read."""
@@ -2675,12 +3675,31 @@ class RetpostoTUI:
         )
         self._refresh_list()
 
-    def _action_priority(self, p: int) -> None:
-        msg = self._message_panel.selected()
-        if not msg:
+    def _action_mark_read_selected(self) -> None:
+        """Mark selected/current message(s) as read."""
+        msgs = self._selected_or_current_messages()
+        if not msgs:
+            self._set_status("Neniu elektita mesaĝo.", transient=True)
             return
-        self._update_message_field(msg["id"], prioritato=p)
-        self._set_status(f"Prioritato: {p}", transient=True)
+        unread = 0
+        for msg in msgs:
+            if not bool(msg.get("legita")):
+                unread += 1
+            self._update_message_field(int(msg["id"]), legita=1)
+            msg["legita"] = 1
+        self._set_status(
+            f"Markis {unread} el {len(msgs)} mesaĝo(j)n kiel legita(j)n.",
+            transient=True,
+        )
+        self._refresh_list()
+
+    def _action_priority(self, p: int) -> None:
+        msgs = self._selected_or_current_messages()
+        if not msgs:
+            return
+        for msg in msgs:
+            self._update_message_field(msg["id"], prioritato=p)
+        self._set_status(f"Prioritato {p} por {len(msgs)} mesaĝo(j).", transient=True)
         self._refresh_list()
 
     def _action_move(self) -> None:
@@ -2690,13 +3709,14 @@ class RetpostoTUI:
         self._action_move_or_copy(copy_mode=True)
 
     def _action_move_or_copy(self, copy_mode: bool) -> None:
-        msg = self._message_panel.selected()
-        if not msg:
+        msgs = self._selected_or_current_messages()
+        if not msgs:
             return
+        sample_msg = msgs[0]
         target = self._prompt_inline(
             "Kopii al dosierujo" if copy_mode else "Movi al dosierujo",
             suggestions=lambda part: self._folder_target_suggestions(
-                part, int(msg["konto_id"])
+                part, int(sample_msg["konto_id"])
             ),
             accept_first_suggestion=True,
         )
@@ -2704,15 +3724,21 @@ class RetpostoTUI:
             self._set_status("Nuligita.", transient=True)
             return
         folder_name, account_id = self._resolve_folder_target(
-            target, int(msg["konto_id"])
+            target, int(sample_msg["konto_id"])
         )
         if not folder_name:
             self._set_status("Nuligita.", transient=True)
             return
         prompt = (
-            f"Kopii al '{folder_name}' (konto {account_id})? (J/n)"
+            (
+                f"Kopii {len(msgs)} mesaĝo(j)n al "
+                f"'{folder_name}' (konto {account_id})? (J/n)"
+            )
             if copy_mode
-            else f"Movi al '{folder_name}' (konto {account_id})? (J/n)"
+            else (
+                f"Movi {len(msgs)} mesaĝo(j)n al "
+                f"'{folder_name}' (konto {account_id})? (J/n)"
+            )
         )
         if not self._prompt_confirm_inline(prompt):
             self._set_status("Nuligita.", transient=True)
@@ -2728,18 +3754,73 @@ class RetpostoTUI:
             if self._copy_message is None:
                 self._set_status("[!] Kopii ne subtenata.", transient=True)
                 return
-            _new_id = self._copy_message(int(msg["id"]), account_id, int(folder_id))
-            self._set_status(f"Kopiita al: {folder_name}", transient=True)
+            for msg in msgs:
+                self._copy_message(int(msg["id"]), account_id, int(folder_id))
+            self._set_status(f"Kopiitaj {len(msgs)} al: {folder_name}", transient=True)
         else:
-            self._update_message_field(
-                int(msg["id"]),
-                dosierujo_id=int(folder_id),
-                konto_id=account_id,
-            )
-            self._set_status(f"Movita al: {folder_name}", transient=True)
+            for msg in msgs:
+                self._update_message_field(
+                    int(msg["id"]),
+                    dosierujo_id=int(folder_id),
+                    konto_id=account_id,
+                )
+                self._selected_message_ids.discard(int(msg["id"]))
+            self._set_status(f"Movitaj {len(msgs)} al: {folder_name}", transient=True)
+            self._message_visual_anchor = None
         self._last_folder_target = (folder_name, account_id)
         self._folder_panel._refresh_items()
         self._refresh_list()
+
+    def _selected_or_current_messages(self) -> list[dict]:
+        messages = self._message_panel._messages
+        if self._selected_message_ids:
+            selected = [
+                msg
+                for msg in messages
+                if int(msg.get("id", -1)) in self._selected_message_ids
+            ]
+            if selected:
+                return selected
+        cur = self._message_panel.selected()
+        return [cur] if cur else []
+
+    def _clear_message_selection(self) -> None:
+        self._selected_message_ids.clear()
+        self._message_visual_anchor = None
+
+    def _toggle_current_message_selection(self) -> None:
+        msg = self._message_panel.selected()
+        if not msg:
+            return
+        msg_id = int(msg["id"])
+        if msg_id in self._selected_message_ids:
+            self._selected_message_ids.remove(msg_id)
+        else:
+            self._selected_message_ids.add(msg_id)
+        self._set_status(
+            f"Elektitaj mesaĝoj: {len(self._selected_message_ids)}",
+            transient=True,
+        )
+
+    def _toggle_message_visual_range_selection(self) -> None:
+        msgs = self._message_panel._messages
+        if not msgs:
+            return
+        cursor = self._message_panel.current_index()
+        if self._message_visual_anchor is None:
+            self._message_visual_anchor = cursor
+            self._selected_message_ids.add(int(msgs[cursor]["id"]))
+            self._set_status("VIDA elekto komencita.", transient=True)
+            return
+        start = min(self._message_visual_anchor, cursor)
+        end = max(self._message_visual_anchor, cursor)
+        for i in range(start, end + 1):
+            self._selected_message_ids.add(int(msgs[i]["id"]))
+        self._message_visual_anchor = None
+        self._set_status(
+            f"Elektitaj mesaĝoj: {len(self._selected_message_ids)}",
+            transient=True,
+        )
 
     def _action_attachments(self, msg: dict) -> None:
         """List and open message attachments."""
@@ -2859,22 +3940,53 @@ class RetpostoTUI:
         accs = self._load_accounts()
         acc_nums = {acc["id"]: idx for idx, acc in enumerate(accs, 1)}
         suggestions: list[str] = []
-        if self._last_folder_target is not None:
-            name, acc_id = self._last_folder_target
-            num = acc_nums.get(acc_id, 1)
-            suggestions.append(f"{name}/({num})")
+        
+        # Build list of all folder options with account numbers
         for acc in accs:
             folders = self._load_folders(acc["id"])
             for f in folders:
                 name = (f.get("nomo") or "").strip()
                 if not name:
                     continue
-                full = name
+                # Always add account number for clarity, except current account
                 if acc["id"] != current_acc_id:
                     full = f"{name}/({acc_nums.get(acc['id'], 1)})"
-                if partial_low and partial_low not in full.lower():
-                    continue
+                else:
+                    full = name
                 suggestions.append(full)
+        
+        # Filter by partial match
+        if partial_low:
+            suggestions = [s for s in suggestions if partial_low in s.lower()]
+        
+        # Sort by relevance: exact start match > contains match > alphabetical
+        def sort_key(s: str) -> tuple[int, str]:
+            s_low = s.lower()
+            if partial_low and s_low.startswith(partial_low):
+                return (0, s)  # Exact start match - highest priority
+            if partial_low and partial_low in s_low:
+                return (1, s)  # Contains match - medium priority
+            return (2, s)  # No match or empty partial - lowest priority
+        
+        suggestions.sort(key=sort_key)
+        
+        # Add last-used folder at top ONLY if it matches the partial input
+        if self._last_folder_target is not None:
+            name, acc_id = self._last_folder_target
+            num = acc_nums.get(acc_id, 1)
+            if acc_id != current_acc_id:
+                last_full = f"{name}/({num})"
+            else:
+                last_full = name
+            # Only prioritize last-used if it matches what user is typing
+            if not partial_low or partial_low in last_full.lower():
+                # Remove from list if already present
+                if last_full in suggestions:
+                    suggestions.remove(last_full)
+                # Insert at top
+                suggestions.insert(0, last_full)
+        
+        # Remove duplicates while preserving order
         uniq: list[str] = []
         seen: set[str] = set()
         for s in suggestions:
@@ -3133,6 +4245,12 @@ class RetpostoTUI:
                     konto_id=sel["acc_id"],
                     dosierujo_id=sel["folder_id"],
                 )
+        visible = {int(m.get("id", -1)) for m in self._message_panel._messages}
+        self._selected_message_ids = {
+            mid for mid in self._selected_message_ids if mid in visible
+        }
+        if self._message_visual_anchor is not None:
+            self._message_visual_anchor = None
 
     # ── overlays (pager-based) ────────────────────────────────────────────────
 
@@ -3700,6 +4818,44 @@ class RetpostoTUI:
                 if key in (_ENTER, _CR):
                     if accept_first_suggestion and sugg:
                         return sugg[0].strip()
+                    return buf.strip()
+                if key == _ESC or key in (_CTRL_C, _CTRL_D):
+                    return ""
+                if _is_backspace(key):
+                    buf = buf[:-1]
+                elif ch and ch.isprintable():
+                    buf += ch
+        finally:
+            self.stdscr.timeout(500)
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
+
+    def _prompt_compose_inline(self, panel: ComposePanel, prompt: str) -> str:
+        """Prompt on top of compose pane without falling back to main list/folder UI."""
+        buf = ""
+        self.stdscr.timeout(-1)
+        try:
+            curses.curs_set(1)
+        except curses.error:
+            pass
+        try:
+            while True:
+                panel.draw()
+                h, w = self.stdscr.getmaxyx()
+                line = f"{prompt}: {buf}█"
+                _safe_addstr(
+                    self.stdscr,
+                    h - 1,
+                    0,
+                    line[:w - 1].ljust(w - 1),
+                    curses.A_REVERSE,
+                )
+                self.stdscr.refresh()
+                key = _getch_unicode(self.stdscr)
+                ch = chr(key) if 0 < key < 256 else ""
+                if key in (_ENTER, _CR):
                     return buf.strip()
                 if key == _ESC or key in (_CTRL_C, _CTRL_D):
                     return ""

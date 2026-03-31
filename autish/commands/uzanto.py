@@ -54,9 +54,62 @@ _STANDARD_FIELDS: tuple[str, ...] = (
     "nomo",
     "familia_nomo",
     "naskig_dato",
+    "naskig_loko",
     "lingvoj",
     "organizo",
+    "organiza_identiga_numero",
+    "telefonnumeroj",
+    "retposhtadresoj",
 )
+
+
+def _display_profile_value(val: object) -> str:
+    if isinstance(val, list):
+        if val and isinstance(val[0], dict):
+            chunks: list[str] = []
+            for item in val:
+                if isinstance(item, dict):
+                    value = str(item.get("valoro") or "")
+                    tag = str(item.get("etikedo") or "")
+                    primary = bool(item.get("prima"))
+                    suffix = " (prima)" if primary else ""
+                    chunks.append(f"{value} ({tag}){suffix}")
+                else:
+                    chunks.append(str(item))
+            return "; ".join(chunks)
+        return ", ".join(str(x) for x in val)
+    if isinstance(val, dict):
+        return _toml_dumps(val).strip()
+    return str(val)
+
+
+def _normalize_multi_contact_item(raw: str, *, kind: str) -> dict:
+    # Format: value:etikedo[:prima]
+    parts = [p.strip() for p in raw.split(":")]
+    if len(parts) < 2:
+        raise ValueError("Atendita formato: valoro:etikedo[:prima]")
+    value = parts[0]
+    etikedo = parts[1]
+    prima = len(parts) >= 3 and parts[2].lower() in ("prima", "primary", "1", "jes")
+    if kind == "telefono":
+        if not re.match(r"^00\d{2,5}\d+$", value):
+            raise ValueError(
+                "Telefonnumero devas komenci per regiona kodo, ekz. 0033..."
+            )
+    elif kind == "retposhto":
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", value):
+            raise ValueError("Nevalida retpoŝta adreso.")
+    return {"valoro": value, "etikedo": etikedo, "prima": bool(prima)}
+
+
+def _normalize_multi_contact_list(items: list[str], *, kind: str) -> list[dict]:
+    out = [_normalize_multi_contact_item(item, kind=kind) for item in items]
+    primary_idx = [i for i, item in enumerate(out) if item.get("prima")]
+    if len(primary_idx) > 1:
+        raise ValueError("Nur unu eniro povas esti prima.")
+    if out and not primary_idx:
+        out[0]["prima"] = True
+    return out
 
 # ──────────────────────────────────────────────────────────────────────────────
 # TOML helpers
@@ -204,8 +257,20 @@ def profilo_vidi(
     naskig_dato: bool = typer.Option(
         False, "-d", "--naskig-dato", help="Show date of birth."
     ),
+    naskig_loko: bool = typer.Option(
+        False, "--naskig-loko", help="Show place of birth."
+    ),
     lingvoj: bool = typer.Option(False, "-L", "--lingvoj", help="Show languages."),
     organizo: bool = typer.Option(False, "-o", "--organizo", help="Show organisation."),
+    organiza_identiga_numero: bool = typer.Option(
+        False, "--organiza-identiga-numero", help="Show organisation identifier."
+    ),
+    telefonnumeroj: bool = typer.Option(
+        False, "--telefonnumeroj", help="Show stored phone numbers."
+    ),
+    retposhtadresoj: bool = typer.Option(
+        False, "--retposhtadresoj", help="Show stored email addresses."
+    ),
     kampo: str | None = typer.Option(
         None, "-k", "--kampo", help="Show a specific custom field by KEY."
     ),
@@ -217,8 +282,12 @@ def profilo_vidi(
         "nomo": nomo,
         "familia_nomo": familia_nomo,
         "naskig_dato": naskig_dato,
+        "naskig_loko": naskig_loko,
         "lingvoj": lingvoj,
         "organizo": organizo,
+        "organiza_identiga_numero": organiza_identiga_numero,
+        "telefonnumeroj": telefonnumeroj,
+        "retposhtadresoj": retposhtadresoj,
     }
     selected = [k for k, v in flags.items() if v]
 
@@ -242,7 +311,7 @@ def profilo_vidi(
         for key in _STANDARD_FIELDS:
             val = profile.get(key)
             if val is not None:
-                display = ", ".join(val) if isinstance(val, list) else str(val)
+                display = _display_profile_value(val)
                 table.add_row(key.replace("_", "-"), display)
         custom = profile.get("kampoj", {})
         for k, v in custom.items():
@@ -253,10 +322,7 @@ def profilo_vidi(
     # Show only selected fields
     for key in selected:
         val = profile.get(key)
-        if isinstance(val, list):
-            display = ", ".join(val)
-        else:
-            display = str(val) if val is not None else "—"
+        display = _display_profile_value(val) if val is not None else "—"
         typer.echo(f"{key.replace('_', '-')}: {display}")
 
 
@@ -269,6 +335,9 @@ def profilo_modifi(
     naskig_dato: str | None = typer.Option(
         None, "-d", "--naskig-dato", help="Set date of birth (YYYY-MM-DD)."
     ),
+    naskig_loko: str | None = typer.Option(
+        None, "--naskig-loko", help="Set place of birth."
+    ),
     lingvoj: str | None = typer.Option(
         None,
         "-L",
@@ -277,6 +346,19 @@ def profilo_modifi(
     ),
     organizo: str | None = typer.Option(
         None, "-o", "--organizo", help="Set organisation."
+    ),
+    organiza_identiga_numero: str | None = typer.Option(
+        None, "--organiza-identiga-numero", help="Set organisation identifier."
+    ),
+    telefonnumero: list[str] | None = typer.Option(
+        None,
+        "--telefonnumero",
+        help="Repeat as numero:etikedo[:prima], e.g. 0033123456789:hejmo:prima",
+    ),
+    retposhtadreso: list[str] | None = typer.Option(
+        None,
+        "--retposhtadreso",
+        help="Repeat as adreso:etikedo[:prima], e.g. user@example.com:labora:prima",
     ),
     kampo: list[str] | None = typer.Option(
         None,
@@ -302,8 +384,28 @@ def profilo_modifi(
     if lingvoj is not None:
         codes = [c.strip() for c in lingvoj.split(",") if c.strip()]
         profile["lingvoj"] = codes
+    if naskig_loko is not None:
+        profile["naskig_loko"] = naskig_loko
     if organizo is not None:
         profile["organizo"] = organizo
+    if organiza_identiga_numero is not None:
+        profile["organiza_identiga_numero"] = organiza_identiga_numero
+    if telefonnumero is not None:
+        try:
+            profile["telefonnumeroj"] = _normalize_multi_contact_list(
+                telefonnumero, kind="telefono"
+            )
+        except ValueError as exc:
+            typer.echo(f"[!] {exc}", err=True)
+            raise typer.Exit(1) from exc
+    if retposhtadreso is not None:
+        try:
+            profile["retposhtadresoj"] = _normalize_multi_contact_list(
+                retposhtadreso, kind="retposhto"
+            )
+        except ValueError as exc:
+            typer.echo(f"[!] {exc}", err=True)
+            raise typer.Exit(1) from exc
 
     if kampo:
         if "kampoj" not in profile:

@@ -12,6 +12,14 @@
   Examples: `tempo`, `wifi`, `konekti`, `malkonekti`, `forigi`, `horzono`, `sistemo`, `bluhdento`.
 - **Python source code (variables, functions, modules) uses English `snake_case`.**
 - Short single-letter CLI flags may be any intuitive letter (e.g. `-p` for password).
+- **Esperanto locale consistency is mandatory.**
+  Always prefer correct Esperanto field names and labels (`difino`, `difinoj`, `ligilo`,
+  `superklaso`, `subklaso`, `helpo`, etc.). If user input or legacy aliases are non-Esperanto
+  or misspelled, parse them for compatibility when needed, but normalize stored/output names to
+  the correct Esperanto forms.
+- **`ligilo` relations are bidirectional by default in Autish.**
+  When an entry links to another via `ligilo`, the reverse `ligilo` must be persisted
+  automatically so both sides remain consistent in `vidi`/`serci` outputs.
 
 ---
 
@@ -72,6 +80,9 @@ autish/
 7. **No internet dependency** — all v0.0.1 commands must work offline. Do not add network calls.
 8. **Test coverage** — every command module should have a corresponding test file under `tests/`.
 9. **Microapp data storage** — use SQLite (stdlib `sqlite3`) for any microapp that needs to persist structured data. Scalability and efficiency matter: prefer granular `INSERT`/`UPDATE`/`DELETE` over full-table rewrites; use `WAL` journal mode; store JSON arrays/objects in `TEXT` columns when normalisation would be overkill for the data size. Never use plain JSON files for databases.
+10. **Action notifications must auto-expire** — transient success/info/error status messages should clear after ~3 seconds to reduce sensory load. Keep persistent status only when explicit user action is required (prompts, confirmations, modal choices, blocking errors).
+11. **Prevent key conflicts proactively** — before assigning or changing `retposto` shortcuts, verify they do not conflict with existing global/list/compose/read-view keys and update inline hints/help text in the same change.
+12. **Default duplicate-safe add flow for DB entries** — for database-backed `aldoni` commands, if a potential duplicate is detected by primary identity fields, prompt user to choose updating the existing entry or creating a new one.
 
 ---
 
@@ -80,6 +91,10 @@ autish/
 Every new command module **must** be registered both in `autish/main.py` (as a
 sub-app under `autish <command>`) **and** in `pyproject.toml` as a standalone
 entry-point script so users can invoke it directly without the `autish` prefix.
+
+This is a strict default behavior for all future commands: if a command is
+added and only available through `autish <command>` (without standalone script
+entry), the implementation is considered incomplete.
 
 Example — adding a new `foo` command:
 1. Create `autish/commands/foo.py` with a `app = typer.Typer(name="foo", ...)`.

@@ -46,6 +46,7 @@ ruff = ">=0.4"
 autish = "autish.main:app"
 vorto = "autish.commands.vorto:app"
 retposto = "autish.commands.retposto:app"
+kontakto = "autish.commands.kontakto:app"
 bluhdento = "autish.commands.bluetooth:app"
 wifi = "autish.commands.wifi:app"
 sistemo = "autish.commands.sistemo:app"
@@ -57,6 +58,7 @@ uzanto = "autish.commands.uzanto:app"
 md = "autish.commands.md:app"
 encik = "autish.commands.encik:app"
 disko = "autish.commands.disko:app"
+usb = "autish.commands.usb:app"
 
 [tool.ruff]
 line-length = 88

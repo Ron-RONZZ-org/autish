@@ -8,6 +8,8 @@ Usage:
     retposto sendi                   — compose & send from CLI
     retposto preni                   — fetch mail from all accounts
     retposto kontakto listigi        — list contacts
+    retposto kontakto serci          — search contacts
+    retposto kontakto vidi <UUID>    — view one contact
     retposto kontakto importi <vcf>  — import contacts from a VCF file
     retposto kontakto eksporti <vcf> — export contacts to a VCF file
 
@@ -23,6 +25,7 @@ import email.message
 import email.policy
 import imaplib
 import json
+import mimetypes
 import re
 import smtplib
 import socket
@@ -33,9 +36,10 @@ import uuid as _uuid_mod
 import webbrowser
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
+from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from email.utils import make_msgid
+from email.utils import getaddresses, make_msgid
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import TypedDict
@@ -90,6 +94,8 @@ _DB_FILE: Path = _DATA_DIR / "retposto.db"
 _KEYRING_SERVICE: str = "autish-retposto"
 
 _MAX_FOLDERS_PER_ACCOUNT: int = 20
+_ACCOUNT_CHECK_CONNECT_TIMEOUT: float = 4.0
+_ACCOUNT_CHECK_PROTOCOL_TIMEOUT: float = 8.0
 
 class _EmailServerConfig(TypedDict):
     imap_servilo: str
@@ -229,6 +235,13 @@ CREATE TABLE IF NOT EXISTS konto (
     smtp_haveno  INTEGER NOT NULL DEFAULT 587,
     smtp_tls     INTEGER NOT NULL DEFAULT 1,
     uzantonomo   TEXT,
+    imap_uzantonomo TEXT,
+    smtp_uzantonomo TEXT,
+    webmail_url  TEXT,
+    sieve_servilo TEXT,
+    sieve_haveno INTEGER NOT NULL DEFAULT 4190,
+    sieve_starttls INTEGER NOT NULL DEFAULT 1,
+    sieve_uzantonomo TEXT,
     subskribo    TEXT,
     kreita_je    TEXT NOT NULL
 );
@@ -279,12 +292,38 @@ CREATE TABLE IF NOT EXISTS kontakto (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     uuid        TEXT NOT NULL UNIQUE,
     nomo        TEXT,
-    retposto    TEXT NOT NULL UNIQUE,
+    familia_nomo TEXT,
+    naskig_dato TEXT,
+    naskig_loko TEXT,
+    lingvoj     TEXT NOT NULL DEFAULT '[]',
+    retposto    TEXT UNIQUE,
     organizo    TEXT,
+    organiza_identiga_numero TEXT,
     telefono    TEXT,
+    telefonnumeroj TEXT NOT NULL DEFAULT '[]',
+    retposhtadresoj TEXT NOT NULL DEFAULT '[]',
+    kampoj      TEXT NOT NULL DEFAULT '{}',
+    konfirmita  INTEGER NOT NULL DEFAULT 0,
+    kategorioj  TEXT NOT NULL DEFAULT '[]',
     noto        TEXT,
     kreita_je   TEXT NOT NULL,
     modifita_je TEXT NOT NULL
+);
+"""
+
+_CREATE_KONTAKTO_KATEGORIO = """
+CREATE TABLE IF NOT EXISTS kontakto_kategorio (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    nomo       TEXT NOT NULL UNIQUE,
+    kreita_je  TEXT NOT NULL
+);
+"""
+
+_CREATE_KONTAKTO_UNDO = """
+CREATE TABLE IF NOT EXISTS kontakto_undo (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation  TEXT NOT NULL,
+    kreita_je  TEXT NOT NULL
 );
 """
 
@@ -341,6 +380,8 @@ def _get_db() -> sqlite3.Connection:
         + _CREATE_DOSIERUJO
         + _CREATE_MESAGO
         + _CREATE_KONTAKTO
+        + _CREATE_KONTAKTO_KATEGORIO
+        + _CREATE_KONTAKTO_UNDO
         + _CREATE_SPAMO_BLOKO
         + _CREATE_FILTRO
         + _CREATE_ALDONAJO
@@ -365,6 +406,42 @@ def _migrate_db(con: sqlite3.Connection) -> None:
     if "subskribo" not in existing_cols:
         con.execute("ALTER TABLE konto ADD COLUMN subskribo TEXT")
         con.commit()
+    if "imap_uzantonomo" not in existing_cols:
+        con.execute("ALTER TABLE konto ADD COLUMN imap_uzantonomo TEXT")
+        con.execute(
+            "UPDATE konto SET imap_uzantonomo = COALESCE(uzantonomo, retposto)"
+        )
+        con.commit()
+    if "smtp_uzantonomo" not in existing_cols:
+        con.execute("ALTER TABLE konto ADD COLUMN smtp_uzantonomo TEXT")
+        con.execute(
+            "UPDATE konto SET smtp_uzantonomo = COALESCE(uzantonomo, retposto)"
+        )
+        con.commit()
+    if "webmail_url" not in existing_cols:
+        con.execute("ALTER TABLE konto ADD COLUMN webmail_url TEXT")
+        con.commit()
+    if "sieve_servilo" not in existing_cols:
+        con.execute("ALTER TABLE konto ADD COLUMN sieve_servilo TEXT")
+        con.execute("UPDATE konto SET sieve_servilo = imap_servilo")
+        con.commit()
+    if "sieve_haveno" not in existing_cols:
+        con.execute(
+            "ALTER TABLE konto ADD COLUMN sieve_haveno INTEGER NOT NULL DEFAULT 4190"
+        )
+        con.commit()
+    if "sieve_starttls" not in existing_cols:
+        con.execute(
+            "ALTER TABLE konto ADD COLUMN sieve_starttls INTEGER NOT NULL DEFAULT 1"
+        )
+        con.commit()
+    if "sieve_uzantonomo" not in existing_cols:
+        con.execute("ALTER TABLE konto ADD COLUMN sieve_uzantonomo TEXT")
+        con.execute(
+            "UPDATE konto SET sieve_uzantonomo = "
+            "COALESCE(imap_uzantonomo, uzantonomo, retposto)"
+        )
+        con.commit()
 
     mesago_cols = {
         row[1] for row in con.execute("PRAGMA table_info(mesago)").fetchall()
@@ -374,6 +451,96 @@ def _migrate_db(con: sqlite3.Connection) -> None:
         con.commit()
     if "references_hdr" not in mesago_cols:
         con.execute("ALTER TABLE mesago ADD COLUMN references_hdr TEXT")
+        con.commit()
+
+    kontakto_cols = {
+        row[1] for row in con.execute("PRAGMA table_info(kontakto)").fetchall()
+    }
+    if "konfirmita" not in kontakto_cols:
+        con.execute(
+            "ALTER TABLE kontakto ADD COLUMN konfirmita INTEGER NOT NULL DEFAULT 0"
+        )
+        con.commit()
+    if "kategorioj" not in kontakto_cols:
+        con.execute(
+            "ALTER TABLE kontakto ADD COLUMN kategorioj TEXT NOT NULL DEFAULT '[]'"
+        )
+        con.commit()
+    if "familia_nomo" not in kontakto_cols:
+        con.execute("ALTER TABLE kontakto ADD COLUMN familia_nomo TEXT")
+        con.commit()
+    if "naskig_dato" not in kontakto_cols:
+        con.execute("ALTER TABLE kontakto ADD COLUMN naskig_dato TEXT")
+        con.commit()
+    if "naskig_loko" not in kontakto_cols:
+        con.execute("ALTER TABLE kontakto ADD COLUMN naskig_loko TEXT")
+        con.commit()
+    if "lingvoj" not in kontakto_cols:
+        con.execute(
+            "ALTER TABLE kontakto ADD COLUMN lingvoj TEXT NOT NULL DEFAULT '[]'"
+        )
+        con.commit()
+    if "organiza_identiga_numero" not in kontakto_cols:
+        con.execute("ALTER TABLE kontakto ADD COLUMN organiza_identiga_numero TEXT")
+        con.commit()
+    if "telefonnumeroj" not in kontakto_cols:
+        con.execute(
+            "ALTER TABLE kontakto ADD COLUMN telefonnumeroj TEXT NOT NULL DEFAULT '[]'"
+        )
+        con.commit()
+    if "retposhtadresoj" not in kontakto_cols:
+        con.execute(
+            "ALTER TABLE kontakto ADD COLUMN retposhtadresoj TEXT NOT NULL DEFAULT '[]'"
+        )
+        con.commit()
+    if "kampoj" not in kontakto_cols:
+        con.execute("ALTER TABLE kontakto ADD COLUMN kampoj TEXT NOT NULL DEFAULT '{}'")
+        con.commit()
+    # Allow contacts without email address: make retposto nullable.
+    retposto_col = next(
+        (row for row in con.execute("PRAGMA table_info(kontakto)").fetchall()
+         if row[1] == "retposto"),
+        None,
+    )
+    if retposto_col is not None and int(retposto_col[3]) == 1:
+        con.executescript(
+            """
+            ALTER TABLE kontakto RENAME TO kontakto_old;
+            CREATE TABLE kontakto (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                uuid        TEXT NOT NULL UNIQUE,
+                nomo        TEXT,
+                familia_nomo TEXT,
+                naskig_dato TEXT,
+                naskig_loko TEXT,
+                lingvoj     TEXT NOT NULL DEFAULT '[]',
+                retposto    TEXT UNIQUE,
+                organizo    TEXT,
+                organiza_identiga_numero TEXT,
+                telefono    TEXT,
+                telefonnumeroj TEXT NOT NULL DEFAULT '[]',
+                retposhtadresoj TEXT NOT NULL DEFAULT '[]',
+                kampoj      TEXT NOT NULL DEFAULT '{}',
+                konfirmita  INTEGER NOT NULL DEFAULT 0,
+                kategorioj  TEXT NOT NULL DEFAULT '[]',
+                noto        TEXT,
+                kreita_je   TEXT NOT NULL,
+                modifita_je TEXT NOT NULL
+            );
+            INSERT INTO kontakto
+              (id, uuid, nomo, familia_nomo, naskig_dato, naskig_loko, lingvoj,
+               retposto, organizo, organiza_identiga_numero, telefono,
+               telefonnumeroj, retposhtadresoj, kampoj, konfirmita, kategorioj,
+               noto, kreita_je, modifita_je)
+            SELECT
+              id, uuid, nomo, familia_nomo, naskig_dato, naskig_loko, lingvoj,
+              retposto, organizo, organiza_identiga_numero, telefono,
+              telefonnumeroj, retposhtadresoj, kampoj, konfirmita, kategorioj,
+              noto, kreita_je, modifita_je
+            FROM kontakto_old;
+            DROP TABLE kontakto_old;
+            """
+        )
         con.commit()
 
 
@@ -420,8 +587,11 @@ def _save_account(acc: dict) -> int:
         cur = con.execute(
             """INSERT INTO konto
                (ordo, nomo, retposto, imap_servilo, imap_haveno, imap_ssl,
-                smtp_servilo, smtp_haveno, smtp_tls, uzantonomo, kreita_je)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                smtp_servilo, smtp_haveno, smtp_tls, uzantonomo,
+                imap_uzantonomo, smtp_uzantonomo, webmail_url,
+                sieve_servilo, sieve_haveno, sieve_starttls, sieve_uzantonomo,
+                kreita_je)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 next_order,
                 acc["nomo"],
@@ -433,6 +603,26 @@ def _save_account(acc: dict) -> int:
                 acc.get("smtp_haveno", 587),
                 int(acc.get("smtp_tls", True)),
                 (acc.get("uzantonomo") or acc["retposto"]).strip(),
+                (
+                    acc.get("imap_uzantonomo")
+                    or acc.get("uzantonomo")
+                    or acc["retposto"]
+                ).strip(),
+                (
+                    acc.get("smtp_uzantonomo")
+                    or acc.get("uzantonomo")
+                    or acc["retposto"]
+                ).strip(),
+                (acc.get("webmail_url") or "").strip(),
+                (acc.get("sieve_servilo") or acc["imap_servilo"]).strip(),
+                int(acc.get("sieve_haveno", 4190)),
+                int(acc.get("sieve_starttls", True)),
+                (
+                    acc.get("sieve_uzantonomo")
+                    or acc.get("imap_uzantonomo")
+                    or acc.get("uzantonomo")
+                    or acc["retposto"]
+                ).strip(),
                 acc.get("kreita_je") or _now_iso(),
             ),
         )
@@ -442,6 +632,8 @@ def _save_account(acc: dict) -> int:
 _KONTO_UPDATABLE_COLS: frozenset[str] = frozenset({
     "nomo", "imap_servilo", "imap_haveno", "imap_ssl",
     "smtp_servilo", "smtp_haveno", "smtp_tls", "uzantonomo", "subskribo",
+    "imap_uzantonomo", "smtp_uzantonomo", "webmail_url",
+    "sieve_servilo", "sieve_haveno", "sieve_starttls", "sieve_uzantonomo",
 })
 
 
@@ -453,7 +645,7 @@ def _update_account(account_id: int, fields: dict) -> None:
     if invalid:
         raise ValueError(f"Disallowed column(s) in _update_account: {invalid}")
     # Coerce port values to int when present
-    for port_col in ("imap_haveno", "smtp_haveno"):
+    for port_col in ("imap_haveno", "smtp_haveno", "sieve_haveno"):
         if port_col in fields:
             try:
                 fields[port_col] = int(fields[port_col])
@@ -528,6 +720,25 @@ def _load_folders(account_id: int) -> list[dict]:
             (account_id,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def _find_drafts_folder(account_id: int) -> int | None:
+    """Find the drafts folder for an account by checking common names.
+    
+    Returns folder ID if found, None otherwise.
+    """
+    with _get_db() as con:
+        # Check common draft folder names (server_nomo)
+        draft_names = ["Drafts", "Draft", "DRAFTS", "Malnetoj"]
+        for name in draft_names:
+            row = con.execute(
+                "SELECT id FROM dosierujo WHERE konto_id=? AND "
+                "(server_nomo=? OR nomo=?) AND patro_id IS NULL",
+                (account_id, name, name),
+            ).fetchone()
+            if row:
+                return int(row["id"])
+    return None
 
 
 def _ensure_folder(account_id: int, nomo: str, server_nomo: str | None = None,
@@ -655,6 +866,19 @@ def _coalesce_messages(messages: list[dict]) -> list[dict]:
         reverse=True,
     )
     return merged
+
+
+def _get_message_by_uid(konto_id: int, dosierujo_id: int, uid: str) -> dict | None:
+    """Get a message by account, folder, and UID."""
+    with _get_db() as con:
+        row = con.execute(
+            """SELECT id, legita FROM mesago 
+               WHERE konto_id = ? AND dosierujo_id = ? AND uid = ?""",
+            (konto_id, dosierujo_id, uid),
+        ).fetchone()
+        if row:
+            return dict(row)
+        return None
 
 
 def _save_message(msg: dict) -> int:
@@ -948,21 +1172,49 @@ def _find_contact(query: str) -> list[dict]:
     with _get_db() as con:
         rows = con.execute(
             "SELECT * FROM kontakto"
-            " WHERE nomo LIKE ? OR retposto LIKE ? ORDER BY nomo ASC",
+            " WHERE nomo LIKE ? OR IFNULL(retposto, '') LIKE ? ORDER BY nomo ASC",
             (pat, pat),
         ).fetchall()
     return [dict(r) for r in rows]
 
 
 _KONTAKTO_UPDATABLE_COLS: frozenset[str] = frozenset(
-    {"nomo", "organizo", "telefono", "noto", "modifita_je"}
+    {
+        "nomo",
+        "familia_nomo",
+        "naskig_dato",
+        "naskig_loko",
+        "lingvoj",
+        "retposto",
+        "organizo",
+        "organiza_identiga_numero",
+        "telefono",
+        "telefonnumeroj",
+        "retposhtadresoj",
+        "kampoj",
+        "noto",
+        "modifita_je",
+        "konfirmita",
+        "kategorioj",
+    }
 )
 
 
 def _upsert_contact(retposto: str, nomo: str | None = None,
                     organizo: str | None = None,
                     telefono: str | None = None,
-                    noto: str | None = None) -> None:
+                    noto: str | None = None,
+                    *,
+                    familia_nomo: str | None = None,
+                    naskig_dato: str | None = None,
+                    naskig_loko: str | None = None,
+                    lingvoj: list[str] | None = None,
+                    organiza_identiga_numero: str | None = None,
+                    telefonnumeroj: list[dict] | None = None,
+                    retposhtadresoj: list[dict] | None = None,
+                    kampoj: dict[str, str] | None = None,
+                    konfirmita: int | None = None,
+                    kategorioj: list[str] | None = None) -> None:
     """Insert or update a contact by email address."""
     now = _now_iso()
     with _get_db() as con:
@@ -978,10 +1230,36 @@ def _upsert_contact(retposto: str, nomo: str | None = None,
                 update_fields["nomo"] = nomo
             if organizo is not None:
                 update_fields["organizo"] = organizo
+            if familia_nomo is not None:
+                update_fields["familia_nomo"] = familia_nomo
+            if naskig_dato is not None:
+                update_fields["naskig_dato"] = naskig_dato
+            if naskig_loko is not None:
+                update_fields["naskig_loko"] = naskig_loko
+            if lingvoj is not None:
+                update_fields["lingvoj"] = json.dumps(lingvoj, ensure_ascii=False)
+            if organiza_identiga_numero is not None:
+                update_fields["organiza_identiga_numero"] = organiza_identiga_numero
             if telefono is not None:
                 update_fields["telefono"] = telefono
+            if telefonnumeroj is not None:
+                update_fields["telefonnumeroj"] = json.dumps(
+                    telefonnumeroj, ensure_ascii=False
+                )
+            if retposhtadresoj is not None:
+                update_fields["retposhtadresoj"] = json.dumps(
+                    retposhtadresoj, ensure_ascii=False
+                )
+            if kampoj is not None:
+                update_fields["kampoj"] = json.dumps(kampoj, ensure_ascii=False)
             if noto is not None:
                 update_fields["noto"] = noto
+            if konfirmita is not None:
+                update_fields["konfirmita"] = int(bool(konfirmita))
+            if kategorioj is not None:
+                update_fields["kategorioj"] = json.dumps(
+                    kategorioj, ensure_ascii=False
+                )
             invalid = set(update_fields) - _KONTAKTO_UPDATABLE_COLS
             if invalid:
                 raise ValueError(
@@ -995,12 +1273,71 @@ def _upsert_contact(retposto: str, nomo: str | None = None,
         else:
             con.execute(
                 """INSERT INTO kontakto
-                   (uuid, nomo, retposto, organizo, telefono, noto,
-                    kreita_je, modifita_je)
-                   VALUES (?,?,?,?,?,?,?,?)""",
-                (_make_uuid(), nomo, retposto, organizo, telefono, noto,
-                 now, now),
+                   (uuid, nomo, familia_nomo, naskig_dato, naskig_loko, lingvoj,
+                    retposto, organizo, organiza_identiga_numero, telefono,
+                    telefonnumeroj, retposhtadresoj, kampoj, konfirmita,
+                    kategorioj, noto,
+                     kreita_je, modifita_je)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    _make_uuid(),
+                    nomo,
+                    familia_nomo,
+                    naskig_dato,
+                    naskig_loko,
+                    json.dumps(lingvoj or [], ensure_ascii=False),
+                    retposto,
+                    organizo,
+                    organiza_identiga_numero,
+                    telefono,
+                    json.dumps(telefonnumeroj or [], ensure_ascii=False),
+                    json.dumps(retposhtadresoj or [], ensure_ascii=False),
+                    json.dumps(kampoj or {}, ensure_ascii=False),
+                    int(bool(konfirmita or 0)),
+                    json.dumps(kategorioj or [], ensure_ascii=False),
+                    noto,
+                    now,
+                    now,
+                )
             )
+
+
+def _insert_contact_without_email(
+    nomo: str | None = None,
+    familia_nomo: str | None = None,
+    organizo: str | None = None,
+    telefono: str | None = None,
+    noto: str | None = None,
+) -> dict:
+    now = _now_iso()
+    uid = _make_uuid()
+    with _get_db() as con:
+        con.execute(
+            """INSERT INTO kontakto
+               (uuid, nomo, familia_nomo, lingvoj, retposto, organizo,
+                telefono, telefonnumeroj, retposhtadresoj, kampoj, konfirmita,
+                kategorioj, noto, kreita_je, modifita_je)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                uid,
+                nomo,
+                familia_nomo,
+                "[]",
+                None,
+                organizo,
+                telefono,
+                "[]",
+                "[]",
+                "{}",
+                0,
+                "[]",
+                noto,
+                now,
+                now,
+            ),
+        )
+        row = con.execute("SELECT * FROM kontakto WHERE uuid = ?", (uid,)).fetchone()
+    return dict(row) if row is not None else {"uuid": uid}
 
 
 def _delete_contact(contact_id: int) -> None:
@@ -1188,6 +1525,17 @@ def _extract_address(raw: str | None) -> str:
     return raw.strip().strip("<>").lower()
 
 
+def _extract_display_name(raw: str | None) -> str:
+    """Return display name from an address header if present."""
+    if not raw:
+        return ""
+    parsed = getaddresses([raw])
+    if not parsed:
+        return ""
+    name = (parsed[0][0] or "").strip()
+    return name
+
+
 def _extract_address_list(raw: str | None) -> list[str]:
     """Parse a comma-separated address list header."""
     if not raw:
@@ -1195,6 +1543,48 @@ def _extract_address_list(raw: str | None) -> list[str]:
     # Split on commas not inside angle brackets
     parts = re.split(r",\s*(?![^<]*>)", raw)
     return [_extract_address(p) for p in parts if p.strip()]
+
+
+_NO_REPLY_PATTERNS: tuple[str, ...] = (
+    "noreply",
+    "no-reply",
+    "donotreply",
+    "do-not-reply",
+    "nepasrepondre",
+    "ne-pas-repondre",
+    "notification",
+    "notifications",
+    "newsletter",
+    "newsletters",
+    "bounce",
+    "mailer-daemon",
+    "postmaster",
+)
+
+
+def _is_likely_temporary_local_part(local: str) -> bool:
+    part = (local or "").strip().lower()
+    if not part:
+        return False
+    if re.fullmatch(r"[a-z0-9]{7,}", part):
+        letters = sum(1 for c in part if c.isalpha())
+        digits = sum(1 for c in part if c.isdigit())
+        if part[0].isdigit() and letters >= 2 and digits >= 2:
+            return True
+    return False
+
+
+def _should_autosave_contact_email(email_addr: str) -> bool:
+    addr = _extract_address(email_addr)
+    if "@" not in addr:
+        return False
+    local, _domain = addr.split("@", 1)
+    local_low = local.lower()
+    if any(pat in local_low for pat in _NO_REPLY_PATTERNS):
+        return False
+    if _is_likely_temporary_local_part(local_low):
+        return False
+    return True
 
 
 def _parse_imap_message(
@@ -1220,6 +1610,25 @@ def _parse_imap_message(
     message_id = (msg.get("Message-ID") or "").strip()
     in_reply_to = (msg.get("In-Reply-To") or "").strip()
     references_hdr = (msg.get("References") or "").strip()
+    receipt_request = bool(
+        (msg.get("Disposition-Notification-To") or "").strip()
+        or (msg.get("Return-Receipt-To") or "").strip()
+    )
+    priority = 5
+    x_priority = (msg.get("X-Priority") or "").strip()
+    importance = (msg.get("Importance") or "").strip().lower()
+    if x_priority:
+        m_prio = re.match(r"^\s*([1-5])", x_priority)
+        if m_prio:
+            parsed_prio = int(m_prio.group(1))
+            if parsed_prio <= 2:
+                priority = 9
+            elif parsed_prio >= 4:
+                priority = 1
+    elif importance in {"high", "urgent"}:
+        priority = 9
+    elif importance == "low":
+        priority = 1
 
     # Parse date
     ricevita_je: str | None = None
@@ -1273,19 +1682,20 @@ def _parse_imap_message(
         "references_hdr": references_hdr or None,
         "uid": uid,
         "de": _extract_address(sender),
+        "de_nomo": _extract_display_name(sender),
         "al": _extract_address_list(al_raw),
         "cc": _extract_address_list(cc_raw),
         "bcc": [],
         "subjekto": subject,
         "korpo": korpo,
         "html_korpo": html_korpo,
-        "prioritato": 5,
+        "prioritato": priority,
         "legita": 0,
         "stelo": 0,
         "spamo": 0,
         "forigita": 0,
         "aldonajoj": aldonajoj_filenames,
-        "etikedoj": [],
+        "etikedoj": ["read-receipt-requested"] if receipt_request else [],
         "ricevita_je": ricevita_je,
         "kreita_je": _now_iso(),
     }
@@ -1340,7 +1750,7 @@ def _fetch_account_mail(acc: dict, max_msgs: int = 100) -> tuple[int, int]:
         fetched = skipped = 0
         for sfolder in server_folders[:_MAX_FOLDERS_PER_ACCOUNT]:
             try:
-                status, _data = imap.select(sfolder, readonly=True)
+                status, _data = imap.select(sfolder, readonly=False)
             except imaplib.IMAP4.error:
                 continue
             if status != "OK":
@@ -1352,12 +1762,32 @@ def _fetch_account_mail(acc: dict, max_msgs: int = 100) -> tuple[int, int]:
             uids_raw = (data[0] or b"").split()
             # take the most recent max_msgs
             recent_uids = uids_raw[-max_msgs:]
+            known_uid_rows = _load_messages(acc["id"], folder_id, limit=max_msgs * 3)
+            known_uids = {
+                str(m.get("uid") or "")
+                for m in known_uid_rows
+                if str(m.get("uid") or "")
+            }
             for uid_bytes in recent_uids:
                 uid = uid_bytes.decode()
-                _, msg_data = imap.fetch(uid, "(RFC822)")
+                if uid in known_uids:
+                    skipped += 1
+                    continue
+                # Fetch both RFC822 and FLAGS
+                _, msg_data = imap.fetch(uid, "(RFC822 FLAGS)")
                 if not msg_data or not msg_data[0]:
                     skipped += 1
                     continue
+                
+                # Parse FLAGS from response
+                server_seen = False
+                for item in msg_data:
+                    if isinstance(item, bytes):
+                        flags_match = re.search(rb'FLAGS \(([^)]+)\)', item)
+                        if flags_match:
+                            flags = flags_match.group(1).decode()
+                            server_seen = '\\Seen' in flags
+                
                 raw = msg_data[0][1] if isinstance(msg_data[0], tuple) else None
                 if not isinstance(raw, bytes):
                     skipped += 1
@@ -1372,8 +1802,9 @@ def _fetch_account_mail(acc: dict, max_msgs: int = 100) -> tuple[int, int]:
 
                 # Auto-save contact from sender
                 sender_addr = parsed.get("de") or ""
-                if sender_addr and "@" in sender_addr:
-                    _upsert_contact(sender_addr)
+                if sender_addr and _should_autosave_contact_email(sender_addr):
+                    sender_name = (parsed.get("de_nomo") or "").strip() or None
+                    _upsert_contact(sender_addr, sender_name)
 
                 # Apply local filters
                 parsed = _apply_filters(parsed, filters)
@@ -1383,18 +1814,53 @@ def _fetch_account_mail(acc: dict, max_msgs: int = 100) -> tuple[int, int]:
                     ff = parsed.pop("_filter_folder")
                     parsed["dosierujo_id"] = _ensure_folder(acc["id"], ff, ff)
 
-                # Save message and attachments
+                # Check if message already exists locally
+                existing_msg = _get_message_by_uid(acc["id"], folder_id, uid)
+                
+                if existing_msg:
+                    # Message exists: sync flags (local first on conflict)
+                    local_legita = bool(existing_msg.get("legita"))
+                    
+                    # If local differs from server, push local to server
+                    if local_legita != server_seen:
+                        try:
+                            if local_legita:
+                                imap.uid('STORE', uid, '+FLAGS', '(\\Seen)')
+                            else:
+                                imap.uid('STORE', uid, '-FLAGS', '(\\Seen)')
+                        except imaplib.IMAP4.error:
+                            pass  # Ignore flag sync errors
+                    
+                    # Skip re-saving existing message
+                    skipped += 1
+                    continue
+                
+                # New message: set legita based on server SEEN flag
+                parsed["legita"] = 1 if server_seen else 0
+
+                # Save message and aldonajoj
                 msg_id = _save_message(parsed)
                 for filename, content, mime_tipo in aldonajoj_data:
                     _save_aldonajo(msg_id, filename, content, mime_tipo)
                 
                 fetched += 1
 
-        imap.logout()
+        try:
+            imap.logout()
+        except (imaplib.IMAP4.error, OSError, ssl.SSLError) as exc:
+            msg = str(exc).lower()
+            if "logout" in msg and "eof" in msg:
+                # Some servers close socket immediately on LOGOUT.
+                # Treat as benign if fetch already completed.
+                pass
+            else:
+                raise
         return fetched, skipped
 
     except (imaplib.IMAP4.error, OSError, ssl.SSLError) as exc:
-        typer.echo(f"[!] IMAP error for {acc['retposto']}: {exc}", err=True)
+        typer.echo(f"[!] IMAP eraro por {acc['retposto']}.", err=True)
+        for step in _imap_error_repair_steps(acc, exc):
+            typer.echo(f"    - {step}", err=True)
         return 0, 0
 
 
@@ -1410,9 +1876,12 @@ def _send_message(
     korpo: str,
     cc: list[str] | None = None,
     bcc: list[str] | None = None,
+    aldonajoj: list[str] | None = None,
     html_korpo: str | None = None,
     in_reply_to: str | None = None,
     references_hdr: str | None = None,
+    prioritato: int | None = None,
+    peti_legokonfirmon: bool = False,
 ) -> bool:
     """Send an email via SMTP. Returns True on success."""
     password = _get_password(acc["id"])
@@ -1422,12 +1891,13 @@ def _send_message(
         )
         return False
 
-    login = acc.get("uzantonomo") or acc["retposto"]
+    login = acc.get("smtp_uzantonomo") or acc.get("uzantonomo") or acc["retposto"]
     host = acc["smtp_servilo"]
     port = acc.get("smtp_haveno", 587)
     use_tls = bool(acc.get("smtp_tls", True))
+    use_ssl = int(port) == 465
 
-    mime = MIMEMultipart("alternative")
+    mime = MIMEMultipart("mixed")
     mime["From"] = f"{acc['nomo']} <{acc['retposto']}>"
     mime["To"] = ", ".join(al)
     mime["Subject"] = subjekto
@@ -1437,17 +1907,59 @@ def _send_message(
         mime["In-Reply-To"] = in_reply_to
     if references_hdr:
         mime["References"] = references_hdr
+    if prioritato is not None:
+        p = max(1, min(9, int(prioritato)))
+        if p >= 8:
+            mime["X-Priority"] = "1 (Highest)"
+            mime["Importance"] = "High"
+            mime["Priority"] = "urgent"
+        elif p <= 2:
+            mime["X-Priority"] = "5 (Lowest)"
+            mime["Importance"] = "Low"
+            mime["Priority"] = "non-urgent"
+        else:
+            mime["X-Priority"] = "3 (Normal)"
+            mime["Importance"] = "Normal"
+    if peti_legokonfirmon:
+        mime["Disposition-Notification-To"] = acc["retposto"]
+        mime["Return-Receipt-To"] = acc["retposto"]
     if cc:
         mime["Cc"] = ", ".join(cc)
-    mime.attach(MIMEText(korpo, "plain", "utf-8"))
+    text_part = MIMEMultipart("alternative")
+    text_part.attach(MIMEText(korpo, "plain", "utf-8"))
     if html_korpo:
-        mime.attach(MIMEText(html_korpo, "html", "utf-8"))
+        text_part.attach(MIMEText(html_korpo, "html", "utf-8"))
+    mime.attach(text_part)
+
+    attachment_names: list[str] = []
+    for raw_path in aldonajoj or []:
+        p = Path(raw_path).expanduser()
+        if not p.exists() or not p.is_file():
+            typer.echo(f"[!] Aldonaĵo nevalida: {p}", err=True)
+            return False
+        try:
+            data = p.read_bytes()
+        except OSError as exc:
+            typer.echo(f"[!] Ne povis legi aldonaĵon {p}: {exc}", err=True)
+            return False
+        guessed, _enc = mimetypes.guess_type(str(p))
+        subtype = "octet-stream"
+        if guessed and "/" in guessed:
+            subtype = guessed.split("/", 1)[1]
+        part = MIMEApplication(data, _subtype=subtype)
+        part.add_header("Content-Disposition", "attachment", filename=p.name)
+        mime.attach(part)
+        attachment_names.append(p.name)
 
     recipients = al + (cc or []) + (bcc or [])
 
     try:
         ctx = ssl.create_default_context()
-        if use_tls:
+        if use_ssl:
+            with smtplib.SMTP_SSL(host, port, context=ctx, timeout=30) as smtp:
+                smtp.login(login, password)
+                smtp.sendmail(acc["retposto"], recipients, mime.as_string())
+        elif use_tls:
             with smtplib.SMTP(host, port, timeout=30) as smtp:
                 smtp.ehlo()
                 smtp.starttls(context=ctx)
@@ -1472,18 +1984,23 @@ def _send_message(
             "bcc": bcc or [],
             "subjekto": subjekto,
             "korpo": korpo,
+            "aldonajoj": attachment_names,
+            "prioritato": prioritato if prioritato is not None else 5,
+            "etikedoj": ["read-receipt-requested"] if peti_legokonfirmon else [],
             "legita": 1,
             "ricevita_je": _now_iso(),
         })
         # Auto-save recipients as contacts
         for addr in recipients:
-            if "@" in addr:
+            if _should_autosave_contact_email(addr):
                 _upsert_contact(addr)
 
         return True
 
     except (smtplib.SMTPException, OSError, ssl.SSLError) as exc:
-        typer.echo(f"[!] SMTP error: {exc}", err=True)
+        typer.echo("[!] SMTP eraro.", err=True)
+        for step in _smtp_error_repair_steps(acc, exc):
+            typer.echo(f"    - {step}", err=True)
         return False
 
 
@@ -1497,6 +2014,236 @@ def _load_text_from_path_or_url(source: str) -> str:
 
 def _strip_html_tags(html: str) -> str:
     return re.sub(r"<[^>]+>", "", html)
+
+
+def _imap_error_repair_steps(acc: dict, exc: Exception) -> list[str]:
+    """Return clear IMAP repair instructions for common failures."""
+    msg = str(exc).strip()
+    lower = msg.lower()
+    retposto = str(acc.get("retposto") or "")
+    host = str(acc.get("imap_servilo") or "")
+    port = int(acc.get("imap_haveno") or 993)
+
+    if isinstance(exc, imaplib.IMAP4.error):
+        if any(
+            token in lower
+            for token in (
+                "auth",
+                "login failed",
+                "invalid credentials",
+                "authenticationfailed",
+                "application-specific password",
+            )
+        ):
+            return [
+                "Aŭtentigo malsukcesis (malĝusta uzantonomo aŭ pasvorto).",
+                (
+                    "Rimedo: ĝisdatigu pasvorton per "
+                    f"`retposto ĝisdatigi-konton \"{retposto}\" --pasvorto`."
+                ),
+                "Se 2FA estas aktiva, uzu aplikaĵan pasvorton.",
+            ]
+        return [
+            "IMAP servilo rifuzis la peton.",
+            (
+                "Rimedo: kontrolu IMAP servilon/havenon per "
+                f"`retposto ĝisdatigi-konton \"{retposto}\" --imap {host} "
+                f"--imap-haveno {port}`."
+            ),
+        ]
+
+    if isinstance(exc, socket.gaierror) or any(
+        token in lower
+        for token in ("name or service not known", "nodename nor servname")
+    ):
+        return [
+            f"Ne eblas rezolvi IMAP servilon: {host!r}.",
+            (
+                "Rimedo: ĝustigu servilan nomon per "
+                f"`retposto ĝisdatigi-konton \"{retposto}\" --imap <servilo>`."
+            ),
+        ]
+
+    if isinstance(exc, TimeoutError) or "timed out" in lower:
+        return [
+            f"IMAP konekto eltempiĝis ({host}:{port}).",
+            "Rimedo: kontrolu retkonekton, fajromuron kaj havenon.",
+        ]
+
+    if isinstance(exc, ConnectionRefusedError) or "connection refused" in lower:
+        return [
+            f"IMAP konekto rifuzita ĉe {host}:{port}.",
+            "Rimedo: kontrolu SSL/agordon kaj ĝustan havenon ĉe via provizanto.",
+        ]
+
+    if isinstance(exc, ssl.SSLError) or any(
+        token in lower
+        for token in ("ssl", "tls", "wrong version number", "certificate verify failed")
+    ):
+        return [
+            f"TLS/SSL eraro dum IMAP konekto al {host}:{port}.",
+            "Rimedo: kontrolu SSL-reĝimon kaj havenon.",
+        ]
+
+    return ["IMAP eraro.", "Rimedo: kontrolu pasvorton kaj IMAP agordojn."]
+
+
+def _smtp_error_repair_steps(acc: dict, exc: Exception) -> list[str]:
+    """Return clear SMTP repair instructions for common failures."""
+    msg = str(exc).strip()
+    lower = msg.lower()
+    retposto = str(acc.get("retposto") or "")
+    host = str(acc.get("smtp_servilo") or "")
+    port = int(acc.get("smtp_haveno") or 587)
+
+    if isinstance(exc, smtplib.SMTPAuthenticationError) or any(
+        token in lower
+        for token in (
+            "authentication",
+            "auth",
+            "login failed",
+            "invalid credentials",
+            "application-specific password",
+        )
+    ):
+        return [
+            "SMTP aŭtentigo malsukcesis (malĝusta uzantonomo aŭ pasvorto).",
+            (
+                "Rimedo: ĝisdatigu pasvorton per "
+                f"`retposto ĝisdatigi-konton \"{retposto}\" --pasvorto`."
+            ),
+        ]
+
+    if isinstance(exc, socket.gaierror) or any(
+        token in lower
+        for token in ("name or service not known", "nodename nor servname")
+    ):
+        return [
+            f"Ne eblas rezolvi SMTP servilon: {host!r}.",
+            (
+                "Rimedo: ĝustigu servilan nomon per "
+                f"`retposto ĝisdatigi-konton \"{retposto}\" --smtp <servilo>`."
+            ),
+        ]
+
+    if isinstance(exc, TimeoutError) or "timed out" in lower:
+        return [
+            f"SMTP konekto eltempiĝis ({host}:{port}).",
+            "Rimedo: kontrolu retkonekton, fajromuron kaj havenon.",
+        ]
+
+    if isinstance(exc, ConnectionRefusedError) or "connection refused" in lower:
+        return [
+            f"SMTP konekto rifuzita ĉe {host}:{port}.",
+            "Rimedo: kontrolu TLS/SSL reĝimon kaj havenon.",
+        ]
+
+    if isinstance(exc, ssl.SSLError) or any(
+        token in lower
+        for token in ("ssl", "tls", "wrong version number", "certificate verify failed")
+    ):
+        return [
+            f"TLS/SSL eraro dum SMTP konekto al {host}:{port}.",
+            "Rimedo: kontrolu TLS/SSL agordon kaj havenon.",
+        ]
+
+    return ["SMTP eraro.", "Rimedo: kontrolu SMTP agordojn kaj pasvorton."]
+
+
+def _verify_account_connectivity(acc: dict, password: str) -> tuple[bool, list[str]]:
+    """Verify IMAP+SMTP login before persisting account."""
+    imap_login = (
+        acc.get("imap_uzantonomo")
+        or acc.get("uzantonomo")
+        or acc["retposto"]
+    )
+    smtp_login = (
+        acc.get("smtp_uzantonomo")
+        or acc.get("uzantonomo")
+        or acc["retposto"]
+    )
+    imap_host = str(acc["imap_servilo"])
+    imap_port = int(acc.get("imap_haveno", 993))
+    smtp_host = str(acc["smtp_servilo"])
+    smtp_port = int(acc.get("smtp_haveno", 587))
+
+    imap_probe_exc = _probe_tcp_connectivity(
+        imap_host, imap_port, timeout=_ACCOUNT_CHECK_CONNECT_TIMEOUT
+    )
+    if imap_probe_exc is not None:
+        return False, _imap_error_repair_steps(acc, imap_probe_exc)
+
+    smtp_probe_exc = _probe_tcp_connectivity(
+        smtp_host, smtp_port, timeout=_ACCOUNT_CHECK_CONNECT_TIMEOUT
+    )
+    if smtp_probe_exc is not None:
+        return False, _smtp_error_repair_steps(acc, smtp_probe_exc)
+
+    try:
+        if bool(acc.get("imap_ssl", True)):
+            ctx = ssl.create_default_context()
+            imap = imaplib.IMAP4_SSL(
+                imap_host,
+                imap_port,
+                ssl_context=ctx,
+                timeout=_ACCOUNT_CHECK_PROTOCOL_TIMEOUT,
+            )
+        else:
+            imap = imaplib.IMAP4(
+                imap_host,
+                imap_port,
+                timeout=_ACCOUNT_CHECK_PROTOCOL_TIMEOUT,
+            )
+        imap.login(str(imap_login), password)
+        try:
+            imap.logout()
+        except (imaplib.IMAP4.error, OSError, ssl.SSLError):
+            pass
+    except (imaplib.IMAP4.error, OSError, ssl.SSLError) as exc:
+        return False, _imap_error_repair_steps(acc, exc)
+
+    try:
+        ctx = ssl.create_default_context()
+        smtp_use_ssl = smtp_port == 465
+        if smtp_use_ssl:
+            with smtplib.SMTP_SSL(
+                smtp_host,
+                smtp_port,
+                context=ctx,
+                timeout=_ACCOUNT_CHECK_PROTOCOL_TIMEOUT,
+            ) as smtp:
+                smtp.login(str(smtp_login), password)
+        elif bool(acc.get("smtp_tls", True)):
+            with smtplib.SMTP(
+                smtp_host,
+                smtp_port,
+                timeout=_ACCOUNT_CHECK_PROTOCOL_TIMEOUT,
+            ) as smtp:
+                smtp.ehlo()
+                smtp.starttls(context=ctx)
+                smtp.login(str(smtp_login), password)
+        else:
+            with smtplib.SMTP_SSL(
+                smtp_host,
+                smtp_port,
+                context=ctx,
+                timeout=_ACCOUNT_CHECK_PROTOCOL_TIMEOUT,
+            ) as smtp:
+                smtp.login(str(smtp_login), password)
+    except (smtplib.SMTPException, OSError, ssl.SSLError) as exc:
+        return False, _smtp_error_repair_steps(acc, exc)
+
+    return True, []
+
+
+def _probe_tcp_connectivity(
+    host: str, port: int, *, timeout: float
+) -> OSError | None:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return None
+    except OSError as exc:
+        return exc
 
 
 def _confirm_esperante(prompt: str, *, default_yes: bool) -> bool:
@@ -1932,10 +2679,16 @@ def _upload_sieve(acc: dict, sieve_script: str,
         return False
 
     password = _get_password(acc["id"])
-    host = sieve_host or acc["imap_servilo"]
-    login = acc.get("uzantonomo") or acc["retposto"]
+    host = sieve_host or acc.get("sieve_servilo") or acc["imap_servilo"]
+    port = int(sieve_port or acc.get("sieve_haveno") or 4190)
+    login = (
+        acc.get("sieve_uzantonomo")
+        or acc.get("imap_uzantonomo")
+        or acc.get("uzantonomo")
+        or acc["retposto"]
+    )
     try:
-        sieve = managesieve.MANAGESIEVE(host, sieve_port)
+        sieve = managesieve.MANAGESIEVE(host, port)
         sieve.authenticate("PLAIN", login, password)
         sieve.putscript("autish-retposto", sieve_script)
         sieve.setactive("autish-retposto")
@@ -1989,8 +2742,15 @@ def _export_vcf(vcf_path: Path) -> int:
     cards: list[str] = []
     for c in contacts:
         vc = vobject.vCard()
-        vc.add("fn").value = c.get("nomo") or c["retposto"]
-        vc.add("email").value = c["retposto"]
+        email_addr = c.get("retposto")
+        vc.add("fn").value = (
+            c.get("nomo")
+            or c.get("organizo")
+            or email_addr
+            or f"Kontakto #{str(c.get('uuid') or '')[:8]}"
+        )
+        if email_addr:
+            vc.add("email").value = email_addr
         if c.get("organizo"):
             vc.add("org").value = [c["organizo"]]
         if c.get("telefono"):
@@ -2036,6 +2796,7 @@ def _launch_tui() -> None:
             add_spam_block=_add_spam_block,
             is_spam=_is_spam,
             ensure_folder=_ensure_folder,
+            find_drafts_folder=_find_drafts_folder,
             save_account=_save_account,
             set_password=_set_password,
             load_spam_blocks=_load_spam_blocks,
@@ -2067,13 +2828,35 @@ def aldoni_konton(
     imap_servilo: str | None = typer.Option(
         None, "--imap", help="IMAP server hostname."
     ),
+    imap_uzantonomo: str | None = typer.Option(
+        None, "--imap-uzantonomo", help="IMAP username (defaults to email)."
+    ),
     smtp_servilo: str | None = typer.Option(
         None, "--smtp", help="SMTP server hostname."
+    ),
+    smtp_uzantonomo: str | None = typer.Option(
+        None, "--smtp-uzantonomo", help="SMTP username (defaults to email)."
     ),
     imap_haveno: int = typer.Option(993, "--imap-haveno", help="IMAP port."),
     smtp_haveno: int = typer.Option(587, "--smtp-haveno", help="SMTP port."),
     imap_ssl: bool = typer.Option(True, "--imap-ssl/--no-imap-ssl"),
     smtp_tls: bool = typer.Option(True, "--smtp-tls/--no-smtp-tls"),
+    webmail_url: str | None = typer.Option(
+        None, "--webmail-url", help="Webmail URL."
+    ),
+    sieve_servilo: str | None = typer.Option(
+        None, "--sieve-servilo", help="ManageSieve hostname."
+    ),
+    sieve_haveno: int = typer.Option(4190, "--sieve-haveno", help="ManageSieve port."),
+    sieve_starttls: bool = typer.Option(
+        True, "--sieve-starttls/--no-sieve-starttls",
+        help="Use STARTTLS for ManageSieve.",
+    ),
+    sieve_uzantonomo: str | None = typer.Option(
+        None,
+        "--sieve-uzantonomo",
+        help="ManageSieve username (defaults to IMAP username).",
+    ),
 ) -> None:
     """Add a new email account (interactive if options omitted)."""
     if not nomo:
@@ -2094,11 +2877,23 @@ def aldoni_konton(
             "[i] Aŭtomate deduktis servilojn por ĉi tiu retpoŝta domajno. "
             "Uzu --imap/--smtp por mane ŝanĝi."
         )
+        if int(smtp_haveno) == 465:
+            smtp_tls = False
 
     if not imap_servilo:
         imap_servilo = typer.prompt("IMAP server")
     if not smtp_servilo:
         smtp_servilo = typer.prompt("SMTP server")
+    if not imap_uzantonomo:
+        imap_uzantonomo = retposto
+    if not smtp_uzantonomo:
+        smtp_uzantonomo = retposto
+    if not sieve_servilo:
+        sieve_servilo = imap_servilo
+    if not sieve_uzantonomo:
+        sieve_uzantonomo = imap_uzantonomo
+    if int(smtp_haveno) == 465:
+        smtp_tls = False
     password = typer.prompt("Password", hide_input=True)
 
     acc = {
@@ -2111,7 +2906,25 @@ def aldoni_konton(
         "smtp_haveno": smtp_haveno,
         "smtp_tls": smtp_tls,
         "uzantonomo": retposto,
+        "imap_uzantonomo": imap_uzantonomo,
+        "smtp_uzantonomo": smtp_uzantonomo,
+        "webmail_url": webmail_url or "",
+        "sieve_servilo": sieve_servilo,
+        "sieve_haveno": sieve_haveno,
+        "sieve_starttls": sieve_starttls,
+        "sieve_uzantonomo": sieve_uzantonomo,
     }
+    typer.echo("[i] Testas IMAP/SMTP agordojn…")
+    ok, hints = _verify_account_connectivity(acc, password)
+    if not ok:
+        typer.echo("[!] Konto ne aldonita: agordo/aŭtentigo malsukcesis.", err=True)
+        for hint in hints:
+            typer.echo(f"    - {hint}", err=True)
+        typer.echo(
+            "    - Se aŭtomata dedukto fiaskis, rerulu kun `--imap` kaj `--smtp`.",
+            err=True,
+        )
+        raise typer.Exit(1)
     acc_id = _save_account(acc)
     _set_password(acc_id, password)
     typer.echo(f"[✓] Konto aldonis (id={acc_id}): {retposto}")
@@ -2147,14 +2960,25 @@ def listigi_kontojn() -> None:
     table.add_column("Nomo")
     table.add_column("Retpoŝto")
     table.add_column("IMAP")
+    table.add_column("IMAP uzanto")
     table.add_column("SMTP")
+    table.add_column("SMTP uzanto")
+    table.add_column("Sieve")
+    table.add_column("Webmail")
     for a in accounts:
         table.add_row(
             str(a["id"]),
             a["nomo"],
             a["retposto"],
             f"{a['imap_servilo']}:{a['imap_haveno']}",
+            str(a.get("imap_uzantonomo") or a.get("uzantonomo") or a["retposto"]),
             f"{a['smtp_servilo']}:{a['smtp_haveno']}",
+            str(a.get("smtp_uzantonomo") or a.get("uzantonomo") or a["retposto"]),
+            (
+                f"{a.get('sieve_servilo') or a['imap_servilo']}:"
+                f"{int(a.get('sieve_haveno') or 4190)}"
+            ),
+            str(a.get("webmail_url") or "-"),
         )
     console.print(table)
 
@@ -2228,6 +3052,12 @@ def sendi(
     konto: str | None = typer.Option(
         None, "-k", "--konto", help="Account id or email."
     ),
+    prioritato: int = typer.Option(
+        5, "--prioritato", min=1, max=9, help="Outgoing priority (1-9)."
+    ),
+    legokonfirmo: bool = typer.Option(
+        False, "--legokonfirmo", help="Request read receipt."
+    ),
 ) -> None:
     """Send an email from the command line."""
     accounts = _load_accounts()
@@ -2293,6 +3123,8 @@ def sendi(
         cc_list,
         bcc_list,
         html_korpo=body_html,
+        prioritato=prioritato,
+        peti_legokonfirmon=legokonfirmo,
     )
     if ok:
         typer.echo(f"[✓] Sendita al: {', '.join(al_list)}")
@@ -2526,13 +3358,9 @@ def plusendi_mesagon(
 
 
 @kontakto_app.command("listigi")
-def kontakto_listigi(
-    serci: str | None = typer.Option(
-        None, "-s", "--serci", help="Search term."
-    )
-) -> None:
+def kontakto_listigi() -> None:
     """List contacts (koresponda listo)."""
-    contacts = _find_contact(serci) if serci else _load_contacts()
+    contacts = _load_contacts()
     if not contacts:
         typer.echo("Neniuj kontaktoj trovitaj.")
         return
@@ -2545,7 +3373,7 @@ def kontakto_listigi(
         table.add_row(
             str(c["id"]),
             c.get("nomo") or "",
-            c["retposto"],
+            c.get("retposto") or "",
             c.get("organizo") or "",
         )
     console.print(table)
@@ -2553,14 +3381,181 @@ def kontakto_listigi(
 
 @kontakto_app.command("aldoni")
 def kontakto_aldoni(
-    retposto: str = typer.Argument(..., help="Email address."),
+    retposto: str | None = typer.Argument(None, help="Email address."),
     nomo: str | None = typer.Option(None, "-n", "--nomo"),
+    familia_nomo: str | None = typer.Option(None, "-F", "--familia-nomo"),
     organizo: str | None = typer.Option(None, "-o", "--organizo"),
     telefono: str | None = typer.Option(None, "-t", "--telefono"),
 ) -> None:
     """Add or update a contact."""
-    _upsert_contact(retposto.lower().strip(), nomo, organizo, telefono)
-    typer.echo(f"[✓] Kontakto savis: {retposto}")
+    if not any([nomo, familia_nomo, organizo]):
+        typer.echo(
+            "[!] Donu almenaŭ unu el: --nomo, --familia-nomo, --organizo.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    if retposto:
+        _upsert_contact(
+            retposto.lower().strip(),
+            nomo=nomo,
+            familia_nomo=familia_nomo,
+            organizo=organizo,
+            telefono=telefono,
+        )
+        typer.echo(f"[✓] Kontakto savis: {retposto}")
+        return
+    row = _insert_contact_without_email(
+        nomo=nomo,
+        familia_nomo=familia_nomo,
+        organizo=organizo,
+        telefono=telefono,
+    )
+    typer.echo(
+        f"[✓] Kontakto savis sen retpoŝto: "
+        f"#{str(row.get('uuid') or '')[:8]}"
+    )
+
+
+@kontakto_app.command("serci")
+def kontakto_serci(
+    demando: str | None = typer.Argument(None, help="Ĝenerala serĉ-demando."),
+    nomo: str | None = typer.Option(None, "-n", "--nomo"),
+    familia_nomo: str | None = typer.Option(None, "-F", "--familia-nomo"),
+    organizo: str | None = typer.Option(None, "-o", "--organizo"),
+    retposto: str | None = typer.Option(None, "-r", "--retposto"),
+    telefono: str | None = typer.Option(None, "-t", "--telefonnumero"),
+    naskig_loko: str | None = typer.Option(None, "--naskig-loko"),
+    organiza_identiga_numero: str | None = typer.Option(
+        None, "--organiza-identiga-numero"
+    ),
+) -> None:
+    if demando is None and not any(
+        [
+            nomo,
+            familia_nomo,
+            organizo,
+            retposto,
+            telefono,
+            naskig_loko,
+            organiza_identiga_numero,
+        ]
+    ):
+        typer.echo("[!] Donu demando-n aŭ almenaŭ unu filtrilon.", err=True)
+        raise typer.Exit(1)
+    contacts = _load_contacts()
+
+    def _contains(hay: str | None, needle: str | None) -> bool:
+        if not needle:
+            return True
+        return needle.lower() in (hay or "").lower()
+
+    results: list[dict] = []
+    for c in contacts:
+        if demando and not any(
+            [
+                _contains(c.get("nomo"), demando),
+                _contains(c.get("familia_nomo"), demando),
+                _contains(c.get("organizo"), demando),
+                _contains(c.get("retposto"), demando),
+                _contains(c.get("telefono"), demando),
+            ]
+        ):
+            continue
+        if not _contains(c.get("nomo"), nomo):
+            continue
+        if not _contains(c.get("familia_nomo"), familia_nomo):
+            continue
+        if not _contains(c.get("organizo"), organizo):
+            continue
+        if not _contains(c.get("retposto"), retposto):
+            continue
+        if not _contains(c.get("telefono"), telefono):
+            continue
+        if not _contains(c.get("naskig_loko"), naskig_loko):
+            continue
+        if not _contains(c.get("organiza_identiga_numero"), organiza_identiga_numero):
+            continue
+        results.append(c)
+
+    if not results:
+        typer.echo("Neniuj kontaktoj trovitaj.")
+        return
+
+    default_cols = {
+        "organizo": "Organizo",
+        "nomo": "Nomo",
+        "familia_nomo": "Familia-nomo",
+        "retposto": "Retpoŝto",
+        "telefono": "Telefonnumero",
+        "uuid": "UUID",
+    }
+    searched_cols: list[tuple[str, str]] = []
+    if naskig_loko:
+        searched_cols.append(("naskig_loko", "Naskiĝloko"))
+    if organiza_identiga_numero:
+        searched_cols.append(("organiza_identiga_numero", "Organiza-ID"))
+
+    table = Table(title=f"Serĉrezultoj: {len(results)}")
+    for _key, label in searched_cols:
+        table.add_column(label)
+    for key in ("organizo", "nomo", "familia_nomo", "retposto", "telefono", "uuid"):
+        table.add_column(default_cols[key], style="dim" if key == "uuid" else None)
+
+    for c in results:
+        row: list[str] = []
+        for key, _label in searched_cols:
+            row.append(str(c.get(key) or ""))
+        row.extend(
+            [
+                str(c.get("organizo") or ""),
+                str(c.get("nomo") or ""),
+                str(c.get("familia_nomo") or ""),
+                str(c.get("retposto") or ""),
+                str(c.get("telefono") or ""),
+                f"#{str(c.get('uuid') or '')[:8]}",
+            ]
+        )
+        table.add_row(*row)
+    console.print(table)
+
+
+@kontakto_app.command("vidi")
+def kontakto_vidi(
+    identigilo: str = typer.Argument(..., help="UUID aŭ prefikso."),
+) -> None:
+    contacts = _load_contacts()
+    lookup = identigilo[1:] if identigilo.startswith("#") else identigilo
+    exact = [c for c in contacts if str(c.get("uuid") or "") == lookup]
+    row = exact[0] if len(exact) == 1 else None
+    if row is None:
+        prefix = [c for c in contacts if str(c.get("uuid") or "").startswith(lookup)]
+        if len(prefix) == 1:
+            row = prefix[0]
+    if row is None:
+        typer.echo(f"[!] Kontakto ne trovita: {identigilo}", err=True)
+        raise typer.Exit(1)
+    table = Table(title=f"Kontakto #{str(row.get('uuid') or '')[:8]}")
+    table.add_column("Kampo", style="cyan")
+    table.add_column("Valoro")
+    fields = [
+        ("organizo", row.get("organizo"), True, False),
+        ("nomo", row.get("nomo"), True, False),
+        ("familia-nomo", row.get("familia_nomo"), True, True),
+        ("retpoŝto", row.get("retposto"), False, False),
+        ("telefonnumero", row.get("telefono"), False, False),
+        ("naskiĝdato", row.get("naskig_dato"), False, False),
+        ("naskiĝloko", row.get("naskig_loko"), False, False),
+        ("organiza-identiga-numero", row.get("organiza_identiga_numero"), False, False),
+        ("uuid", f"#{str(row.get('uuid') or '')}", False, False),
+    ]
+    for label, val, bold, upper in fields:
+        if val in (None, "", [], {}):
+            continue
+        text = str(val).upper() if upper else str(val)
+        if bold:
+            text = f"[bold]{text}[/bold]"
+        table.add_row(label, text)
+    console.print(table)
 
 
 @kontakto_app.command("forigi")
@@ -2771,9 +3766,27 @@ def gisdatigi_konton(
     id_adr: str = typer.Argument(..., help="Account id or email address."),
     nomo: str | None = typer.Option(None, "-n", "--nomo", help="Display name."),
     imap_servilo: str | None = typer.Option(None, "--imap", help="IMAP server."),
+    imap_uzantonomo: str | None = typer.Option(
+        None, "--imap-uzantonomo", help="IMAP username."
+    ),
     imap_haveno: int | None = typer.Option(None, "--imap-haveno"),
     smtp_servilo: str | None = typer.Option(None, "--smtp", help="SMTP server."),
+    smtp_uzantonomo: str | None = typer.Option(
+        None, "--smtp-uzantonomo", help="SMTP username."
+    ),
     smtp_haveno: int | None = typer.Option(None, "--smtp-haveno"),
+    webmail_url: str | None = typer.Option(None, "--webmail-url", help="Webmail URL."),
+    sieve_servilo: str | None = typer.Option(
+        None, "--sieve-servilo", help="ManageSieve server."
+    ),
+    sieve_haveno: int | None = typer.Option(None, "--sieve-haveno"),
+    sieve_starttls: bool | None = typer.Option(
+        None, "--sieve-starttls/--no-sieve-starttls",
+        help="Use STARTTLS for ManageSieve.",
+    ),
+    sieve_uzantonomo: str | None = typer.Option(
+        None, "--sieve-uzantonomo", help="ManageSieve username."
+    ),
     pasvorto: bool = typer.Option(
         False, "-p", "--pasvorto", help="Prompt for new password."
     ),
@@ -2789,12 +3802,26 @@ def gisdatigi_konton(
         updates["nomo"] = nomo
     if imap_servilo is not None:
         updates["imap_servilo"] = imap_servilo
+    if imap_uzantonomo is not None:
+        updates["imap_uzantonomo"] = imap_uzantonomo
     if imap_haveno is not None:
         updates["imap_haveno"] = imap_haveno
     if smtp_servilo is not None:
         updates["smtp_servilo"] = smtp_servilo
+    if smtp_uzantonomo is not None:
+        updates["smtp_uzantonomo"] = smtp_uzantonomo
     if smtp_haveno is not None:
         updates["smtp_haveno"] = smtp_haveno
+    if webmail_url is not None:
+        updates["webmail_url"] = webmail_url
+    if sieve_servilo is not None:
+        updates["sieve_servilo"] = sieve_servilo
+    if sieve_haveno is not None:
+        updates["sieve_haveno"] = sieve_haveno
+    if sieve_starttls is not None:
+        updates["sieve_starttls"] = int(bool(sieve_starttls))
+    if sieve_uzantonomo is not None:
+        updates["sieve_uzantonomo"] = sieve_uzantonomo
 
     if updates:
         _update_account(acc["id"], updates)
@@ -3090,9 +4117,23 @@ def _accounts_to_toml(accounts: list[dict], passwords: dict[int, str]) -> bytes:
             "imap_servilo": acc.get("imap_servilo") or "",
             "imap_haveno": int(acc.get("imap_haveno") or 993),
             "imap_ssl": bool(acc.get("imap_ssl", True)),
+            "imap_uzantonomo": acc.get("imap_uzantonomo")
+            or acc.get("uzantonomo")
+            or "",
             "smtp_servilo": acc.get("smtp_servilo") or "",
             "smtp_haveno": int(acc.get("smtp_haveno") or 587),
             "smtp_tls": bool(acc.get("smtp_tls", True)),
+            "smtp_uzantonomo": acc.get("smtp_uzantonomo")
+            or acc.get("uzantonomo")
+            or "",
+            "webmail_url": acc.get("webmail_url") or "",
+            "sieve_servilo": acc.get("sieve_servilo") or acc.get("imap_servilo") or "",
+            "sieve_haveno": int(acc.get("sieve_haveno") or 4190),
+            "sieve_starttls": bool(acc.get("sieve_starttls", True)),
+            "sieve_uzantonomo": acc.get("sieve_uzantonomo")
+            or acc.get("imap_uzantonomo")
+            or acc.get("uzantonomo")
+            or "",
             "uzantonomo": acc.get("uzantonomo") or "",
             "subskribo": acc.get("subskribo") or "",
         }
@@ -3372,9 +4413,23 @@ def konton() -> None:
             "imap_servilo": acc.get("imap_servilo") or "",
             "imap_haveno": int(acc.get("imap_haveno") or 993),
             "imap_ssl": bool(acc.get("imap_ssl", True)),
+            "imap_uzantonomo": acc.get("imap_uzantonomo")
+            or acc.get("uzantonomo")
+            or "",
             "smtp_servilo": acc.get("smtp_servilo") or "",
             "smtp_haveno": int(acc.get("smtp_haveno") or 587),
             "smtp_tls": bool(acc.get("smtp_tls", True)),
+            "smtp_uzantonomo": acc.get("smtp_uzantonomo")
+            or acc.get("uzantonomo")
+            or "",
+            "webmail_url": acc.get("webmail_url") or "",
+            "sieve_servilo": acc.get("sieve_servilo") or acc.get("imap_servilo") or "",
+            "sieve_haveno": int(acc.get("sieve_haveno") or 4190),
+            "sieve_starttls": bool(acc.get("sieve_starttls", True)),
+            "sieve_uzantonomo": acc.get("sieve_uzantonomo")
+            or acc.get("imap_uzantonomo")
+            or acc.get("uzantonomo")
+            or "",
             "uzantonomo": acc.get("uzantonomo") or "",
             "subskribo": acc.get("subskribo") or "",
         })

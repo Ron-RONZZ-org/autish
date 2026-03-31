@@ -88,6 +88,17 @@ _HTML_TEMPLATE = """\
     line-height: 1.65;
     color: #333;
   }}
+  h1 {{ font-size: 2.1rem; margin-top: 1.2rem; margin-bottom: 0.6rem; }}
+  h2 {{ font-size: 1.75rem; margin-top: 1.1rem; margin-bottom: 0.55rem; }}
+  h3 {{ font-size: 1.45rem; margin-top: 1rem; margin-bottom: 0.5rem; }}
+  h4 {{ font-size: 1.22rem; margin-top: 0.95rem; margin-bottom: 0.45rem; }}
+  h5 {{ font-size: 1.07rem; margin-top: 0.9rem; margin-bottom: 0.4rem; }}
+  h6 {{
+    font-size: 0.96rem;
+    margin-top: 0.85rem;
+    margin-bottom: 0.35rem;
+    letter-spacing: 0.01em;
+  }}
   details {{ margin-bottom: 0.4rem; }}
   summary {{
     cursor: pointer;

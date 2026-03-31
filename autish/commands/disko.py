@@ -318,47 +318,48 @@ def mount_disk(
 
 @app.command("malmunti")
 def unmount_disk(
-    nomo: str = typer.Argument(..., help="Device name or mount point"),
+    nomoj: list[str] = typer.Argument(..., help="Device name(s) or mount point(s)"),
 ) -> None:
-    """Unmount a disk."""
-    # Could be device path or mount point
-    if nomo.startswith("/dev/"):
-        target = nomo
-    elif nomo.startswith("/"):
-        target = nomo
-    else:
-        target = f"/dev/{nomo}"
-    
-    # Check if mounted
+    """Unmount one or more disks."""
     result = _run_command(["mount"], check=True)
-    mounted = False
-    mount_point = None
-    
-    for line in result.stdout.split("\n"):
-        if target in line:
-            mounted = True
-            parts = line.split()
-            if len(parts) >= 3:
-                mount_point = parts[2]
-            break
-    
-    if not mounted:
-        typer.echo(f"{target} ne estas muntita.")
-        return
-    
-    # Unmount
-    typer.echo(f"Malmuntante {target}...")
-    typer.echo("(Bezonas sudo rajtojn)")
-    
-    result = _run_command(
-        ["sudo", "umount", target],
-        check=False
-    )
-    
-    if result.returncode != 0:
-        typer.echo(f"Eraro malmuntante: {result.stderr.strip()}", err=True)
+    mount_lines = result.stdout.split("\n")
+    any_failed = False
+
+    for nomo in nomoj:
+        if nomo.startswith("/dev/") or nomo.startswith("/"):
+            target = nomo
+        else:
+            target = f"/dev/{nomo}"
+
+        mounted = False
+        mount_point = None
+        for line in mount_lines:
+            if target in line:
+                mounted = True
+                parts = line.split()
+                if len(parts) >= 3:
+                    mount_point = parts[2]
+                break
+
+        if not mounted:
+            typer.echo(f"{target} ne estas muntita.")
+            continue
+
+        typer.echo(f"Malmuntante {target}...")
+        typer.echo("(Bezonas sudo rajtojn)")
+        unmount_result = _run_command(["sudo", "umount", target], check=False)
+
+        if unmount_result.returncode != 0:
+            typer.echo(
+                f"Eraro malmuntante {target}: {unmount_result.stderr.strip()}",
+                err=True,
+            )
+            any_failed = True
+            continue
+
+        typer.echo(f"[✓] Sukcese malmuntis {target}")
+        if mount_point:
+            typer.echo(f"    (antaŭe ĉe: {mount_point})")
+
+    if any_failed:
         raise typer.Exit(code=1)
-    
-    typer.echo(f"[✓] Sukcese malmuntis {target}")
-    if mount_point:
-        typer.echo(f"    (antaŭe ĉe: {mount_point})")

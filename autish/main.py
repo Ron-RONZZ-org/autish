@@ -6,6 +6,7 @@ from autish.commands import (
     bluetooth,
     disko,
     encik,
+    kontakto,
     kp,
     md,
     retposto,
@@ -13,6 +14,7 @@ from autish.commands import (
     shelo,
     sistemo,
     tempo,
+    usb,
     uzanto,
     vorto,
     wifi,
@@ -34,11 +36,13 @@ app.add_typer(kp.app, name="kp")
 app.add_typer(shelo.app, name="shelo")
 app.add_typer(vorto.app, name="vorto")
 app.add_typer(retposto.app, name="retposto")
+app.add_typer(kontakto.app, name="kontakto")
 app.add_typer(sekurkopio.app, name="sekurkopio")
 app.add_typer(uzanto.app, name="uzanto")
 app.add_typer(md.app, name="md")
 app.add_typer(encik.app, name="encik")
 app.add_typer(disko.app, name="disko")
+app.add_typer(usb.app, name="usb")
 
 
 @app.command("help")

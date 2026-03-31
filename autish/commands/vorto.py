@@ -23,11 +23,14 @@ import uuid as _uuid_mod
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 import typer
-from rich.console import Console
+from rich.console import Console, Group
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Typer app
@@ -207,6 +210,8 @@ _TIPO_MAP: dict[str, str] = {
     "vn": "verbo-netransitiva",
     "netransitiva": "verbo-netransitiva",
     "verbo-netransitiva": "verbo-netransitiva",
+    "vr": "refleksiva-verbo",
+    "refleksiva-verbo": "refleksiva-verbo",
     "aj": "adjektivo",
     "adjektivo": "adjektivo",
     "av": "adverbo",
@@ -551,32 +556,52 @@ def _sync_bidirectional_links(
             linked["modifita_je"] = now
 
 
+def _collect_vorto_incoming_refs(
+    entries: list[dict], target_uuids: set[str]
+) -> list[str]:
+    warnings: list[str] = []
+    for source in entries:
+        source_uuid = str(source.get("uuid") or "")
+        if source_uuid in target_uuids:
+            continue
+        source_text = str(source.get("teksto") or source_uuid[:8] or "-")
+        for link_ref in source.get("ligiloj") or []:
+            if str(link_ref) in target_uuids:
+                warnings.append(
+                    "- "
+                    f"{source_text} (#{source_uuid[:8]}) -> ligilo al "
+                    f"#{str(link_ref)[:8]}"
+                )
+    return warnings
+
+
 def _find_entry(uid_or_teksto: str, entries: list[dict]) -> dict | None:
     """Locate an entry by exact UUID, UUID prefix, or case-insensitive exact text."""
+    lookup = uid_or_teksto[1:] if uid_or_teksto.startswith("#") else uid_or_teksto
     # Exact UUID match
     for e in entries:
-        if e["uuid"] == uid_or_teksto:
+        if e["uuid"] == lookup:
             return e
     # UUID prefix match
-    prefix_matches = [e for e in entries if e["uuid"].startswith(uid_or_teksto)]
+    prefix_matches = [e for e in entries if e["uuid"].startswith(lookup)]
     if len(prefix_matches) == 1:
         return prefix_matches[0]
     if len(prefix_matches) > 1:
         typer.echo(
-            f"Ambiguous UUID prefix '{uid_or_teksto}' — "
+            f"Ambiguous UUID prefix '{lookup}' — "
             f"{len(prefix_matches)} entries match. Use a longer prefix.",
             err=True,
         )
         return None
     # Case-insensitive text match
     text_matches = [
-        e for e in entries if e["teksto"].lower() == uid_or_teksto.lower()
+        e for e in entries if e["teksto"].lower() == lookup.lower()
     ]
     if len(text_matches) == 1:
         return text_matches[0]
     if len(text_matches) > 1:
         typer.echo(
-            f"Multiple entries match text '{uid_or_teksto}'. Use UUID instead.",
+            f"Multiple entries match text '{lookup}'. Use UUID instead.",
             err=True,
         )
         return None
@@ -608,19 +633,23 @@ def _fuzzy_text_matches(entries: list[dict], query: str, limit: int = 50) -> lis
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _display_entry(entry: dict, all_entries: list[dict] | None = None) -> None:
+def _display_entry(
+    entry: dict,
+    all_entries: list[dict] | None = None,
+    *,
+    montri_cxion: bool = False,
+) -> None:
     """Render one entry using a Rich panel."""
     uid_short = entry["uuid"][:8]
-    lines: list[str] = [
-        f"[bold]{entry['teksto']}[/bold]  [dim]#{uid_short}[/dim]",
-        "",
-    ]
+    header = Text()
+    header.append(str(entry["teksto"]), style="bold")
+    header.append(f"  #{uid_short}", style="dim")
+    lines: list[str] = []
 
     def _row(label: str, value: str) -> None:
         if value:
-            lines.append(f"  [dim]{label:<12}[/dim] {value}")
+            lines.append(f"{label} {value}")
 
-    _row("lingvo:", entry.get("lingvo") or "")
     kategorio = entry.get("kategorio") or ""
     tipos = entry.get("tipo") or []
     # Join multiple tipos with commas
@@ -630,28 +659,39 @@ def _display_entry(entry: dict, all_entries: list[dict] | None = None) -> None:
         else str(tipos) if tipos else ""
     )
     tipo_full = kategorio + ("/" + tipo_str if tipo_str else "")
-    _row("tipo:", tipo_full)
-    _row("temo:", entry.get("temo") or "")
-    _row("tono:", entry.get("tono") or "")
-    nivelo = entry.get("nivelo")
-    _row("nivelo:", f"{nivelo:.1f}" if nivelo is not None else "")
-    _row("autoro:", entry.get("autoro") or "")
-    _row("verko:", entry.get("verko") or "")
+    lang = entry.get("lingvo") or ""
+    if lang and tipo_full:
+        lines.append(f"{lang} - {tipo_full}")
+    elif lang or tipo_full:
+        lines.append(lang or tipo_full)
+    if montri_cxion:
+        lines.append("")
+        _row("temo:", entry.get("temo") or "")
+        _row("tono:", entry.get("tono") or "")
+        nivelo = entry.get("nivelo")
+        _row("nivelo:", f"{nivelo:.1f}" if nivelo is not None else "")
+        _row("autoro:", entry.get("autoro") or "")
+        _row("verko:", entry.get("verko") or "")
 
     difinoj: list[str] = entry.get("difinoj") or []
     uzoj: list[str] = entry.get("uzoj") or []
     if difinoj:
-        lines.append(f"  [dim]{'difinoj:':<12}[/dim]")
+        if lines and lines[-1] != "":
+            lines.append("")
+        lines.append("**difinoj:**")
         for i, d in enumerate(difinoj, 1):
-            lines.append(f"    [bold]{i}. {d}[/bold]")
+            lines.append(f"**{i}. {d}**")
             if i - 1 < len(uzoj) and uzoj[i - 1]:
-                lines.append(f"       [italic dim]{uzoj[i - 1]}[/italic dim]")
+                lines.append(f"*{uzoj[i - 1]}*")
 
-    etikedoj: dict[str, str] = entry.get("etikedoj") or {}
-    if etikedoj:
-        lines.append(f"  [dim]{'etikedoj:':<12}[/dim]")
-        for k, v in etikedoj.items():
-            lines.append(f"    {k}: {v}")
+    if montri_cxion:
+        etikedoj: dict[str, str] = entry.get("etikedoj") or {}
+        if etikedoj:
+            if lines and lines[-1] != "":
+                lines.append("")
+            lines.append("**etikedoj:**")
+            for k, v in etikedoj.items():
+                lines.append(f"{k}: {v}")
 
     ligiloj: list[str] = entry.get("ligiloj") or []
     if ligiloj:
@@ -666,20 +706,38 @@ def _display_entry(entry: dict, all_entries: list[dict] | None = None) -> None:
                     continue
                 text = linked.get("teksto") or ""
                 defs = linked.get("difinoj") or []
-                detail = f"{text}: {defs[0]}" if defs else text
+                detail = f"**{text}**: {defs[0]}" if defs else f"**{text}**"
                 if len(detail) > 42:
                     detail = detail[:39] + "..."
-                linked_parts.append(detail)
+                tmp = NamedTemporaryFile(  # noqa: SIM115
+                    mode="w",
+                    encoding="utf-8",
+                    suffix=".md",
+                    prefix="autish-vorto-link-",
+                    delete=False,
+                )
+                try:
+                    tmp.write(f"# {text}\n\n")
+                    if defs:
+                        tmp.write(f"{defs[0]}\n")
+                finally:
+                    tmp.close()
+                linked_parts.append(f"[{detail}](file://{tmp.name})")
+        if lines and lines[-1] != "":
+            lines.append("")
         _row("ligiloj:", " | ".join(linked_parts))
 
-    lines.append("")
-    _row("kreita:", (entry.get("kreita_je") or "")[:19])
-    modifita = entry.get("modifita_je") or ""
-    kreita = entry.get("kreita_je") or ""
-    if modifita and modifita != kreita:
-        _row("modifita:", modifita[:19])
+    if montri_cxion:
+        lines.append("")
+        _row("kreita:", (entry.get("kreita_je") or "")[:19])
+        modifita = entry.get("modifita_je") or ""
+        kreita = entry.get("kreita_je") or ""
+        if modifita and modifita != kreita:
+            _row("modifita:", modifita[:19])
 
-    console.print(Panel("\n".join(lines), border_style="dim", expand=False))
+    md_obj = Markdown("\n".join(lines))
+    panel = Panel(Group(header, Text(""), md_obj), border_style="dim", expand=False)
+    console.print(panel)
 
 
 def _display_results(entries: list[dict]) -> None:
@@ -791,7 +849,8 @@ def aldoni(
         "--tipo",
         help="Subtype (comma-separated for multiple): substantivo-neŭtra/su, "
         "substantivo-ina/sui, substantivo-vira/suv, verbo/ve, "
-        "verbo-transitiva/vt, verbo-netransitiva/vn, adjektivo/aj, adverbo/av, "
+        "verbo-transitiva/vt, verbo-netransitiva/vn, refleksiva-verbo/vr, "
+        "adjektivo/aj, adverbo/av, "
         "parola/pa, skriba/sk, citaĵo/ci, ŝerco/ŝe, proverbo/pr, poemo/po, "
         "ekzemplo/ek. Example: --tipo 'aj,su' for adjective and noun.",
     ),
@@ -810,7 +869,8 @@ def aldoni(
         "--difino",
         help=(
             "Definition. Repeat flag for multiple. "
-            'Syntax: "{definition}:*{example}*" to attach an example.'
+            'Syntax: "{definition}:*{example}*" to attach an example. '
+            "If text starts with !, quote it in shell (e.g. -d '!grave')."
         ),
     ),
     etikedo: list[str] | None = typer.Option(
@@ -955,6 +1015,9 @@ def vidi(
     inverse: bool = typer.Option(
         False, "-i", "--inversa", help="List oldest 50 first (only without UUID)."
     ),
+    montri_cxion: bool = typer.Option(
+        False, "-a", "--cxio", help="Montri ĉiujn detalojn (inkluzive datojn)."
+    ),
 ) -> None:
     """View a wordbank entry, or list the latest 50 entries when called
     without argument."""
@@ -981,7 +1044,7 @@ def vidi(
                 f"Ekzakta kongruo ne trovita. Montras plej proksiman: "
                 f"\"{closest[0]['teksto']}\""
             )
-            _display_entry(closest[0], entries)
+            _display_entry(closest[0], entries, montri_cxion=montri_cxion)
             return
         # Multiple approximate matches — ask user to pick one
         typer.echo(f"Ekzakta kongruo ne trovita por {uid!r}. Proksimaj rezultoj:")
@@ -1005,9 +1068,9 @@ def vidi(
         except ValueError:
             typer.echo("Nevalida elekto.", err=True)
             raise typer.Exit(code=1) from None
-        _display_entry(closest[idx], entries)
+        _display_entry(closest[idx], entries, montri_cxion=montri_cxion)
         return
-    _display_entry(entry, entries)
+    _display_entry(entry, entries, montri_cxion=montri_cxion)
 
 
 @app.command("modifi")
@@ -1254,6 +1317,12 @@ def forigi(
     if entry is None:
         typer.echo(f"Eniro ne trovita: {uid_or_teksto!r}", err=True)
         raise typer.Exit(code=1)
+
+    refs = _collect_vorto_incoming_refs(entries, {entry["uuid"]})
+    if refs:
+        typer.echo("[!] Averto: forigo rompos referencojn en aliaj vorto-eroj:")
+        for line in refs:
+            typer.echo(f"  {line}")
 
     if not _show_diff_confirmation("forigi (→ rubujo)", entry):
         typer.echo("Nuligita. (Cancelled.)")

@@ -10,10 +10,13 @@ from typer.testing import CliRunner
 
 from autish.commands.encik import (
     _entry_to_enc,
-    _normalise_pairs,
     _normalize_fonto_tipo,
+    _normalize_uuid_list,
     _paralela_of,
     _parse_enc_file,
+    _render_markdown_text,
+    _render_relation_cli_link,
+    _render_relation_html_link,
     _subklasoj_of,
     _superklasoj_of,
 )
@@ -100,21 +103,13 @@ def _load_db_fixture(entries: list[dict], tmp_db: Path):
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-class TestNormalisePairs:
-    def test_list_of_2_element_lists(self):
-        raw = [["Cat", "uuid-cat"], ["Dog", "uuid-dog"]]
-        assert _normalise_pairs(raw) == [["Cat", "uuid-cat"], ["Dog", "uuid-dog"]]
-
-    def test_list_of_dicts(self):
-        raw = [{"titolo": "Cat", "uuid": "uuid-cat"}]
-        assert _normalise_pairs(raw) == [["Cat", "uuid-cat"]]
+class TestNormalizeUuidList:
+    def test_keeps_unique_non_empty_items(self):
+        raw = ["  uuid-a  ", "uuid-b", "", "uuid-a"]
+        assert _normalize_uuid_list(raw) == ["uuid-a", "uuid-b"]
 
     def test_empty(self):
-        assert _normalise_pairs([]) == []
-
-    def test_partial_list_ignored(self):
-        # Single-element lists are ignored (not valid pairs)
-        assert _normalise_pairs([["OnlyTitle"]]) == []
+        assert _normalize_uuid_list([]) == []
 
 
 class TestParseEncFile:
@@ -160,15 +155,15 @@ class TestParseEncFile:
         assert parsed["titolo"] == "Temo"
         assert parsed["difinio"] == "estas difinio"
 
-    def test_superklaso_pairs(self, tmp_path):
+    def test_superklaso_uuid_list(self, tmp_path):
         enc = tmp_path / "test.enc"
         enc.write_text(
             'terminologio.eo = "Child"\ndifinio.eo = "Difino"\n'
-            'superklaso = [["Parent","uuid-parent"]]\n',
+            'superklaso = ["uuid-parent"]\n',
             encoding="utf-8",
         )
         parsed = _parse_enc_file(enc)
-        assert parsed["superklaso"] == [["Parent", "uuid-parent"]]
+        assert parsed["superklaso"] == ["uuid-parent"]
 
     def test_source_list(self, tmp_path):
         enc = tmp_path / "test.enc"
@@ -203,6 +198,29 @@ class TestParseEncFile:
         assert parsed["fonto"][0]["autoro"] == "A. Author"
         assert parsed["fonto"][0]["jaro"] == 2020
         assert parsed["fonto"][0]["tipo"] == "libroj"
+
+    def test_source_list_accepts_lingvo_field(self, tmp_path):
+        enc = tmp_path / "test.enc"
+        enc.write_text(
+            'terminologio.eo = "Book"\ndifinio.eo = "x"\n'
+            "fonto = ["
+            "{titolo = \"Great Book\", autoro = \"A. Author\", "
+            "jaro = 2020, tipo = \"lib\", lingvo = \"fr\"}"
+            "]\n",
+            encoding="utf-8",
+        )
+        parsed = _parse_enc_file(enc)
+        assert parsed["fonto"][0]["lingvo"] == "fr"
+
+    def test_source_list_invalid_lingvo_raises(self, tmp_path):
+        enc = tmp_path / "test.enc"
+        enc.write_text(
+            'terminologio.eo = "Book"\ndifinio.eo = "x"\n'
+            'fonto = [{titolo = "Great Book", lingvo = "fra"}]\n',
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="fonto.lingvo"):
+            _parse_enc_file(enc)
 
     def test_fonto_jaro_must_be_integer(self, tmp_path):
         """Test that jaro must be a valid integer."""
@@ -306,6 +324,20 @@ class TestParseEncFile:
         parsed = _parse_enc_file(enc)
         assert "Markdown" in parsed["enhavo"]
 
+    def test_normalizes_markdown_in_difino(self, tmp_path):
+        enc = tmp_path / "md.enc"
+        enc.write_text(
+            'terminologio.eo = "Temo"\n'
+            'difino.eo = """\n'
+            "## Titolo\n"
+            "  - ero unu\n"
+            "    - ero du\n"
+            '"""\n',
+            encoding="utf-8",
+        )
+        parsed = _parse_enc_file(enc)
+        assert "## Titolo\n\n- ero unu" in parsed["difinoj"]["eo"]
+
     def test_source_legacy_key_is_still_read_as_fonto(self, tmp_path):
         enc = tmp_path / "legacy.enc"
         enc.write_text(
@@ -337,7 +369,7 @@ class TestEntryToEnc:
             difinio="Some definition.",
             terminologio={"eo": "Round Trip"},
             difinoj={"eo": "Some definition."},
-            superklaso=[["Parent", "parent-uuid"]],
+            superklaso=["parent-uuid"],
         )
         enc_text = _entry_to_enc(entry)
         enc_file = tmp_path / "rt.enc"
@@ -345,7 +377,7 @@ class TestEntryToEnc:
         parsed = _parse_enc_file(enc_file)
         assert parsed["titolo"] == "Round Trip"
         assert "Some definition." in parsed["difinio"]
-        assert parsed["superklaso"] == [["Parent", "parent-uuid"]]
+        assert parsed["superklaso"] == ["parent-uuid"]
 
     def test_empty_fields(self, tmp_path):
         entry = _make_entry(
@@ -360,6 +392,21 @@ class TestEntryToEnc:
         parsed = _parse_enc_file(enc_file)
         assert parsed["titolo"] == "Empty"
         assert parsed["superklaso"] == []
+
+    def test_writes_difino_key_and_decodes_literal_newlines(self, tmp_path):
+        entry = _make_entry(
+            titolo="RS232",
+            difino="Linio 1\\n\\nLinio 2",
+            terminologio={"eo": "RS232"},
+            difinoj={"eo": "Linio 1\\n\\nLinio 2"},
+        )
+        enc_text = _entry_to_enc(entry)
+        assert "difino.eo" in enc_text
+        assert "difinio.eo" not in enc_text
+        enc_file = tmp_path / "rs232.enc"
+        enc_file.write_text(enc_text, encoding="utf-8")
+        parsed = _parse_enc_file(enc_file)
+        assert parsed["difinoj"]["eo"] == "Linio 1\n\nLinio 2"
 
 
 class TestFontoTipoNormalisation:
@@ -395,17 +442,17 @@ class TestGraphTraversal:
         mammal = _make_entry(
             uuid=CHILD_UUID,
             titolo="Mammal",
-            superklaso=[[animal["titolo"], SAMPLE_UUID]],
+            superklaso=[SAMPLE_UUID],
         )
         dog = _make_entry(
             uuid=GRANDCHILD_UUID,
             titolo="Dog",
-            superklaso=[[mammal["titolo"], CHILD_UUID]],
+            superklaso=[CHILD_UUID],
         )
         cat = _make_entry(
             uuid=SIBLING_UUID,
             titolo="Cat",
-            superklaso=[[mammal["titolo"], CHILD_UUID]],
+            superklaso=[CHILD_UUID],
         )
         _load_db_fixture([animal, mammal, dog, cat], db_path)
 
@@ -504,14 +551,21 @@ class TestEncikCLI:
     def test_serci_titolo_found(self, tmp_path):
         enc = self._make_enc_file(tmp_path, "Philosophy", "Study of wisdom.")
         runner.invoke(app, ["encik", "aldoni", str(enc)])
-        result = runner.invoke(app, ["encik", "serci", "-t", "Philo"])
+        result = runner.invoke(app, ["encik", "serci", "Philo"])
         assert result.exit_code == 0
         assert "Philos" in result.output
 
     def test_serci_titolo_not_found(self, tmp_path):
-        result = runner.invoke(app, ["encik", "serci", "-t", "NonExistentXYZ"])
+        result = runner.invoke(app, ["encik", "serci", "NonExistentXYZ"])
         assert result.exit_code == 0
         assert "trovita" in result.output.lower()
+
+    def test_serci_t_teksto_searches_full_text(self, tmp_path):
+        enc = self._make_enc_file(tmp_path, "Nomo", "speciala-teksto-xyz")
+        runner.invoke(app, ["encik", "aldoni", str(enc)])
+        result = runner.invoke(app, ["encik", "serci", "-t", "speciala-teksto-xyz"])
+        assert result.exit_code == 0
+        assert "Nomo" in result.output
 
     def test_serci_no_flags_shows_help(self):
         result = runner.invoke(app, ["encik", "serci"])
@@ -537,7 +591,7 @@ class TestEncikCLI:
         child_enc = tmp_path / "mammal.enc"
         child_enc.write_text(
             f'terminologio.eo = "Mammal"\ndifinio.eo = "Child"\n'
-            f'superklaso = [["Animal", "{animal["uuid"]}"]]\n',
+            f'superklaso = ["{animal["uuid"]}"]\n',
             encoding="utf-8",
         )
         r2 = runner.invoke(app, ["encik", "aldoni", str(child_enc)])
@@ -563,7 +617,7 @@ class TestEncikCLI:
         science_uuid = science["uuid"]
         child_enc.write_text(
             f'terminologio.eo = "Physics"\ndifinio.eo = "Child"\n'
-            f'superklaso = [["Science", "{science_uuid}"]]\n',
+            f'superklaso = ["{science_uuid}"]\n',
             encoding="utf-8",
         )
         runner.invoke(app, ["encik", "aldoni", str(child_enc)])
@@ -575,6 +629,32 @@ class TestEncikCLI:
     def test_modifi_not_found(self):
         result = runner.invoke(app, ["encik", "modifi", "does-not-exist"])
         assert result.exit_code != 0
+
+    def test_modifi_supports_hash_uuid(self, tmp_path, monkeypatch):
+        enc = self._make_enc_file(tmp_path, "HashEdit", "Original.")
+        add = runner.invoke(app, ["encik", "aldoni", str(enc)])
+        assert add.exit_code == 0, add.output
+
+        import autish.commands.encik as enc_mod
+
+        entry = enc_mod._find_by_title_exact("HashEdit")
+        assert entry is not None
+
+        def _fake_run(cmd, **kwargs):
+            Path(cmd[1]).write_text(
+                'terminologio.eo = "HashEdit"\ndifinio.eo = "Updated."\n',
+                encoding="utf-8",
+            )
+
+            class _R:
+                returncode = 0
+
+            return _R()
+
+        monkeypatch.setattr(enc_mod.subprocess, "run", _fake_run)
+        result = runner.invoke(app, ["encik", "modifi", f"#{entry['uuid'][:8]}"])
+        assert result.exit_code == 0, result.output
+        assert "Modifis" in result.output
 
     def test_modifi_invokes_editor(self, tmp_path, monkeypatch):
         """modifi should open $EDITOR on the temp .enc file and save changes."""
@@ -608,6 +688,119 @@ class TestEncikCLI:
         assert updated is not None
         assert updated["difinio"] == "Updated."
 
+    def test_modifi_accepts_replacement_enc_file(self, tmp_path):
+        base = self._make_enc_file(tmp_path, "ReplaceMe", "Original.")
+        add = runner.invoke(app, ["encik", "aldoni", str(base)])
+        assert add.exit_code == 0, add.output
+
+        replacement = tmp_path / "replacement.enc"
+        replacement.write_text(
+            'terminologio.eo = "ReplaceMe"\n'
+            'difinio.eo = "From file."\n',
+            encoding="utf-8",
+        )
+        result = runner.invoke(app, ["encik", "modifi", "ReplaceMe", str(replacement)])
+        assert result.exit_code == 0, result.output
+        assert "Modifis" in result.output
+
+        import autish.commands.encik as enc_mod
+
+        updated = enc_mod._find_by_title_exact("ReplaceMe")
+        assert updated is not None
+        assert updated["difinio"] == "From file."
+
+    def test_modifi_supports_cli_field_updates(self, tmp_path):
+        base = self._make_enc_file(tmp_path, "CliEdit", "Original.")
+        add = runner.invoke(app, ["encik", "aldoni", str(base)])
+        assert add.exit_code == 0, add.output
+
+        result = runner.invoke(
+            app,
+            [
+                "encik",
+                "modifi",
+                "CliEdit",
+                "--terminologio",
+                "fr:Bonjour",
+                "--difino",
+                "fr:Salut.",
+                "--ligilo",
+                "11111111-2222-3333-4444-555555555555",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+
+        import autish.commands.encik as enc_mod
+
+        updated = enc_mod._find_by_title_exact("CliEdit")
+        assert updated is not None
+        assert updated["terminologio"]["fr"] == "Bonjour"
+        assert updated["difinoj"]["fr"] == "Salut."
+        assert "11111111-2222-3333-4444-555555555555" in (updated.get("ligilo") or [])
+
+    def test_modifi_parse_error_preserves_invalid_file(self, tmp_path, monkeypatch):
+        enc = self._make_enc_file(tmp_path, "BrokenEdit", "Original.")
+        add = runner.invoke(app, ["encik", "aldoni", str(enc)])
+        assert add.exit_code == 0, add.output
+
+        import autish.commands.encik as enc_mod
+
+        entry = enc_mod._find_by_title_exact("BrokenEdit")
+        assert entry is not None
+
+        def _fake_run(cmd, **kwargs):
+            Path(cmd[1]).write_text(
+                'terminologio.eo = "BrokenEdit"\ndifinio.eo = [bad]\n',
+                encoding="utf-8",
+            )
+
+            class _R:
+                returncode = 0
+
+            return _R()
+
+        monkeypatch.setattr(enc_mod.subprocess, "run", _fake_run)
+        result = runner.invoke(app, ["encik", "modifi", "BrokenEdit"])
+        assert result.exit_code != 0
+        invalid_path = enc_mod._invalid_edit_path(entry["uuid"])
+        assert invalid_path.exists()
+        assert "encik modifi -- " in (result.output + (result.stderr or ""))
+
+    def test_modifi_reuses_preserved_invalid_file(self, tmp_path, monkeypatch):
+        enc = self._make_enc_file(tmp_path, "ResumeEdit", "Original.")
+        add = runner.invoke(app, ["encik", "aldoni", str(enc)])
+        assert add.exit_code == 0, add.output
+
+        import autish.commands.encik as enc_mod
+
+        entry = enc_mod._find_by_title_exact("ResumeEdit")
+        assert entry is not None
+        invalid_path = enc_mod._invalid_edit_path(entry["uuid"])
+        invalid_path.parent.mkdir(parents=True, exist_ok=True)
+        invalid_path.write_text(
+            'terminologio.eo = "ResumeEdit"\ndifinio.eo = "From preserved"\n',
+            encoding="utf-8",
+        )
+
+        seen: dict[str, str] = {}
+
+        def _fake_run(cmd, **kwargs):
+            seen["text"] = Path(cmd[1]).read_text(encoding="utf-8")
+
+            class _R:
+                returncode = 0
+
+            return _R()
+
+        monkeypatch.setattr(enc_mod.subprocess, "run", _fake_run)
+        result = runner.invoke(app, ["encik", "modifi", "ResumeEdit"])
+        assert result.exit_code == 0, result.output
+        assert "From preserved" in seen["text"]
+
+    def test_entry_to_enc_template_includes_tipo_hint(self):
+        text = _entry_to_enc(_make_entry(titolo="Tipo Hint"))
+        assert "Validaj tipoj:" in text
+
     def test_encik_vidi_supports_hash_uuid(self, tmp_path):
         enc = self._make_enc_file(tmp_path, "Hash Node", "Difino")
         add = runner.invoke(app, ["encik", "aldoni", str(enc)])
@@ -619,6 +812,12 @@ class TestEncikCLI:
         result = runner.invoke(app, ["encik", "vidi", f"#{entry['uuid'][:8]}"])
         assert result.exit_code == 0, result.output
         assert "Hash Node" in result.output
+
+    def test_encik_vidi_missing_ref_shows_hash_hint(self):
+        result = runner.invoke(app, ["encik", "vidi"])
+        assert result.exit_code != 0
+        combined = result.output + (result.stderr or "")
+        assert 'encik vidi "#' in combined
 
     def test_encik_vidi_with_lingvo_and_all(self, tmp_path):
         enc = tmp_path / "multi.enc"
@@ -640,6 +839,8 @@ class TestEncikCLI:
         assert "Animal" in result.output
         assert "Aldona enhavo" in result.output
         assert "libroj" in result.output
+        assert "difinoj:" not in result.output
+        assert result.output.count("difino:") == 1
 
     def test_encik_vidi_ambiguous_prompts_up_to_five(self, tmp_path):
         for i in range(6):
@@ -685,12 +886,261 @@ class TestEncikCLI:
         assert "<table>" in html_content
         assert "<strong>Besto</strong>" in html_content
 
+    def test_encik_vidi_html_markdown_internal_link_targets_entry(
+        self, tmp_path, monkeypatch
+    ):
+        parent = tmp_path / "target.enc"
+        parent.write_text(
+            'terminologio.eo = "Celo"\n'
+            'difinio.eo = "Cela difino"\n',
+            encoding="utf-8",
+        )
+        add_parent = runner.invoke(app, ["encik", "aldoni", str(parent)])
+        assert add_parent.exit_code == 0, add_parent.output
+
+        import autish.commands.encik as enc_mod
+
+        target = enc_mod._find_by_title_exact("Celo")
+        assert target is not None
+
+        source = tmp_path / "source.enc"
+        source.write_text(
+            'terminologio.eo = "Fonto"\n'
+            f'difinio.eo = "Vidu [Celo](#{target["uuid"][:8]}) nun."\n',
+            encoding="utf-8",
+        )
+        add_source = runner.invoke(app, ["encik", "aldoni", str(source)])
+        assert add_source.exit_code == 0, add_source.output
+
+        opened: dict[str, str] = {}
+
+        def _fake_open(url: str) -> bool:
+            opened["url"] = url
+            return True
+
+        monkeypatch.setattr("autish.commands.encik.webbrowser.open", _fake_open)
+        result = runner.invoke(app, ["encik", "vidi", "Fonto", "--html"])
+        assert result.exit_code == 0, result.output
+        html_path = Path(opened["url"][7:])
+        html_content = html_path.read_text(encoding="utf-8")
+        assert "Vidu" in html_content
+        assert "file://" in html_content
+
+    def test_encik_vidi_cli_renders_internal_markdown_link(
+        self, tmp_path, monkeypatch
+    ):
+        parent = tmp_path / "target_cli.enc"
+        parent.write_text(
+            'terminologio.eo = "Hugging Face"\n'
+            'difinio.eo = "Celo"\n',
+            encoding="utf-8",
+        )
+        add_parent = runner.invoke(app, ["encik", "aldoni", str(parent)])
+        assert add_parent.exit_code == 0, add_parent.output
+
+        import autish.commands.encik as enc_mod
+
+        target = enc_mod._find_by_title_exact("Hugging Face")
+        assert target is not None
+
+        source = tmp_path / "source_cli.enc"
+        source.write_text(
+            'terminologio.eo = "Fonta nodo"\n'
+            f'difinio.eo = "[Hugging Face](#{target["uuid"][:8]})"\n',
+            encoding="utf-8",
+        )
+        add_source = runner.invoke(app, ["encik", "aldoni", str(source)])
+        assert add_source.exit_code == 0, add_source.output
+
+        result = runner.invoke(app, ["encik", "vidi", "Fonta nodo"])
+        assert result.exit_code == 0, result.output
+        assert "Hugging Face" in result.output
+        assert "[Hugging Face](#" not in result.output
+
+        rendered = _render_markdown_text(f"[Hugging Face](#{target['uuid'][:8]})")
+        assert "[link=file://" in rendered
+
+    def test_relation_helpers_render_clickable_links(self, tmp_path):
+        parent = tmp_path / "target_relation.enc"
+        parent.write_text(
+            'terminologio.eo = "Nodo"\n'
+            'difinio.eo = "Celo"\n',
+            encoding="utf-8",
+        )
+        add_parent = runner.invoke(app, ["encik", "aldoni", str(parent)])
+        assert add_parent.exit_code == 0, add_parent.output
+
+        import autish.commands.encik as enc_mod
+
+        target = enc_mod._find_by_title_exact("Nodo")
+        assert target is not None
+        cli = _render_relation_cli_link("Nodo", target["uuid"][:8])
+        html = _render_relation_html_link("Nodo", target["uuid"][:8])
+        assert "[link=file://" in cli
+        assert '<a href="file://' in html
+
+    def test_encik_vidi_html_title_field_supports_markdown_link(
+        self, tmp_path, monkeypatch
+    ):
+        parent = tmp_path / "target_title.enc"
+        parent.write_text(
+            'terminologio.eo = "Cela Titolo"\n'
+            'difinio.eo = "Celo"\n',
+            encoding="utf-8",
+        )
+        add_parent = runner.invoke(app, ["encik", "aldoni", str(parent)])
+        assert add_parent.exit_code == 0, add_parent.output
+
+        import autish.commands.encik as enc_mod
+
+        target = enc_mod._find_by_title_exact("Cela Titolo")
+        assert target is not None
+
+        source = tmp_path / "source_title.enc"
+        source.write_text(
+            f'terminologio.eo = "[Ir al Celo](#{target["uuid"][:8]})"\n'
+            'difinio.eo = "Difino."\n',
+            encoding="utf-8",
+        )
+        add_source = runner.invoke(app, ["encik", "aldoni", str(source)])
+        assert add_source.exit_code == 0, add_source.output
+
+        opened: dict[str, str] = {}
+
+        def _fake_open(url: str) -> bool:
+            opened["url"] = url
+            return True
+
+        monkeypatch.setattr("autish.commands.encik.webbrowser.open", _fake_open)
+        result = runner.invoke(app, ["encik", "vidi", "[Ir al Celo]", "--html"])
+        assert result.exit_code == 0, result.output
+        html_path = Path(opened["url"][7:])
+        html_content = html_path.read_text(encoding="utf-8")
+        assert "<h1>" in html_content
+        assert "file://" in html_content
+
     def test_aldoni_help_mentions_new_enc_syntax(self):
         result = runner.invoke(app, ["encik", "aldoni", "-h"])
         assert result.exit_code == 0
         assert "terminologio.xx" in result.output
         assert "fonto" in result.output
-        assert "superklaso/ligilo" in result.output
+        assert "superklaso" in result.output
+        assert "ligilo" in result.output
+
+    def test_aldoni_bidirectional_ligilo(self, tmp_path):
+        base_enc = tmp_path / "a.enc"
+        base_enc.write_text(
+            'terminologio.eo = "A"\n'
+            'difinio.eo = "Difino A"\n',
+            encoding="utf-8",
+        )
+        r1 = runner.invoke(app, ["encik", "aldoni", str(base_enc)])
+        assert r1.exit_code == 0, r1.output
+        import autish.commands.encik as enc_mod
+        a = enc_mod._find_by_title_exact("A")
+        assert a is not None
+
+        child_enc = tmp_path / "b.enc"
+        child_enc.write_text(
+            'terminologio.eo = "B"\n'
+            'difinio.eo = "Difino B"\n'
+            f'ligilo = "{a["uuid"][:8]}"\n',
+            encoding="utf-8",
+        )
+        r2 = runner.invoke(app, ["encik", "aldoni", str(child_enc)])
+        assert r2.exit_code == 0, r2.output
+
+        a2 = enc_mod._find_by_title_exact("A")
+        b2 = enc_mod._find_by_title_exact("B")
+        assert a2 is not None and b2 is not None
+        assert b2["uuid"] in (a2.get("ligilo") or [])
+
+    def test_aldoni_unquoted_ligilo_and_vidi_a_shows_it(self, tmp_path):
+        base_enc = tmp_path / "x.enc"
+        base_enc.write_text(
+            'terminologio.eo = "X"\n'
+            'difinio.eo = "Difino X"\n',
+            encoding="utf-8",
+        )
+        runner.invoke(app, ["encik", "aldoni", str(base_enc)])
+        import autish.commands.encik as enc_mod
+        x = enc_mod._find_by_title_exact("X")
+        assert x is not None
+
+        y_enc = tmp_path / "y.enc"
+        y_enc.write_text(
+            'terminologio.eo = "Y"\n'
+            'difinio.eo = "Difino Y"\n'
+            f'ligilo={x["uuid"][:8]}\n',
+            encoding="utf-8",
+        )
+        r = runner.invoke(app, ["encik", "aldoni", str(y_enc)])
+        assert r.exit_code == 0, r.output
+        y = enc_mod._find_by_title_exact("Y")
+        assert y is not None
+        out = runner.invoke(app, ["encik", "vidi", "-a", y["uuid"][:8]])
+        assert out.exit_code == 0, out.output
+        assert "ligilo:" in out.output
+        assert "X" in out.output
+
+        x_after = enc_mod._find_by_title_exact("X")
+        assert x_after is not None
+        assert y["uuid"] in (x_after.get("ligilo") or [])
+
+    def test_vidi_default_hides_timestamps(self, tmp_path):
+        enc = tmp_path / "t.enc"
+        enc.write_text(
+            'terminologio.eo = "Tempo"\n'
+            'difinio.eo = "Difino"\n',
+            encoding="utf-8",
+        )
+        runner.invoke(app, ["encik", "aldoni", str(enc)])
+        import autish.commands.encik as enc_mod
+        e = enc_mod._find_by_title_exact("Tempo")
+        assert e is not None
+        out = runner.invoke(app, ["encik", "vidi", e["uuid"][:8]])
+        assert out.exit_code == 0
+        assert "kreita_je" not in out.output
+        assert "modifita_je" not in out.output
+
+    def test_forigi_supports_hash_uuid(self, tmp_path):
+        enc = self._make_enc_file(tmp_path, "ForigHash", "Difino")
+        add = runner.invoke(app, ["encik", "aldoni", str(enc)])
+        assert add.exit_code == 0, add.output
+        import autish.commands.encik as enc_mod
+
+        e = enc_mod._find_by_title_exact("ForigHash")
+        assert e is not None
+        out = runner.invoke(
+            app, ["encik", "forigi", f"#{e['uuid'][:8]}", "--force"]
+        )
+        assert out.exit_code == 0, out.output
+        assert "Forigis" in out.output
+
+    def test_forigi_warns_about_broken_references(self, tmp_path):
+        parent = self._make_enc_file(tmp_path, "RefParent", "Difino")
+        add_parent = runner.invoke(app, ["encik", "aldoni", str(parent)])
+        assert add_parent.exit_code == 0, add_parent.output
+
+        import autish.commands.encik as enc_mod
+
+        p = enc_mod._find_by_title_exact("RefParent")
+        assert p is not None
+        child = tmp_path / "child.enc"
+        child.write_text(
+            'terminologio.eo = "RefChild"\n'
+            'difinio.eo = "Difino"\n'
+            f'superklaso = ["{p["uuid"]}"]\n',
+            encoding="utf-8",
+        )
+        add_child = runner.invoke(app, ["encik", "aldoni", str(child)])
+        assert add_child.exit_code == 0, add_child.output
+
+        out = runner.invoke(app, ["encik", "forigi", p["uuid"][:8], "--force"])
+        assert out.exit_code == 0, out.output
+        assert "Averto" in out.output
+        assert "rompos referencojn" in out.output
+        assert "superklaso" in out.output
 
 
 # ──────────────────────────────────────────────────────────────────────────────

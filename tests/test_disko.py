@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 from typer.testing import CliRunner
 
 from autish.main import app
@@ -98,3 +97,36 @@ class TestDiskoHelp:
         result = runner.invoke(app, ["disko", "malmunti", "--help"])
         assert result.exit_code == 0
         assert "malmunti" in result.output or "unmount" in result.output.lower()
+
+
+class TestDiskoMalmunti:
+    def test_malmunti_supports_multiple_devices(self, mocker):
+        mount_out = (
+            "/dev/sdb3 on /mnt/a type ext4 (rw)\n"
+            "/dev/sdb4 on /mnt/b type ext4 (rw)\n"
+        )
+
+        def _fake_run(cmd, capture_output=True, text=True, check=True):
+            m = mocker.Mock()
+            if cmd == ["mount"]:
+                m.returncode = 0
+                m.stdout = mount_out
+                m.stderr = ""
+                return m
+            if cmd[:3] == ["sudo", "umount", "/dev/sdb3"]:
+                m.returncode = 0
+                m.stdout = ""
+                m.stderr = ""
+                return m
+            if cmd[:3] == ["sudo", "umount", "/dev/sdb4"]:
+                m.returncode = 0
+                m.stdout = ""
+                m.stderr = ""
+                return m
+            raise AssertionError(f"Unexpected command: {cmd}")
+
+        mocker.patch("autish.commands.disko.subprocess.run", side_effect=_fake_run)
+        result = runner.invoke(app, ["disko", "malmunti", "sdb3", "sdb4"])
+        assert result.exit_code == 0
+        assert "Sukcese malmuntis /dev/sdb3" in result.output
+        assert "Sukcese malmuntis /dev/sdb4" in result.output

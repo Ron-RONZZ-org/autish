@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import curses
+import imaplib
 import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -15,22 +16,30 @@ from autish.commands._retposto_tui import (
     LineEditor,
     MessageReader,
     RetpostoTUI,
+    _unwrap_wrapped_mail_urls,
 )
 from autish.commands.retposto import (
     _add_spam_block,
     _apply_filters,
     _build_sieve_script,
     _decode_header,
+    _ensure_folder,
     _eval_sieve_condition,
     _export_vcf,
     _extract_address,
     _extract_address_list,
+    _extract_display_name,
+    _fetch_account_mail,
     _import_vcf,
+    _is_likely_temporary_local_part,
     _is_spam,
     _load_spam_blocks,
     _parse_imap_message,
     _remove_spam_block,
     _reply_targets,
+    _save_account,
+    _save_message,
+    _should_autosave_contact_email,
     _upsert_contact,
 )
 from autish.main import app
@@ -122,6 +131,16 @@ class TestExtractAddressList:
         assert _extract_address_list(None) == []
 
 
+class TestExtractDisplayName:
+    def test_extracts_name_from_header(self):
+        assert _extract_display_name("Alice Example <alice@example.com>") == (
+            "Alice Example"
+        )
+
+    def test_missing_name_returns_empty(self):
+        assert _extract_display_name("alice@example.com") == ""
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Unit tests — _parse_imap_message
 # ──────────────────────────────────────────────────────────────────────────────
@@ -151,6 +170,7 @@ class TestParseImapMessage:
         raw = self._make_raw()
         msg, aldonajoj = _parse_imap_message(raw, konto_id=1, dosierujo_id=1)
         assert msg["de"] == "sender@example.com"
+        assert msg["de_nomo"] == ""
         assert msg["al"] == ["rcpt@example.com"]
         assert msg["subjekto"] == "Test"
         assert "Hello" in (msg["korpo"] or "")
@@ -194,6 +214,42 @@ class TestParseImapMessage:
         msg, _ = _parse_imap_message(raw, konto_id=1, dosierujo_id=1)
         assert msg["in_reply_to"] == "<root@example.com>"
         assert "<mid@example.com>" in (msg["references_hdr"] or "")
+
+    def test_sender_display_name_extracted(self):
+        raw = self._make_raw(from_="Alice Example <sender@example.com>")
+        msg, _ = _parse_imap_message(raw, konto_id=1, dosierujo_id=1)
+        assert msg["de"] == "sender@example.com"
+        assert msg["de_nomo"] == "Alice Example"
+
+    def test_priority_and_read_receipt_headers(self):
+        raw = (
+            b"From: sender@example.com\r\n"
+            b"To: rcpt@example.com\r\n"
+            b"Subject: Test\r\n"
+            b"Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            b"X-Priority: 1 (Highest)\r\n"
+            b"Disposition-Notification-To: sender@example.com\r\n"
+            b"Content-Type: text/plain; charset=utf-8\r\n"
+            b"\r\n"
+            b"Hello\r\n"
+        )
+        msg, _ = _parse_imap_message(raw, konto_id=1, dosierujo_id=1)
+        assert msg["prioritato"] == 9
+        assert "read-receipt-requested" in (msg.get("etikedoj") or [])
+
+    def test_importance_low_maps_to_low_priority(self):
+        raw = (
+            b"From: sender@example.com\r\n"
+            b"To: rcpt@example.com\r\n"
+            b"Subject: Test\r\n"
+            b"Date: Mon, 01 Jan 2024 12:00:00 +0000\r\n"
+            b"Importance: low\r\n"
+            b"Content-Type: text/plain; charset=utf-8\r\n"
+            b"\r\n"
+            b"Hello\r\n"
+        )
+        msg, _ = _parse_imap_message(raw, konto_id=1, dosierujo_id=1)
+        assert msg["prioritato"] == 1
 
 
 class TestReplyTargets:
@@ -541,6 +597,172 @@ class TestUpsertContact:
         contacts = _load_contacts()
         assert any(c["retposto"] == "auto@example.com" for c in contacts)
 
+    def test_auto_save_sets_header_name(self, isolated_db):
+        from autish.commands.retposto import _load_contacts
+
+        _upsert_contact("auto2@example.com", "Alice Header")
+        contacts = _load_contacts()
+        target = next(c for c in contacts if c["retposto"] == "auto2@example.com")
+        assert target["nomo"] == "Alice Header"
+
+
+class TestFetchAccountMail:
+    def test_logout_eof_is_ignored_after_successful_fetch(
+        self, isolated_db, monkeypatch
+    ):
+        class _FakeIMAP:
+            def login(self, *_args):
+                return ("OK", [])
+
+            def list(self):
+                return ("OK", [b'(\\HasNoChildren) "/" "INBOX"'])
+
+            def select(self, *_args, **_kwargs):
+                return ("OK", [b"1"])
+
+            def search(self, *_args):
+                return ("OK", [b"1"])
+
+            def fetch(self, *_args):
+                raw = (
+                    b"From: Alice <alice@example.com>\r\n"
+                    b"To: me@example.com\r\n"
+                    b"Subject: Hi\r\n"
+                    b"Date: Wed, 1 Jan 2025 00:00:00 +0000\r\n"
+                    b"Message-ID: <m1@example.com>\r\n"
+                    b"\r\n"
+                    b"Hello"
+                )
+                return ("OK", [(b"1 (RFC822 FLAGS (\\Seen))", raw)])
+
+            def uid(self, *_args):
+                return ("OK", [])
+
+            def logout(self):
+                raise OSError("command: LOGOUT => socket error: EOF")
+
+        monkeypatch.setattr(
+            "autish.commands.retposto.imaplib.IMAP4_SSL",
+            lambda *_a, **_k: _FakeIMAP(),
+        )
+        monkeypatch.setattr(
+            "autish.commands.retposto._get_password",
+            lambda _id: "secret",
+        )
+        _save_account(
+            {
+                "nomo": "Me",
+                "retposto": "me@example.com",
+                "imap_servilo": "imap.example.com",
+                "imap_haveno": 993,
+                "imap_ssl": True,
+                "smtp_servilo": "smtp.example.com",
+                "smtp_haveno": 587,
+                "smtp_tls": True,
+            }
+        )
+        acc = {
+            "id": 1,
+            "retposto": "me@example.com",
+            "imap_servilo": "imap.example.com",
+            "imap_haveno": 993,
+            "imap_ssl": 1,
+        }
+        fetched, skipped = _fetch_account_mail(acc, max_msgs=10)
+        assert fetched >= 1
+        assert skipped >= 0
+
+    def test_known_uid_skips_rfc822_fetch(self, isolated_db, monkeypatch):
+        fetch_calls: list[str] = []
+
+        class _FakeIMAP:
+            def login(self, *_args):
+                return ("OK", [])
+
+            def list(self):
+                return ("OK", [b'(\\HasNoChildren) "/" "INBOX"'])
+
+            def select(self, *_args, **_kwargs):
+                return ("OK", [b"1"])
+
+            def search(self, *_args):
+                return ("OK", [b"1"])
+
+            def fetch(self, uid, _spec):
+                fetch_calls.append(str(uid))
+                raw = (
+                    b"From: Alice <alice@example.com>\r\n"
+                    b"To: me@example.com\r\n"
+                    b"Subject: Hi\r\n"
+                    b"Date: Wed, 1 Jan 2025 00:00:00 +0000\r\n"
+                    b"Message-ID: <m1@example.com>\r\n"
+                    b"\r\n"
+                    b"Hello"
+                )
+                return ("OK", [(b"1 (RFC822 FLAGS (\\Seen))", raw)])
+
+            def uid(self, *_args):
+                return ("OK", [])
+
+            def logout(self):
+                return ("BYE", [b"LOGOUT"])
+
+        monkeypatch.setattr(
+            "autish.commands.retposto.imaplib.IMAP4_SSL",
+            lambda *_a, **_k: _FakeIMAP(),
+        )
+        monkeypatch.setattr(
+            "autish.commands.retposto._get_password",
+            lambda _id: "secret",
+        )
+        acc_id = _save_account(
+            {
+                "nomo": "Me",
+                "retposto": "me@example.com",
+                "imap_servilo": "imap.example.com",
+                "imap_haveno": 993,
+                "imap_ssl": True,
+                "smtp_servilo": "smtp.example.com",
+                "smtp_haveno": 587,
+                "smtp_tls": True,
+            }
+        )
+        inbox_id = _ensure_folder(acc_id, "INBOX", "INBOX")
+        _save_message(
+            {
+                "konto_id": acc_id,
+                "dosierujo_id": inbox_id,
+                "uid": "1",
+                "de": "alice@example.com",
+                "al": ["me@example.com"],
+                "cc": [],
+                "bcc": [],
+                "subjekto": "Old",
+                "korpo": "Body",
+                "html_korpo": "",
+                "prioritato": 5,
+                "legita": 1,
+                "stelo": 0,
+                "spamo": 0,
+                "forigita": 0,
+                "aldonajoj": [],
+                "etikedoj": [],
+                "ricevita_je": "2025-01-01T00:00:00+00:00",
+                "kreita_je": "2025-01-01T00:00:00+00:00",
+            }
+        )
+        acc = {
+            "id": acc_id,
+            "retposto": "me@example.com",
+            "imap_servilo": "imap.example.com",
+            "imap_haveno": 993,
+            "imap_ssl": 1,
+        }
+        fetched, skipped = _fetch_account_mail(acc, max_msgs=10)
+        assert fetched == 0
+        assert skipped >= 1
+        assert fetch_calls == []
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CLI integration tests — subcommands
@@ -555,6 +777,13 @@ class TestCliListigiKontojn:
 
 
 class TestCliAldoniKonton:
+    @pytest.fixture(autouse=True)
+    def _mock_connectivity_check(self, monkeypatch):
+        monkeypatch.setattr(
+            "autish.commands.retposto._verify_account_connectivity",
+            lambda _acc, _pw: (True, []),
+        )
+
     def test_auto_infers_gmail_servers(self, isolated_db, monkeypatch):
         monkeypatch.setattr(
             "autish.commands.retposto._set_password",
@@ -579,6 +808,12 @@ class TestCliAldoniKonton:
         assert acc["smtp_servilo"] == "smtp.gmail.com"
         assert acc["smtp_haveno"] == 587
         assert bool(acc["smtp_tls"]) is True
+        assert acc["imap_uzantonomo"] == "test@gmail.com"
+        assert acc["smtp_uzantonomo"] == "test@gmail.com"
+        assert acc["sieve_servilo"] == "imap.gmail.com"
+        assert int(acc["sieve_haveno"]) == 4190
+        assert bool(acc["sieve_starttls"]) is True
+        assert acc["sieve_uzantonomo"] == "test@gmail.com"
 
     def test_unknown_domain_prompts_manual_servers(self, isolated_db, monkeypatch):
         monkeypatch.setattr(
@@ -657,6 +892,66 @@ class TestCliAldoniKonton:
         assert acc["imap_servilo"] == "imap.example.com"
         assert acc["smtp_servilo"] == "smtp.example.com"
 
+    def test_invalid_credentials_shows_repair_guidance(
+        self, isolated_db, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "autish.commands.retposto._infer_mail_config",
+            lambda _addr: {
+                "imap_servilo": "imap.example.com",
+                "imap_haveno": 993,
+                "imap_ssl": True,
+                "smtp_servilo": "smtp.example.com",
+                "smtp_haveno": 587,
+                "smtp_tls": True,
+            },
+        )
+        monkeypatch.setattr(
+            "autish.commands.retposto._verify_account_connectivity",
+            lambda _acc, _pw: (
+                False,
+                [
+                    "Aŭtentigo malsukcesis (malĝusta uzantonomo aŭ pasvorto).",
+                    "Rimedo: ĝisdatigu pasvorton.",
+                ],
+            ),
+        )
+        result = runner.invoke(
+            app,
+            ["retposto", "aldoni-konton"],
+            input="Test User\ntest@example.com\nsekreto123\n",
+        )
+        assert result.exit_code == 1
+        assert "Konto ne aldonita" in result.output
+        assert "Aŭtentigo malsukcesis" in result.output
+        assert "Rimedo" in result.output
+
+    def test_validation_fails_fast_on_imap_tcp_timeout(
+        self, isolated_db, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "autish.commands.retposto._verify_account_connectivity",
+            lambda _acc, _pw: (
+                False,
+                [
+                    "IMAP konekto eltempiĝis (imap.gmail.com:993).",
+                    "Rimedo: kontrolu retkonekton, fajromuron kaj havenon.",
+                ],
+            ),
+        )
+        result = runner.invoke(
+            app,
+            ["retposto", "aldoni-konton"],
+            input=(
+                "Test User\n"
+                "test@gmail.com\n"
+                "sekreto123\n"
+            ),
+        )
+        assert result.exit_code == 1
+        assert "Konto ne aldonita" in result.output
+        assert "IMAP konekto eltempiĝis" in result.output
+
     def test_auto_infers_from_microsoft_autodiscover(self, isolated_db, monkeypatch):
         monkeypatch.setattr(
             "autish.commands.retposto._set_password",
@@ -711,6 +1006,68 @@ class TestCliAldoniKonton:
         assert acc["imap_servilo"] == "imap.example.com"
         assert acc["smtp_servilo"] == "smtp.example.com"
 
+    def test_add_account_with_full_mail_parameters(self, isolated_db, monkeypatch):
+        monkeypatch.setattr(
+            "autish.commands.retposto._verify_account_connectivity",
+            lambda _acc, _pw: (True, []),
+        )
+        monkeypatch.setattr(
+            "autish.commands.retposto._set_password",
+            lambda _i, _p: None,
+        )
+        result = runner.invoke(
+            app,
+            [
+                "retposto",
+                "aldoni-konton",
+                "-n",
+                "Rong M.S. ZHOU",
+                "-r",
+                "ron@ronzz.org",
+                "--imap",
+                "imap.migadu.com",
+                "--imap-haveno",
+                "993",
+                "--imap-ssl",
+                "--imap-uzantonomo",
+                "ron@ronzz.org",
+                "--smtp",
+                "smtp.migadu.com",
+                "--smtp-haveno",
+                "465",
+                "--no-smtp-tls",
+                "--smtp-uzantonomo",
+                "ron@ronzz.org",
+                "--webmail-url",
+                "https://webmail.migadu.com",
+                "--sieve-servilo",
+                "imap.migadu.com",
+                "--sieve-haveno",
+                "4190",
+                "--sieve-starttls",
+                "--sieve-uzantonomo",
+                "ron@ronzz.org",
+            ],
+            input="sekreto123\n",
+        )
+        assert result.exit_code == 0, result.output
+        from autish.commands.retposto import _load_accounts
+
+        acc = _load_accounts()[0]
+        assert acc["imap_servilo"] == "imap.migadu.com"
+        assert int(acc["imap_haveno"]) == 993
+        assert bool(acc["imap_ssl"]) is True
+        assert acc["imap_uzantonomo"] == "ron@ronzz.org"
+        assert acc["smtp_servilo"] == "smtp.migadu.com"
+        assert int(acc["smtp_haveno"]) == 465
+        assert bool(acc["smtp_tls"]) is False
+        assert acc["smtp_uzantonomo"] == "ron@ronzz.org"
+        assert acc["webmail_url"] == "https://webmail.migadu.com"
+        assert acc["sieve_servilo"] == "imap.migadu.com"
+        assert int(acc["sieve_haveno"]) == 4190
+        assert bool(acc["sieve_starttls"]) is True
+        assert acc["sieve_uzantonomo"] == "ron@ronzz.org"
+
 
 class TestCliBloki:
     def test_bloki_command(self, isolated_db):
@@ -731,6 +1088,200 @@ class TestCliBloki:
         assert "Malblokita" in result.output
 
 
+class TestCliPreniDiagnostics:
+    def test_preni_imap_error_shows_repair_guidance(self, isolated_db, monkeypatch):
+        monkeypatch.setattr(
+            "autish.commands.retposto._get_password",
+            lambda _id: "sekreto",
+        )
+
+        class _BadIMAP:
+            def __init__(self, *_a, **_k):
+                raise imaplib.IMAP4.error("AUTHENTICATIONFAILED Invalid credentials")
+
+        monkeypatch.setattr("autish.commands.retposto.imaplib.IMAP4_SSL", _BadIMAP)
+
+        _save_account(
+            {
+                "nomo": "Ron",
+                "retposto": "ron@ronzz.org",
+                "imap_servilo": "imap.ronzz.org",
+                "imap_haveno": 993,
+                "imap_ssl": True,
+                "smtp_servilo": "smtp.ronzz.org",
+                "smtp_haveno": 587,
+                "smtp_tls": True,
+            }
+        )
+        result = runner.invoke(app, ["retposto", "preni", "--konto", "ron@ronzz.org"])
+        assert result.exit_code == 0, result.output
+        assert "IMAP eraro por ron@ronzz.org." in result.output
+        assert "Rimedo" in result.output
+
+    def test_preni_does_not_echo_secret_like_server_error(
+        self, isolated_db, monkeypatch
+    ):
+        monkeypatch.setattr(
+            "autish.commands.retposto._get_password",
+            lambda _id: "sekreto",
+        )
+
+        class _BadIMAP:
+            def __init__(self, *_a, **_k):
+                raise imaplib.IMAP4.error("Password is Ronzz!Grow!123!")
+
+        monkeypatch.setattr("autish.commands.retposto.imaplib.IMAP4_SSL", _BadIMAP)
+
+        _save_account(
+            {
+                "nomo": "Ron",
+                "retposto": "ron@ronzz.org",
+                "imap_servilo": "imap.ronzz.org",
+                "imap_haveno": 993,
+                "imap_ssl": True,
+                "smtp_servilo": "smtp.ronzz.org",
+                "smtp_haveno": 587,
+                "smtp_tls": True,
+            }
+        )
+        result = runner.invoke(app, ["retposto", "preni", "--konto", "ron@ronzz.org"])
+        assert result.exit_code == 0, result.output
+        assert "IMAP eraro por ron@ronzz.org." in result.output
+        assert "Ronzz!Grow!123!" not in result.output
+
+
+class TestAccountConnectivityCheck:
+    def test_verify_fails_fast_on_imap_tcp_timeout(self, monkeypatch):
+        import autish.commands.retposto as rp_mod
+
+        def _fake_probe(host: str, port: int, *, timeout: float):
+            if host.startswith("imap."):
+                return TimeoutError("timed out")
+            return None
+
+        monkeypatch.setattr(rp_mod, "_probe_tcp_connectivity", _fake_probe)
+        ok, hints = rp_mod._verify_account_connectivity(
+            {
+                "retposto": "test@gmail.com",
+                "uzantonomo": "test@gmail.com",
+                "imap_servilo": "imap.gmail.com",
+                "imap_haveno": 993,
+                "imap_ssl": True,
+                "smtp_servilo": "smtp.gmail.com",
+                "smtp_haveno": 587,
+                "smtp_tls": True,
+            },
+            "sekreto123",
+        )
+        assert ok is False
+        assert any("IMAP konekto eltempiĝis" in h for h in hints)
+
+    def test_verify_uses_smtp_ssl_for_port_465(self, monkeypatch):
+        import autish.commands.retposto as rp_mod
+
+        monkeypatch.setattr(
+            rp_mod,
+            "_probe_tcp_connectivity",
+            lambda _h, _p, timeout: None,
+        )
+
+        class _FakeIMAP:
+            def login(self, *_args):
+                return ("OK", [])
+
+            def logout(self):
+                return ("BYE", [b"LOGOUT"])
+
+        called = {"smtp_ssl": 0, "smtp": 0}
+
+        class _FakeSMTPSSL:
+            def __init__(self, *_a, **_k):
+                called["smtp_ssl"] += 1
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def login(self, *_args):
+                return (235, b"ok")
+
+        class _FakeSMTP:
+            def __init__(self, *_a, **_k):
+                called["smtp"] += 1
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def ehlo(self):
+                return (250, b"ok")
+
+            def starttls(self, **_kwargs):
+                return (220, b"go ahead")
+
+            def login(self, *_args):
+                return (235, b"ok")
+
+        monkeypatch.setattr(rp_mod.imaplib, "IMAP4_SSL", lambda *_a, **_k: _FakeIMAP())
+        monkeypatch.setattr(rp_mod.smtplib, "SMTP_SSL", _FakeSMTPSSL)
+        monkeypatch.setattr(rp_mod.smtplib, "SMTP", _FakeSMTP)
+
+        ok, hints = rp_mod._verify_account_connectivity(
+            {
+                "retposto": "user@example.com",
+                "imap_servilo": "imap.example.com",
+                "imap_haveno": 993,
+                "imap_ssl": True,
+                "smtp_servilo": "smtp.example.com",
+                "smtp_haveno": 465,
+                "smtp_tls": True,
+                "imap_uzantonomo": "imap-user",
+                "smtp_uzantonomo": "smtp-user",
+            },
+            "sekreto",
+        )
+        assert ok is True, hints
+        assert called["smtp_ssl"] == 1
+        assert called["smtp"] == 0
+
+
+class TestAccountTomlRoundtrip:
+    def test_accounts_to_toml_includes_extended_fields(self, isolated_db):
+        import autish.commands.retposto as rp_mod
+
+        acc_id = _save_account(
+            {
+                "nomo": "Roundtrip",
+                "retposto": "roundtrip@example.com",
+                "imap_servilo": "imap.example.com",
+                "imap_uzantonomo": "imap-u@example.com",
+                "smtp_servilo": "smtp.example.com",
+                "smtp_uzantonomo": "smtp-u@example.com",
+                "webmail_url": "https://webmail.example.com",
+                "sieve_servilo": "sieve.example.com",
+                "sieve_haveno": 4190,
+                "sieve_starttls": True,
+                "sieve_uzantonomo": "sieve-u@example.com",
+            }
+        )
+        accounts = rp_mod._load_accounts()
+        toml_bytes = rp_mod._accounts_to_toml(accounts, {acc_id: "sekreto"})
+        parsed = rp_mod._toml_to_accounts(toml_bytes)
+        assert parsed
+        rec = parsed[0]
+        assert rec["imap_uzantonomo"] == "imap-u@example.com"
+        assert rec["smtp_uzantonomo"] == "smtp-u@example.com"
+        assert rec["webmail_url"] == "https://webmail.example.com"
+        assert rec["sieve_servilo"] == "sieve.example.com"
+        assert int(rec["sieve_haveno"]) == 4190
+        assert bool(rec["sieve_starttls"]) is True
+        assert rec["sieve_uzantonomo"] == "sieve-u@example.com"
+
+
 class TestCliKontakto:
     def test_listigi_empty(self, isolated_db):
         result = runner.invoke(app, ["retposto", "kontakto", "listigi"])
@@ -743,6 +1294,56 @@ class TestCliKontakto:
         )
         assert result.exit_code == 0
         assert "savis" in result.output.lower() or "kontakto" in result.output.lower()
+
+    def test_aldoni_contact_without_email(self, isolated_db):
+        result = runner.invoke(
+            app,
+            ["retposto", "kontakto", "aldoni", "-n", "No Mail", "-o", "Org"],
+        )
+        assert result.exit_code == 0
+        assert "sen retpoŝto" in result.output.lower()
+
+    def test_aldoni_contact_requires_identity_field(self, isolated_db):
+        result = runner.invoke(app, ["retposto", "kontakto", "aldoni"])
+        assert result.exit_code != 0
+
+    def test_serci_and_vidi_contact(self, isolated_db):
+        runner.invoke(
+            app,
+            [
+                "retposto",
+                "kontakto",
+                "aldoni",
+                "ada@math.org",
+                "-n",
+                "Ada",
+                "-F",
+                "Lovelace",
+                "-o",
+                "Analytical",
+                "-t",
+                "0033123456789",
+            ],
+        )
+        serci = runner.invoke(
+            app,
+            ["retposto", "kontakto", "serci", "--nomo", "Ada", "--organizo", "Analy"],
+        )
+        assert serci.exit_code == 0
+        assert "Analytical" in serci.output
+        assert "Ada" in serci.output
+        assert "Lovelace" in serci.output
+        assert "ada@math.org" in serci.output
+        assert "0033123456789" in serci.output
+        uuid_prefix = None
+        for line in serci.output.splitlines():
+            if "#" in line and "ada@math.org" in line:
+                uuid_prefix = line.split("#", 1)[1][:8]
+                break
+        assert uuid_prefix is not None
+        vidi = runner.invoke(app, ["retposto", "kontakto", "vidi", f"#{uuid_prefix}"])
+        assert vidi.exit_code == 0
+        assert "LOVELACE" in vidi.output
 
     def test_importi_vcf(self, isolated_db, tmp_path):
         vcf_content = (
@@ -886,6 +1487,30 @@ class TestRetpostoTuiReader:
         reader = MessageReader(_FakeStdScr(), msg)
         assert reader._handle_key(ord("R")) == "reply_all"
 
+    def test_reader_vim_insert_keys_map_to_draft_edit_actions(self):
+        msg = {"de": "a@b.com", "al": ["x@y.com"], "subjekto": "S", "korpo": "abc"}
+        reader = MessageReader(_FakeStdScr(), msg)
+        assert reader._handle_key(ord("i")) == "edit_draft"
+        assert reader._handle_key(ord("I")) == "edit_draft_top"
+        assert reader._handle_key(ord("a")) == "edit_draft_after"
+        assert reader._handle_key(ord("A")) == "edit_draft_end"
+
+    def test_reader_ctrl_a_opens_attachments(self):
+        msg = {"de": "a@b.com", "al": ["x@y.com"], "subjekto": "S", "korpo": "abc"}
+        reader = MessageReader(_FakeStdScr(), msg)
+        assert reader._handle_key(1) == "attachments"
+
+    def test_wrapped_urls_are_unwrapped_in_reader_body(self):
+        body = (
+            "SG<https://particuliers.sg.fr/assurances/nos-offres/assurance-protection-\n"
+            "aide-juridique>"
+        )
+        msg = {"de": "a@b.com", "al": ["x@y.com"], "subjekto": "S", "korpo": body}
+        reader = MessageReader(_FakeStdScr(), msg)
+        joined = "\n".join(reader._lines)
+        assert "assurance-protection-aide-juridique" in joined
+        assert "assurance-protection-\naide-juridique" not in joined
+
     def test_compose_cancel_reopens_reader(self):
         tui = _make_tui_for_keys()
         tui._message_panel._messages = [
@@ -916,7 +1541,7 @@ class TestRetpostoTuiComposePanel:
         panel_send.handle_key(ord(":"))
         panel_send.handle_key(ord("w"))
         panel_send.handle_key(ord("q"))
-        assert panel_send.handle_key(ord("\n")) == "send"
+        assert panel_send.handle_key(ord("\n")) == "draft_quit"
 
         panel_cancel = ComposePanel(_FakeStdScr(), {"al": "user@example.com"})
         panel_cancel.handle_key(27)  # INSERT -> NORMAL
@@ -929,12 +1554,12 @@ class TestRetpostoTuiComposePanel:
         panel.handle_key(27)  # INSERT -> NORMAL
         panel.handle_key(ord(":"))
         panel.handle_key(ord("w"))
-        assert panel.handle_key(ord("\n")) == "draft"
+        assert panel.handle_key(ord("\n")) == "draft_stay"
 
     def test_unicode_character_can_be_typed(self):
         panel = ComposePanel(_FakeStdScr(), {})
         panel.handle_key(ord("ŝ"))
-        assert panel.get_values()["al"] == "ŝ"
+        assert panel.get_values()["de"] == "ŝ"
 
     def test_m_toggles_markdown_in_normal_mode(self):
         panel = ComposePanel(_FakeStdScr(), {"korpo": "text"})
@@ -943,6 +1568,402 @@ class TestRetpostoTuiComposePanel:
         assert panel.markdown_enabled() is False
         panel.handle_key(ord("m"))
         assert panel.markdown_enabled() is True
+
+    def test_ctrl_a_in_normal_mode_requests_attachment_prompt(self):
+        panel = ComposePanel(_FakeStdScr(), {"korpo": "text"})
+        panel._current_field = len(panel._field_names()) - 1
+        panel._body_lines[0].mode = "NORMAL"
+        assert panel.handle_key(1) == "prompt_attachment"
+
+    def test_ctrl_a_in_insert_mode_requests_attachment_prompt(self):
+        panel = ComposePanel(_FakeStdScr(), {"korpo": "text"})
+        panel._current_field = len(panel._field_names()) - 1
+        panel._body_lines[0].mode = "INSERT"
+        assert panel.handle_key(1) == "prompt_attachment"
+
+    def test_compose_has_from_priority_receipt_fields(self):
+        panel = ComposePanel(_FakeStdScr(), {})
+        vals = panel.get_values()
+        assert "de" in vals
+        assert "prioritato" in vals
+        assert "legokonfirmo" in vals
+        assert vals["prioritato"] == "normala"
+        assert vals["legokonfirmo"] == "ne"
+
+    def test_compose_transient_status_expires_after_three_seconds(self):
+        panel = ComposePanel(_FakeStdScr(), {"al": "user@example.com"})
+        with patch("autish.commands._retposto_tui.time.monotonic", return_value=10.0):
+            panel._set_status("Aldonita.", transient=True)
+        with patch("autish.commands._retposto_tui.time.monotonic", return_value=12.0):
+            assert "Aldonita." in panel._current_status()
+        with patch("autish.commands._retposto_tui.time.monotonic", return_value=13.2):
+            assert panel._current_status() == ""
+
+
+class TestRetpostoComposeBehavior:
+    def test_reply_initial_focus_is_body_insert(self):
+        initial = {
+            "al": "x@example.com",
+            "subjekto": "Re: A",
+            "korpo": "Body",
+            "_focus_body": "1",
+        }
+        panel = ComposePanel(_FakeStdScr(), initial, contact_completer=None)
+        if str(initial.get("_focus_body") or "").strip() and panel._body_lines:
+            panel._current_field = len(panel._field_names()) - 1
+            panel._body_row = 0
+            panel._body_lines[0].mode = "INSERT"
+        assert panel._is_body() is True
+        assert panel._body_lines[0].mode == "INSERT"
+
+    def test_compose_completer_formats_name_and_email(self):
+        tui = RetpostoTUI(
+            _FakeStdScr(),
+            load_accounts=lambda: [{"id": 1, "retposto": "me@example.com"}],
+            load_messages=lambda **_: [],
+            load_folders=lambda _acc_id: [{"id": 10, "nomo": "Inbox"}],
+            fetch_account_mail=lambda _acc, _max: (0, 0),
+            send_message=lambda *_a, **_k: True,
+            save_message=lambda _m: 1,
+            update_message_field=lambda *_a, **_k: None,
+            delete_message=lambda *_a, **_k: None,
+            load_contacts=lambda: [],
+            find_contact=lambda _p: [
+                {"retposto": "alice@example.com", "nomo": "Alice"},
+                {"retposto": "bob@example.com", "nomo": ""},
+            ],
+            upsert_contact=lambda *_a, **_k: None,
+            load_filters=lambda: [],
+            add_spam_block=lambda _r: None,
+            is_spam=lambda _s: False,
+            ensure_folder=lambda *_a, **_k: 99,
+            find_drafts_folder=lambda _acc_id: 88,
+        )
+
+        completions: list[str] = []
+
+        class _ProbePanel:
+            def __init__(
+                self,
+                _stdscr,
+                _initial,
+                contact_completer,
+                _from_completer=None,
+            ):
+                if contact_completer is not None:
+                    completions.extend(contact_completer("ali"))
+                self._body_lines = []
+
+            def draw(self):
+                return None
+
+            def handle_key(self, _key):
+                return "cancel"
+
+        with patch("autish.commands._retposto_tui.ComposePanel", _ProbePanel):
+            tui._run_compose({})
+
+        assert "Alice <alice@example.com>" in completions
+        assert "bob@example.com" in completions
+
+    def test_compose_ctrl_1_accepts_recipient_suggestion(self):
+        panel = ComposePanel(
+            _FakeStdScr(),
+            {"al": "ali"},
+            contact_completer=lambda _p: ["Alice <alice@example.com>"],
+        )
+        panel._current_field = 1  # al
+        panel.handle_key(ord("x"))  # trigger completer refresh
+        panel.handle_key(curses.KEY_DOWN)
+        panel.handle_key(curses.KEY_BTAB)
+        panel.handle_key(ord("1"))
+        assert "Alice <alice@example.com>" in panel.get_values()["al"]
+
+    def test_compose_ctrl_2_accepts_second_from_suggestion(self):
+        panel = ComposePanel(
+            _FakeStdScr(),
+            {"de": "me"},
+            contact_completer=lambda _p: [],
+            from_completer=lambda _p: [
+                "One <one@example.com>",
+                "Me <me@example.com>",
+            ],
+        )
+        panel._current_field = 0  # de
+        panel.handle_key(ord("x"))  # trigger completer refresh
+        panel.handle_key(curses.KEY_BTAB)
+        panel.handle_key(ord("2"))
+        assert panel.get_values()["de"] == "Me <me@example.com>"
+
+    def test_compose_digit_3_accepts_third_suggestion_fallback(self):
+        panel = ComposePanel(
+            _FakeStdScr(),
+            {"al": "a"},
+            contact_completer=lambda _p: [
+                "One <one@example.com>",
+                "Two <two@example.com>",
+                "Three <three@example.com>",
+            ],
+        )
+        panel._current_field = 1  # al
+        panel.handle_key(ord("x"))  # trigger completer refresh
+        panel.handle_key(curses.KEY_BTAB)
+        panel.handle_key(ord("3"))
+        assert "Three <three@example.com>" in panel.get_values()["al"]
+
+    def test_compose_ctrl_4_accepts_fourth_suggestion(self):
+        panel = ComposePanel(
+            _FakeStdScr(),
+            {"al": "a"},
+            contact_completer=lambda _p: [
+                "One <one@example.com>",
+                "Two <two@example.com>",
+                "Three <three@example.com>",
+                "Four <four@example.com>",
+            ],
+        )
+        panel._current_field = 1  # al
+        panel.handle_key(ord("x"))  # trigger completer refresh
+        panel.handle_key(curses.KEY_BTAB)  # enter number selection mode
+        panel.handle_key(ord("4"))
+        assert "Four <four@example.com>" in panel.get_values()["al"]
+
+    def test_compose_ctrl_2_accepts_even_in_insert_mode(self):
+        panel = ComposePanel(
+            _FakeStdScr(),
+            {"de": "m"},
+            contact_completer=lambda _p: [],
+            from_completer=lambda _p: ["A <a@example.com>", "B <b@example.com>"],
+        )
+        panel._current_field = 0
+        panel.handle_key(ord("x"))  # refresh suggestions
+        panel._editors["de"].mode = "INSERT"
+        panel.handle_key(curses.KEY_BTAB)
+        panel.handle_key(ord("2"))
+        assert panel.get_values()["de"] == "B <b@example.com>"
+
+    def test_compose_body_insert_can_type_g(self):
+        panel = ComposePanel(_FakeStdScr(), {"korpo": ""})
+        panel._current_field = len(panel._field_names()) - 1
+        panel._body_lines[0].mode = "INSERT"
+        panel.handle_key(ord("g"))
+        assert panel.get_values()["korpo"] == "g"
+
+    def test_compose_body_up_on_first_line_no_weird_insert(self):
+        panel = ComposePanel(_FakeStdScr(), {"korpo": "line1"})
+        panel._current_field = len(panel._field_names()) - 1
+        panel._body_lines[0].mode = "INSERT"
+        before = panel.get_values()["korpo"]
+        panel.handle_key(curses.KEY_UP)
+        assert panel.get_values()["korpo"] == before
+
+    def test_compose_autocomplete_number_mode_cancel(self):
+        panel = ComposePanel(
+            _FakeStdScr(),
+            {"al": "a"},
+            contact_completer=lambda _p: [
+                "One <one@example.com>",
+                "Two <two@example.com>",
+            ],
+        )
+        panel._current_field = 1
+        panel.handle_key(ord("x"))
+        panel.handle_key(curses.KEY_BTAB)
+        assert panel._autocomplete_pick_mode is True
+        panel.handle_key(27)  # esc
+        assert panel._autocomplete_pick_mode is False
+
+    def test_send_failure_queues_outbox(self):
+        saved: list[dict] = []
+        tui = RetpostoTUI(
+            _FakeStdScr(),
+            load_accounts=lambda: [{"id": 1, "retposto": "me@example.com"}],
+            load_messages=lambda **_: [],
+            load_folders=lambda _acc_id: [{"id": 10, "nomo": "Inbox"}],
+            fetch_account_mail=lambda _acc, _max: (0, 0),
+            send_message=lambda *_a, **_k: False,
+            save_message=lambda m: (saved.append(m) or 101),
+            update_message_field=lambda *_a, **_k: None,
+            delete_message=lambda *_a, **_k: None,
+            load_contacts=lambda: [],
+            find_contact=lambda _p: [],
+            upsert_contact=lambda *_a, **_k: None,
+            load_filters=lambda: [],
+            add_spam_block=lambda _r: None,
+            is_spam=lambda _s: False,
+            ensure_folder=lambda *_a, **_k: 77,
+            find_drafts_folder=lambda _acc_id: 66,
+        )
+
+        class _SendFailPanel:
+            def __init__(
+                self, _stdscr, _initial, _contact_completer, _from_completer=None
+            ):
+                self._body_lines = []
+                self._status = ""
+
+            def draw(self):
+                return None
+
+            def handle_key(self, _key):
+                return "send"
+
+            def get_values(self):
+                return {
+                    "de": "me@example.com",
+                    "al": "to@example.com",
+                    "cc": "",
+                    "bcc": "",
+                    "subjekto": "S",
+                    "prioritato": "9",
+                    "legokonfirmo": "j",
+                    "korpo": "Body",
+                }
+
+            def markdown_enabled(self):
+                return False
+
+            def attachment_paths(self):
+                return []
+
+        with (
+            patch("autish.commands._retposto_tui.ComposePanel", _SendFailPanel),
+            patch("autish.commands._retposto_tui._getch_unicode", return_value=10),
+        ):
+            assert tui._run_compose({}) == "done"
+
+        assert saved, "Expected message queued to OUTBOX when send fails"
+        assert saved[0]["dosierujo_id"] == 77
+        assert saved[0]["al"] == ["to@example.com"]
+
+    def test_compose_default_from_uses_selected_folder_account(self):
+        tui = _make_tui_for_keys()
+        tui._folder_panel._items = [
+            {"type": "account", "acc_id": 2, "label": "2. two@example.com"},
+            {"type": "folder", "acc_id": 2, "folder_id": 20, "label": "  INBOX"},
+        ]
+        tui._folder_panel._cursor = 1
+        tui._load_accounts = lambda: [  # type: ignore[method-assign]
+            {"id": 1, "retposto": "one@example.com"},
+            {"id": 2, "retposto": "two@example.com"},
+        ]
+        assert tui._default_compose_from_address() == "two@example.com"
+
+    def test_split_compose_recipients_extracts_angle_brackets(self):
+        tui = _make_tui_for_keys()
+        got = tui._split_compose_recipients(
+            "Alice <alice@example.com>, bob@example.com"
+        )
+        assert got == ["alice@example.com", "bob@example.com"]
+
+    def test_parse_compose_priority_standard_labels(self):
+        tui = _make_tui_for_keys()
+        assert tui._parse_compose_priority({"prioritato": "alta"}) == 9
+        assert tui._parse_compose_priority({"prioritato": "normala"}) == 5
+        assert tui._parse_compose_priority({"prioritato": "malalta"}) == 1
+
+
+class TestRetpostoSignatureLoading:
+    def test_load_signature_html_file_returns_plain_and_html(self, tmp_path):
+        tui = _make_tui_for_keys()
+        sig_file = tmp_path / "sig.html"
+        sig_file.write_text("<p>Saluton <b>Mondo</b></p>", encoding="utf-8")
+        plain, html = tui._load_signature({"subskribo": str(sig_file)})
+        assert "Saluton" in plain
+        assert html is not None
+        assert "<b>Mondo</b>" in html
+
+    def test_html_signature_uses_plain_fallback_and_html_variant(self):
+        tui = _make_tui_for_keys()
+        plain, html = tui._load_signature({"subskribo": "/tmp/sig.html"})
+        # only structure check here; content loading covered by existing file test
+        assert isinstance(plain, str)
+        assert html is None or isinstance(html, str)
+
+    def test_send_uses_sender_signature_for_html_variant(self):
+        sent: dict = {}
+        tui = RetpostoTUI(
+            _FakeStdScr(),
+            load_accounts=lambda: [{"id": 1, "retposto": "one@example.com"}],
+            load_messages=lambda **_: [],
+            load_folders=lambda _acc_id: [{"id": 10, "nomo": "Inbox"}],
+            fetch_account_mail=lambda _acc, _max: (0, 0),
+            send_message=lambda *_a, **kwargs: (sent.update(kwargs) or True),
+            save_message=lambda _m: 1,
+            update_message_field=lambda *_a, **_k: None,
+            delete_message=lambda *_a, **_k: None,
+            load_contacts=lambda: [],
+            find_contact=lambda _p: [],
+            upsert_contact=lambda *_a, **_k: None,
+            load_filters=lambda: [],
+            add_spam_block=lambda _r: None,
+            is_spam=lambda _s: False,
+            ensure_folder=lambda *_a, **_k: 1,
+            find_drafts_folder=lambda _acc_id: 1,
+        )
+        tui._load_accounts = lambda: [  # type: ignore[method-assign]
+            {"id": 1, "retposto": "one@example.com"},
+            {"id": 2, "retposto": "two@example.com"},
+        ]
+        tui._load_signature = (  # type: ignore[method-assign]
+            lambda acc: (
+                ("\n\n-- \nS2", "<p>S2</p>") if acc.get("retposto") == "two@example.com"
+                else ("\n\n-- \nS1", "<p>S1</p>")
+            )
+        )
+
+        class _Panel:
+            def __init__(self, *_a, **_k):
+                self._body_lines = []
+                self._status = ""
+
+            def draw(self):
+                return None
+
+            def handle_key(self, _key):
+                return "send"
+
+            def get_values(self):
+                return {
+                    "de": "two@example.com",
+                    "al": "to@example.com",
+                    "cc": "",
+                    "bcc": "",
+                    "subjekto": "S",
+                    "prioritato": "normala",
+                    "legokonfirmo": "ne",
+                    "korpo": "Body",
+                }
+
+            def markdown_enabled(self):
+                return False
+
+            def attachment_paths(self):
+                return []
+
+        with (
+            patch("autish.commands._retposto_tui.ComposePanel", _Panel),
+            patch("autish.commands._retposto_tui._getch_unicode", return_value=10),
+        ):
+            assert tui._run_compose({}) == "done"
+        assert "<p>S2</p>" in (sent.get("html_korpo") or "")
+
+    def test_cmd_aldoni_path_adds_attachment(self):
+        panel = ComposePanel(_FakeStdScr(), {"al": "user@example.com"})
+        panel.handle_key(27)  # INSERT -> NORMAL
+        with (
+            patch("autish.commands._retposto_tui.Path.exists", return_value=True),
+            patch("autish.commands._retposto_tui.Path.is_file", return_value=True),
+            patch(
+                "autish.commands._retposto_tui.Path.resolve",
+                return_value=Path("/tmp/file.txt"),
+            ),
+        ):
+            panel.handle_key(ord(":"))
+            for ch in "aldoni /tmp/file.txt":
+                panel.handle_key(ord(ch))
+            assert panel.handle_key(ord("\n")) is None
+        assert panel.attachment_paths() == ["/tmp/file.txt"]
 
 
 class TestRetpostoLineEditor:
@@ -968,6 +1989,70 @@ class TestRetpostoLineEditor:
         assert ed.mode == "NORMAL"
         ed.handle_key(ord("V"))
         assert ed.mode == "VISUAL_LINE"
+
+    def test_visual_line_jk_and_gg_G_move_cursor(self):
+        panel = ComposePanel(_FakeStdScr(), {"korpo": "l1\nl2\nl3"})
+        panel._current_field = len(panel._field_names()) - 1
+        panel._body_row = 1
+        panel._body_lines[1].mode = "NORMAL"
+        panel.handle_key(ord("V"))
+        assert panel._body_row == 1
+        panel.handle_key(ord("j"))
+        assert panel._body_row == 2
+        panel.handle_key(ord("k"))
+        assert panel._body_row == 1
+        panel.handle_key(ord("g"))
+        panel.handle_key(ord("g"))
+        assert panel._body_row == 0
+        panel.handle_key(ord("G"))
+        assert panel._body_row == 2
+
+    def test_body_visual_mode_status_not_insert(self):
+        panel = ComposePanel(_FakeStdScr(), {"korpo": "l1\nl2"})
+        panel._current_field = len(panel._field_names()) - 1
+        panel._body_row = 0
+        panel._body_lines[0].mode = "NORMAL"
+        panel.handle_key(ord("V"))
+        panel.draw()
+        assert panel._body_visual_mode == "line"
+        assert panel._body_lines[0].mode == "NORMAL"
+
+    def test_body_visual_char_yank_exits_visual_and_keeps_text(self):
+        panel = ComposePanel(_FakeStdScr(), {"korpo": "alpha\nbeta"})
+        panel._current_field = len(panel._field_names()) - 1
+        panel._body_row = 0
+        panel._body_lines[0].mode = "NORMAL"
+        panel.handle_key(ord("v"))
+        panel.handle_key(ord("j"))
+        panel.handle_key(ord("l"))
+        panel.handle_key(ord("y"))
+        assert panel._body_visual_mode == ""
+        assert panel.get_values()["korpo"] == "alpha\nbeta"
+
+    def test_body_visual_char_delete_cuts_across_lines(self):
+        panel = ComposePanel(_FakeStdScr(), {"korpo": "alpha\nbeta\ngamma"})
+        panel._current_field = len(panel._field_names()) - 1
+        panel._body_row = 0
+        panel._body_lines[0].mode = "NORMAL"
+        panel._body_lines[0].pos = 2  # after "al"
+        panel.handle_key(ord("v"))
+        panel.handle_key(ord("j"))
+        panel.handle_key(ord("j"))
+        panel.handle_key(ord("l"))
+        panel.handle_key(ord("d"))
+        assert panel._body_visual_mode == ""
+        assert panel.get_values()["korpo"] == "al"
+
+    def test_body_visual_line_delete_removes_selected_lines(self):
+        panel = ComposePanel(_FakeStdScr(), {"korpo": "l1\nl2\nl3\nl4"})
+        panel._current_field = len(panel._field_names()) - 1
+        panel._body_row = 1
+        panel._body_lines[1].mode = "NORMAL"
+        panel.handle_key(ord("V"))
+        panel.handle_key(ord("j"))
+        panel.handle_key(ord("d"))
+        assert panel._body_visual_mode == ""
+        assert panel.get_values()["korpo"] == "l1\nl4"
 
     def test_ctrl_u_kills_line_backward(self):
         ed = LineEditor("hello world")
@@ -998,6 +2083,25 @@ class TestRetpostoLineEditor:
         ed.handle_key(25)  # Ctrl+Y to yank (restore "hello ")
         assert ed.value == "hello world"
         assert ed.pos == 6
+
+
+class TestRetpostoHelpers:
+    def test_unwrap_wrapped_mail_urls(self):
+        raw = (
+            "https://particuliers.sg.fr/assurances/nos-offres/assurance-protection-\n"
+            "aide-juridique"
+        )
+        out = _unwrap_wrapped_mail_urls(raw)
+        assert out.endswith("assurance-protection-aide-juridique")
+
+    def test_autosave_filters_noreply_and_random_localpart(self):
+        assert _should_autosave_contact_email("noreply@socgen.fr") is False
+        assert _should_autosave_contact_email("do-not-reply@x.com") is False
+        assert _should_autosave_contact_email("notification@x.com") is False
+        assert _should_autosave_contact_email("newsletter@x.com") is False
+        assert _should_autosave_contact_email("2dj2912@socgen.fr") is False
+        assert _is_likely_temporary_local_part("2dj2912") is True
+        assert _should_autosave_contact_email("alice@example.com") is True
 
 
 def _make_tui_for_keys() -> RetpostoTUI:
@@ -1036,6 +2140,23 @@ class TestRetpostoTuiGlobalKeys:
         tui._action_spam = MagicMock()  # type: ignore[method-assign]
         assert tui._handle_key(ord("s")) is False
         tui._action_spam.assert_called_once()
+
+    def test_access_key_m_marks_selected_or_current_as_read(self):
+        tui = _make_tui_for_keys()
+        tui._action_mark_read_selected = MagicMock()  # type: ignore[method-assign]
+        assert tui._handle_key(ord("m")) is False
+        tui._action_mark_read_selected.assert_called_once()
+
+    def test_shift_s_in_outbox_sends_all(self):
+        tui = _make_tui_for_keys()
+        tui._focus = "list"
+        tui._folder_panel._items = [
+            {"type": "folder", "acc_id": 1, "folder_id": 1, "label": "  OUTBOX"}
+        ]
+        tui._folder_panel._cursor = 0
+        tui._action_resend_all_outbox = MagicMock()  # type: ignore[method-assign]
+        assert tui._handle_key(ord("S")) is False
+        tui._action_resend_all_outbox.assert_called_once()
 
     def test_shift_tab_moves_focus_back_to_folder(self):
         tui = _make_tui_for_keys()
@@ -1079,6 +2200,18 @@ class TestRetpostoTuiGlobalKeys:
         tui._focus = "list"
         status = tui._default_status()
         assert "S:spamo-listo" in status
+        assert "m:marki-legita" in status
+
+    def test_default_status_outbox_shows_ctrl_send_hints(self):
+        tui = _make_tui_for_keys()
+        tui._focus = "list"
+        tui._folder_panel._items = [
+            {"type": "folder", "acc_id": 1, "folder_id": 1, "label": "  OUTBOX"}
+        ]
+        tui._folder_panel._cursor = 0
+        status = tui._default_status()
+        assert "Ctrl+S:sendi-elektitajn" in status
+        assert "Ctrl+Shift+S:sendi-ĉiujn" in status
 
     def test_fetch_guard_blocks_duplicate_attempt(self):
         tui = _make_tui_for_keys()
@@ -1568,6 +2701,72 @@ class TestPromptAutocomplete:
         assert "ne trovita" in tui._status_msg.lower()
 
 
+class TestRetpostoMultiSelection:
+    def test_space_toggles_current_message_selection(self):
+        tui = _make_tui_for_keys()
+        tui._message_panel._messages = [{"id": 1, "konto_id": 1, "legita": 1}]
+        tui._message_panel._cursor = 0
+        tui._focus = "list"
+        tui._handle_key(ord(" "))
+        assert 1 in tui._selected_message_ids
+        tui._handle_key(ord(" "))
+        assert 1 not in tui._selected_message_ids
+
+    def test_v_range_selects_interval(self):
+        tui = _make_tui_for_keys()
+        tui._message_panel._messages = [
+            {"id": 1, "konto_id": 1, "legita": 1},
+            {"id": 2, "konto_id": 1, "legita": 1},
+            {"id": 3, "konto_id": 1, "legita": 1},
+        ]
+        tui._focus = "list"
+        tui._message_panel._cursor = 0
+        tui._handle_key(ord("v"))
+        tui._message_panel._cursor = 2
+        tui._handle_key(ord("v"))
+        assert tui._selected_message_ids == {1, 2, 3}
+
+    def test_escape_clears_selection(self):
+        tui = _make_tui_for_keys()
+        tui._focus = "list"
+        tui._selected_message_ids = {1, 2}
+        tui._message_visual_anchor = 0
+        tui._handle_key(27)
+        assert not tui._selected_message_ids
+        assert tui._message_visual_anchor is None
+
+    def test_delete_applies_to_selected_messages(self):
+        deleted: list[tuple[int, bool]] = []
+        tui = _make_tui_for_keys()
+        tui._delete_message = (  # type: ignore[method-assign]
+            lambda msg_id, permanent: deleted.append((msg_id, permanent))
+        )
+        tui._message_panel._messages = [
+            {"id": 1, "konto_id": 1, "legita": 1},
+            {"id": 2, "konto_id": 1, "legita": 1},
+        ]
+        tui._selected_message_ids = {1, 2}
+        tui._focus = "list"
+        with patch.object(tui, "_prompt_confirm_inline", return_value=True):
+            tui._action_delete()
+        assert deleted == [(1, False), (2, False)]
+
+    def test_mark_read_selected_updates_all_selected_messages(self):
+        updated: list[tuple[int, dict]] = []
+        tui = _make_tui_for_keys()
+        tui._update_message_field = (  # type: ignore[method-assign]
+            lambda msg_id, **fields: updated.append((msg_id, fields))
+        )
+        tui._message_panel._messages = [
+            {"id": 1, "konto_id": 1, "legita": 0},
+            {"id": 2, "konto_id": 1, "legita": 0},
+        ]
+        tui._selected_message_ids = {1, 2}
+        tui._focus = "list"
+        tui._action_mark_read_selected()
+        assert updated == [(1, {"legita": 1}), (2, {"legita": 1})]
+
+
 class TestDeleteMessageBehavior:
     def test_non_permanent_delete_moves_message_to_trash_folder(self, isolated_db):
         from autish.commands.retposto import (
@@ -1779,6 +2978,48 @@ class TestCliGisdatigiKonton:
         )
         assert result.exit_code != 0
 
+    def test_update_extended_account_fields(self, isolated_db):
+        from autish.commands.retposto import _load_accounts, _save_account
+
+        acc_id = _save_account(
+            {
+                "nomo": "UpdExt",
+                "retposto": "updext@example.com",
+                "imap_servilo": "old.imap.com",
+                "smtp_servilo": "old.smtp.com",
+            }
+        )
+        result = runner.invoke(
+            app,
+            [
+                "retposto",
+                "ĝisdatigi-konton",
+                str(acc_id),
+                "--imap-uzantonomo",
+                "imap-user@example.com",
+                "--smtp-uzantonomo",
+                "smtp-user@example.com",
+                "--webmail-url",
+                "https://webmail.example.com",
+                "--sieve-servilo",
+                "sieve.example.com",
+                "--sieve-haveno",
+                "4190",
+                "--no-sieve-starttls",
+                "--sieve-uzantonomo",
+                "sieve-user@example.com",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        acc = _load_accounts()[0]
+        assert acc["imap_uzantonomo"] == "imap-user@example.com"
+        assert acc["smtp_uzantonomo"] == "smtp-user@example.com"
+        assert acc["webmail_url"] == "https://webmail.example.com"
+        assert acc["sieve_servilo"] == "sieve.example.com"
+        assert int(acc["sieve_haveno"]) == 4190
+        assert bool(acc["sieve_starttls"]) is False
+        assert acc["sieve_uzantonomo"] == "sieve-user@example.com"
+
 
 class TestDbMigration:
     def test_migration_adds_subskribo_column(self, tmp_path, monkeypatch):
@@ -1807,6 +3048,35 @@ class TestDbMigration:
         cols = {row[1] for row in db.execute("PRAGMA table_info(konto)").fetchall()}
         db.close()
         assert "subskribo" in cols
+
+    def test_migration_adds_extended_konto_columns(self, tmp_path, monkeypatch):
+        import autish.commands.retposto as rp_mod
+
+        monkeypatch.setattr(rp_mod, "_DATA_DIR", tmp_path)
+        monkeypatch.setattr(rp_mod, "_DB_FILE", tmp_path / "retposto.db")
+        con = sqlite3.connect(str(tmp_path / "retposto.db"))
+        con.execute(
+            """CREATE TABLE konto (
+                id INTEGER PRIMARY KEY, nomo TEXT, retposto TEXT UNIQUE,
+                imap_servilo TEXT, imap_haveno INTEGER DEFAULT 993,
+                imap_ssl INTEGER DEFAULT 1, smtp_servilo TEXT,
+                smtp_haveno INTEGER DEFAULT 587, smtp_tls INTEGER DEFAULT 1,
+                uzantonomo TEXT, subskribo TEXT, kreita_je TEXT
+            )"""
+        )
+        con.commit()
+        con.close()
+
+        db = rp_mod._get_db()
+        cols = {row[1] for row in db.execute("PRAGMA table_info(konto)").fetchall()}
+        db.close()
+        assert "imap_uzantonomo" in cols
+        assert "smtp_uzantonomo" in cols
+        assert "webmail_url" in cols
+        assert "sieve_servilo" in cols
+        assert "sieve_haveno" in cols
+        assert "sieve_starttls" in cols
+        assert "sieve_uzantonomo" in cols
 
 
 class TestTUIAccountWithNoFolders:

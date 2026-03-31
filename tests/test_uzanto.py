@@ -44,8 +44,6 @@ class TestProfiloVidi:
         assert "Neniu" in result.output
 
     def test_show_all_fields(self, isolated_profile):
-        import autish.commands.uzanto as uz_mod
-
         (isolated_profile / "uzanto_profilo.toml").write_text(
             'nomo = "Alice"\nfamilia_nomo = "Smith"\norganizo = "ACME"\n',
             encoding="utf-8",
@@ -85,6 +83,28 @@ class TestProfiloVidi:
         with patch(_NO_MASTER, return_value=None):
             result = runner.invoke(app, ["uzanto", "profilo", "vidi", "-k", "nonexist"])
         assert result.exit_code != 0
+
+    def test_show_all_fields_handles_list_of_dicts(self, isolated_profile):
+        with patch(_NO_MASTER, return_value=None):
+            mod = runner.invoke(
+                app,
+                [
+                    "uzanto",
+                    "profilo",
+                    "modifi",
+                    "--telefonnumero",
+                    "0033123456789:hejmo:prima",
+                    "--retposhtadreso",
+                    "alice@example.com:labora:prima",
+                ],
+            )
+            assert mod.exit_code == 0
+            result = runner.invoke(app, ["uzanto", "profilo", "vidi"])
+        assert result.exit_code == 0
+        assert "0033123456789" in result.output
+        assert "alice@example.com" in result.output
+        assert "prima" in result.output
+        assert "(labora)" in result.output
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -142,6 +162,57 @@ class TestProfiloModifi:
         with patch(_NO_MASTER, return_value=None):
             result = runner.invoke(
                 app, ["uzanto", "profilo", "modifi", "-k", "NOCOLONVALUE"]
+            )
+        assert result.exit_code != 0
+
+    def test_set_new_standard_fields_and_multivalue_contacts(self, isolated_profile):
+        with patch(_NO_MASTER, return_value=None):
+            result = runner.invoke(
+                app,
+                [
+                    "uzanto",
+                    "profilo",
+                    "modifi",
+                    "--naskig-loko",
+                    "Parizo",
+                    "--organiza-identiga-numero",
+                    "ORG-123",
+                    "--telefonnumero",
+                    "0033123456789:hejmo:prima",
+                    "--telefonnumero",
+                    "0033987654321:laboro",
+                    "--retposhtadreso",
+                    "alice@example.com:persona:prima",
+                    "--retposhtadreso",
+                    "a.smith@work.org:labora",
+                ],
+            )
+        assert result.exit_code == 0
+        content = (isolated_profile / "uzanto_profilo.toml").read_text(encoding="utf-8")
+        assert "naskig_loko = \"Parizo\"" in content
+        assert "organiza_identiga_numero = \"ORG-123\"" in content
+        assert "telefonnumeroj" in content
+        assert "retposhtadresoj" in content
+
+    def test_invalid_phone_rejected(self, isolated_profile):
+        with patch(_NO_MASTER, return_value=None):
+            result = runner.invoke(
+                app,
+                ["uzanto", "profilo", "modifi", "--telefonnumero", "01234:hejmo:prima"],
+            )
+        assert result.exit_code != 0
+
+    def test_invalid_email_rejected(self, isolated_profile):
+        with patch(_NO_MASTER, return_value=None):
+            result = runner.invoke(
+                app,
+                [
+                    "uzanto",
+                    "profilo",
+                    "modifi",
+                    "--retposhtadreso",
+                    "not-an-email:hejmo",
+                ],
             )
         assert result.exit_code != 0
 
@@ -264,8 +335,6 @@ class TestProfiloEksportiImporti:
 class TestProfileEncryption:
     def test_profile_saved_encrypted_when_master_set(self, isolated_profile):
         """When master password is set, profile is saved as .enc file."""
-        import autish.commands.uzanto as uz_mod
-
         with patch(_NO_MASTER, return_value="MasterPass1"):
             runner.invoke(
                 app, ["uzanto", "profilo", "modifi", "-N", "Alice"]

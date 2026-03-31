@@ -11,6 +11,7 @@ Subcommands:
 from __future__ import annotations
 
 import subprocess
+import time
 
 import typer
 
@@ -29,6 +30,15 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
 
 def _bluetoothctl(*args: str) -> subprocess.CompletedProcess[str]:
     return _run(["bluetoothctl", *args])
+
+
+def _bluetooth_powered() -> tuple[bool, str]:
+    result = _bluetoothctl("show")
+    output = (result.stdout or "") + ("\n" + result.stderr if result.stderr else "")
+    for line in output.splitlines():
+        if "Powered:" in line:
+            return ("yes" in line.lower(), output.strip())
+    return (False, output.strip())
 
 
 @app.command("ls")
@@ -88,9 +98,50 @@ def konekti(
     mac: str = typer.Argument(..., help="MAC address of the device to connect."),
 ) -> None:
     """Connect a paired Bluetooth device."""
+    powered, raw_status = _bluetooth_powered()
+    if not powered:
+        power_result = _bluetoothctl("power", "on")
+        if power_result.returncode != 0:
+            typer.echo(
+                power_result.stderr.strip()
+                or "Ne povis ŝalti Bluetooth antaŭ konekti.",
+                err=True,
+            )
+            raise typer.Exit(code=power_result.returncode)
+        powered_after, raw_after = _bluetooth_powered()
+        if not powered_after:
+            detail = raw_after or raw_status or power_result.stdout.strip()
+            typer.echo(
+                detail or "Bluetooth restas malŝaltita post provo ŝalti ĝin.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
     result = _bluetoothctl("connect", mac)
+    combined = f"{result.stdout}\n{result.stderr}".lower()
+    # "br-connection-busy" can happen if user retries quickly; do a short retry window.
+    if "br-connection-busy" in combined:
+        for _ in range(3):
+            time.sleep(0.4)
+            retry = _bluetoothctl("connect", mac)
+            retry_combined = f"{retry.stdout}\n{retry.stderr}".lower()
+            if retry.returncode == 0 and "failed" not in retry_combined:
+                echo_padded(retry.stdout.strip() or "Connected.")
+                return
+            result = retry
+            if "br-connection-busy" not in retry_combined:
+                break
+
     if result.returncode != 0:
-        typer.echo(result.stderr.strip() or "Connection failed.", err=True)
+        combined_msg = (result.stderr or result.stdout or "").strip()
+        if "br-connection-busy" in combined_msg.lower():
+            typer.echo(
+                "Bluetooth estas okupata (br-connection-busy). "
+                "Bonvolu atendi momenton kaj reprovi.",
+                err=True,
+            )
+        else:
+            typer.echo(combined_msg or "Connection failed.", err=True)
         raise typer.Exit(code=result.returncode)
     echo_padded(result.stdout.strip())
 

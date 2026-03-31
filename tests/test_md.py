@@ -94,6 +94,12 @@ class TestBuildHtml:
         html = _build_html("# Hello", fold_level=0)
         assert "var foldLevel = 0;" in html
 
+    def test_heading_levels_have_cascading_sizes(self):
+        html = _build_html("# H1\n## H2\n### H3")
+        assert "h1 { font-size: 2.1rem;" in html
+        assert "h2 { font-size: 1.75rem;" in html
+        assert "h3 { font-size: 1.45rem;" in html
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CLI command tests
