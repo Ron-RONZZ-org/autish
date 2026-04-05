@@ -20,6 +20,15 @@
 - **`ligilo` relations are bidirectional by default in Autish.**
   When an entry links to another via `ligilo`, the reverse `ligilo` must be persisted
   automatically so both sides remain consistent in `vidi`/`serci` outputs.
+- **Personalized language display is the default behavior.**
+  When user language preferences are set in `uzanto profilo` (`lingvoj`),
+  commands that display multilingual content should prioritize/filter output using
+  those preferences by default; full output should remain available via explicit
+  all-fields options (e.g. `-a/--cxio`).
+- **Multilingual help UX (eo/en/fr) with Esperanto command stability.**
+  User-facing help text and interactive hints should support Esperanto, English,
+  and French locales where feasible, while command names/options and backend field
+  semantics remain strictly Esperanto for portability and consistency.
 
 ---
 

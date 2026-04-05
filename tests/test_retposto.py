@@ -14,6 +14,7 @@ from typer.testing import CliRunner
 from autish.commands._retposto_tui import (
     ComposePanel,
     LineEditor,
+    MessagePanel,
     MessageReader,
     RetpostoTUI,
     _unwrap_wrapped_mail_urls,
@@ -688,6 +689,11 @@ class TestFetchAccountMail:
             def search(self, *_args):
                 return ("OK", [b"1"])
 
+            def uid(self, *args):
+                if len(args) >= 1 and str(args[0]).upper() == "SEARCH":
+                    return ("OK", [b"1"])
+                return ("OK", [])
+
             def fetch(self, uid, _spec):
                 fetch_calls.append(str(uid))
                 raw = (
@@ -700,9 +706,6 @@ class TestFetchAccountMail:
                     b"Hello"
                 )
                 return ("OK", [(b"1 (RFC822 FLAGS (\\Seen))", raw)])
-
-            def uid(self, *_args):
-                return ("OK", [])
 
             def logout(self):
                 return ("BYE", [b"LOGOUT"])
@@ -2054,6 +2057,48 @@ class TestRetpostoLineEditor:
         assert panel._body_visual_mode == ""
         assert panel.get_values()["korpo"] == "l1\nl4"
 
+    def test_body_normal_p_pastes_below_current_line(self):
+        panel = ComposePanel(_FakeStdScr(), {"korpo": "l1\nl2"})
+        panel._current_field = len(panel._field_names()) - 1
+        panel._body_row = 0
+        panel._body_lines[0].mode = "NORMAL"
+        panel._body_register = "aa\nbb"
+        panel.handle_key(ord("p"))
+        assert panel.get_values()["korpo"] == "l1\naa\nbb\nl2"
+
+    def test_body_normal_P_pastes_above_current_line(self):
+        panel = ComposePanel(_FakeStdScr(), {"korpo": "l1\nl2"})
+        panel._current_field = len(panel._field_names()) - 1
+        panel._body_row = 1
+        panel._body_lines[1].mode = "NORMAL"
+        panel._body_register = "aa\nbb"
+        panel.handle_key(ord("P"))
+        assert panel.get_values()["korpo"] == "l1\naa\nbb\nl2"
+
+    def test_body_visual_x_deletes_selection(self):
+        panel = ComposePanel(_FakeStdScr(), {"korpo": "alpha\nbeta\ngamma"})
+        panel._current_field = len(panel._field_names()) - 1
+        panel._body_row = 0
+        panel._body_lines[0].mode = "NORMAL"
+        panel._body_lines[0].pos = 2
+        panel.handle_key(ord("v"))
+        panel.handle_key(ord("j"))
+        panel.handle_key(ord("j"))
+        panel.handle_key(ord("l"))
+        panel.handle_key(ord("x"))
+        assert panel._body_visual_mode == ""
+        assert panel.get_values()["korpo"] == "al"
+
+    def test_body_insert_ctrl_v_paste_keeps_paragraph_order(self):
+        panel = ComposePanel(_FakeStdScr(), {"korpo": "start"})
+        panel._current_field = len(panel._field_names()) - 1
+        panel._body_row = 0
+        panel._body_lines[0].mode = "INSERT"
+        panel._body_lines[0].pos = len(panel._body_lines[0].value)
+        panel._body_register = "para1\n\npara2\nline2"
+        panel.handle_key(22)  # Ctrl+V
+        assert panel.get_values()["korpo"] == "startpara1\n\npara2\nline2"
+
     def test_ctrl_u_kills_line_backward(self):
         ed = LineEditor("hello world")
         ed.pos = 6  # after "hello "
@@ -2806,6 +2851,215 @@ class TestDeleteMessageBehavior:
         assert row["dosierujo_id"] == trash["id"]
         assert row["forigita"] == 0
 
+    def test_non_permanent_delete_syncs_uid_to_server(self, isolated_db, monkeypatch):
+        from autish.commands.retposto import (
+            _delete_message,
+            _ensure_folder,
+            _save_account,
+            _save_message,
+        )
+
+        actions: list[tuple[str, tuple[object, ...]]] = []
+
+        class _FakeIMAP:
+            def login(self, *_args):
+                actions.append(("login", tuple(_args)))
+                return ("OK", [])
+
+            def select(self, *args, **_kwargs):
+                actions.append(("select", args))
+                return ("OK", [b"1"])
+
+            def uid(self, *args):
+                actions.append(("uid", args))
+                if len(args) >= 2 and str(args[0]).upper() == "COPY":
+                    return ("OK", [b""])
+                return ("OK", [])
+
+            def expunge(self):
+                actions.append(("expunge", ()))
+                return ("OK", [])
+
+            def logout(self):
+                actions.append(("logout", ()))
+                return ("BYE", [b"LOGOUT"])
+
+        class _ImmediateExecutor:
+            def submit(self, fn, *args):
+                fn(*args)
+                return None
+
+        monkeypatch.setattr(
+            "autish.commands.retposto.imaplib.IMAP4_SSL",
+            lambda *_a, **_k: _FakeIMAP(),
+        )
+        monkeypatch.setattr(
+            "autish.commands.retposto._IMAP_SYNC_EXECUTOR",
+            _ImmediateExecutor(),
+        )
+        monkeypatch.setattr(
+            "autish.commands.retposto._get_password",
+            lambda _id: "secret",
+        )
+
+        acc_id = _save_account({
+            "nomo": "Sync Delete",
+            "retposto": "sync@example.com",
+            "imap_servilo": "imap.example.com",
+            "imap_haveno": 993,
+            "imap_ssl": True,
+            "smtp_servilo": "smtp.example.com",
+        })
+        inbox_id = _ensure_folder(acc_id, "INBOX", "INBOX")
+        msg_id = _save_message({
+            "konto_id": acc_id,
+            "dosierujo_id": inbox_id,
+            "uid": "42",
+            "de": "a@b.com",
+            "al": ["sync@example.com"],
+            "subjekto": "Delete me remote",
+        })
+
+        _delete_message(msg_id, permanent=False)
+
+        uid_calls = [entry for entry in actions if entry[0] == "uid"]
+        assert any(call[1][0] == "COPY" and call[1][1] == "42" for call in uid_calls)
+        assert any(call[1][0] == "STORE" and call[1][1] == "42" for call in uid_calls)
+        assert any(entry[0] == "expunge" for entry in actions)
+
+    def test_update_field_syncs_read_star_and_move_to_server(
+        self, isolated_db, monkeypatch
+    ):
+        from autish.commands.retposto import (
+            _ensure_folder,
+            _save_account,
+            _save_message,
+            _update_message_field,
+        )
+
+        actions: list[tuple[str, tuple[object, ...]]] = []
+
+        class _FakeIMAP:
+            def login(self, *_args):
+                actions.append(("login", tuple(_args)))
+                return ("OK", [])
+
+            def select(self, *args, **_kwargs):
+                actions.append(("select", args))
+                return ("OK", [b"1"])
+
+            def uid(self, *args):
+                actions.append(("uid", args))
+                if len(args) >= 1 and str(args[0]).upper() == "COPY":
+                    return ("OK", [b""])
+                return ("OK", [])
+
+            def create(self, *args):
+                actions.append(("create", args))
+                return ("OK", [b""])
+
+            def expunge(self):
+                actions.append(("expunge", ()))
+                return ("OK", [b""])
+
+            def logout(self):
+                actions.append(("logout", ()))
+                return ("BYE", [b"LOGOUT"])
+
+        class _ImmediateExecutor:
+            def submit(self, fn, *args):
+                fn(*args)
+                return None
+
+        monkeypatch.setattr(
+            "autish.commands.retposto.imaplib.IMAP4_SSL",
+            lambda *_a, **_k: _FakeIMAP(),
+        )
+        monkeypatch.setattr(
+            "autish.commands.retposto._IMAP_SYNC_EXECUTOR",
+            _ImmediateExecutor(),
+        )
+        monkeypatch.setattr(
+            "autish.commands.retposto._get_password",
+            lambda _id: "secret",
+        )
+
+        acc_id = _save_account({
+            "nomo": "Sync Update",
+            "retposto": "sync-update@example.com",
+            "imap_servilo": "imap.example.com",
+            "imap_haveno": 993,
+            "imap_ssl": True,
+            "smtp_servilo": "smtp.example.com",
+        })
+        inbox_id = _ensure_folder(acc_id, "INBOX", "INBOX")
+        archive_id = _ensure_folder(acc_id, "Archive", "Archive")
+        msg_id = _save_message({
+            "konto_id": acc_id,
+            "dosierujo_id": inbox_id,
+            "uid": "99",
+            "de": "a@b.com",
+            "al": ["sync-update@example.com"],
+            "subjekto": "sync update",
+        })
+
+        _update_message_field(msg_id, legita=1, stelo=1, dosierujo_id=archive_id)
+
+        uid_calls = [entry for entry in actions if entry[0] == "uid"]
+        assert any(
+            call[1][0] == "STORE" and call[1][2] == "+FLAGS"
+            for call in uid_calls
+        )
+        assert any(call[1][0] == "COPY" and call[1][1] == "99" for call in uid_calls)
+        assert any(entry[0] == "expunge" for entry in actions)
+
+    def test_update_field_returns_without_waiting_for_remote_sync(
+        self, isolated_db, monkeypatch
+    ):
+        from autish.commands.retposto import (
+            _ensure_folder,
+            _save_account,
+            _save_message,
+            _update_message_field,
+        )
+
+        submitted: list[tuple[object, tuple[object, ...]]] = []
+
+        class _FakeExecutor:
+            def submit(self, fn, *args):
+                submitted.append((fn, args))
+                return None
+
+        monkeypatch.setattr(
+            "autish.commands.retposto._IMAP_SYNC_EXECUTOR",
+            _FakeExecutor(),
+        )
+        monkeypatch.setattr(
+            "autish.commands.retposto._get_password",
+            lambda _id: "secret",
+        )
+
+        acc_id = _save_account({
+            "nomo": "Async Test",
+            "retposto": "async@example.com",
+            "imap_servilo": "imap.example.com",
+            "imap_haveno": 993,
+            "imap_ssl": True,
+            "smtp_servilo": "smtp.example.com",
+        })
+        inbox_id = _ensure_folder(acc_id, "INBOX", "INBOX")
+        msg_id = _save_message({
+            "konto_id": acc_id,
+            "dosierujo_id": inbox_id,
+            "uid": "7",
+            "de": "a@b.com",
+            "al": ["async@example.com"],
+            "subjekto": "Async path",
+        })
+
+        _update_message_field(msg_id, legita=1)
+        assert submitted, "expected remote sync to be scheduled asynchronously"
+
 
 class TestAccountOrdering:
     def test_move_account_order_swaps_positions(self, isolated_db):
@@ -2882,6 +3136,67 @@ class TestMessageSearchFiltering:
         tui._apply_message_search([])
         assert len(tui._message_panel._messages) == 2
 
+    def test_folder_search_can_query_other_folder_scope(self):
+        tui = _make_tui_for_keys()
+        tui._load_accounts = lambda: [{"id": 1, "retposto": "me@example.com"}]  # type: ignore[method-assign]
+        tui._load_folders = lambda _acc_id: [  # type: ignore[method-assign]
+            {"id": 10, "nomo": "INBOX"},
+            {"id": 11, "nomo": "Archive"},
+        ]
+
+        def _fake_load_messages(**kwargs):
+            if kwargs.get("dosierujo_id") == 11:
+                return [{
+                    "id": 99,
+                    "de": "alice@example.com",
+                    "subjekto": "archive target",
+                    "korpo": "body",
+                }]
+            return []
+
+        tui._load_messages = _fake_load_messages  # type: ignore[method-assign]
+        tui._apply_message_search(["FOLDER me@example.com/Archive", 'FROM "alice"'])
+        assert len(tui._message_panel._messages) == 1
+        assert tui._message_panel._messages[0]["id"] == 99
+
+
+class TestMessagePanelRendering:
+    def test_selected_tick_overrides_other_flags(self):
+        panel = MessagePanel(_FakeStdScr(), load_messages=lambda **_: [])
+        panel._messages = [{
+            "id": 7,
+            "de": "alice@example.com",
+            "subjekto": "Subject",
+            "ricevita_je": "2026-03-01T12:00:00",
+            "stelo": 1,
+            "spamo": 1,
+            "etikedoj": ["read-receipt-requested"],
+            "legita": 1,
+        }]
+        panel._selected_ids = {7}
+
+        class _RecordingWin:
+            def __init__(self):
+                self.calls: list[tuple[int, int, str, int]] = []
+
+            def getmaxyx(self):
+                return (8, 120)
+
+            def erase(self):
+                return None
+
+            def addstr(self, row, col, text, attr=0):
+                self.calls.append((row, col, text, attr))
+                return None
+
+            def noutrefresh(self):
+                return None
+
+        win = _RecordingWin()
+        panel.draw(win, focused=False)
+        message_line = next((c[2] for c in win.calls if c[0] == 1), "")
+        assert message_line.startswith(" ✓ ⚠")
+
 
 class TestCliFolderAndCopyParity:
     def test_cli_kopii_mesagon_and_rename_move_folder(self, isolated_db):
@@ -2933,6 +3248,45 @@ class TestCliFolderAndCopyParity:
             ).fetchone()
         assert row is not None
         assert row["patro_id"] == parent
+
+
+class TestCliSearch:
+    def test_retposto_serci_filters_by_folder(self, isolated_db):
+        from autish.commands.retposto import (
+            _ensure_folder,
+            _save_account,
+            _save_message,
+        )
+
+        acc_id = _save_account({
+            "nomo": "Acct",
+            "retposto": "acct@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+        })
+        inbox_id = _ensure_folder(acc_id, "INBOX", "INBOX")
+        archive_id = _ensure_folder(acc_id, "Archive", "Archive")
+        _save_message({
+            "konto_id": acc_id,
+            "dosierujo_id": inbox_id,
+            "de": "alice@example.com",
+            "subjekto": "inbox msg",
+            "korpo": "hello inbox",
+        })
+        _save_message({
+            "konto_id": acc_id,
+            "dosierujo_id": archive_id,
+            "de": "alice@example.com",
+            "subjekto": "archive msg",
+            "korpo": "hello archive",
+        })
+        result = runner.invoke(
+            app,
+            ["retposto", "serci", "alice", "--dosierujo", "acct@example.com/Archive"],
+        )
+        assert result.exit_code == 0
+        assert "archive msg" in result.output
+        assert "inbox msg" not in result.output
 
 
 class TestCliGisdatigiKonton:

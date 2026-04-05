@@ -207,6 +207,9 @@ _TIPO_MAP: dict[str, str] = {
     "vt": "verbo-transitiva",
     "transitiva": "verbo-transitiva",
     "verbo-transitiva": "verbo-transitiva",
+    "vnt": "verbo-nerekta-transitiva",
+    "nerekta-transitiva": "verbo-nerekta-transitiva",
+    "verbo-nerekta-transitiva": "verbo-nerekta-transitiva",
     "vn": "verbo-netransitiva",
     "netransitiva": "verbo-netransitiva",
     "verbo-netransitiva": "verbo-netransitiva",
@@ -466,10 +469,19 @@ def _normalize_oe(text: str) -> str:
 
 
 def _split_difino_uzo(raw: str) -> tuple[str, str]:
-    """Split `difino:*uzo*` input while preserving backward compatibility."""
-    m = re.match(r"^(.*?):\*(.+)\*$", raw.strip())
+    """Split definition/example input.
+
+    Supported forms:
+    - `difino:*uzo*` (legacy)
+    - `difino::uzo` (shell-safe; avoids `!*` history expansion issues)
+    """
+    text = raw.strip()
+    if "::" in text:
+        left, right = text.split("::", 1)
+        return left.strip(), right.strip()
+    m = re.match(r"^(.*?):\*(.+)\*$", text)
     if not m:
-        return raw.strip(), ""
+        return text, ""
     return m.group(1).strip(), m.group(2).strip()
 
 
@@ -573,6 +585,28 @@ def _collect_vorto_incoming_refs(
                     f"#{str(link_ref)[:8]}"
                 )
     return warnings
+
+
+def _parse_forigi_targets(raw_targets: list[str]) -> list[str]:
+    """Parse variadic targets or a JSON-style list string."""
+    if len(raw_targets) == 1:
+        only = str(raw_targets[0] or "").strip()
+        if only.startswith("[") and only.endswith("]"):
+            try:
+                parsed = json.loads(only)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    "Nevalida listo por forigi. Uzu ekz. "
+                    '\'["568b1385", "3dfce5f3"]\'.'
+                ) from exc
+            if not isinstance(parsed, list) or not all(
+                isinstance(item, str) for item in parsed
+            ):
+                raise ValueError(
+                    "Nevalida listo por forigi: atendata listo de tekstoj."
+                )
+            return [item.strip() for item in parsed if item.strip()]
+    return [str(item or "").strip() for item in raw_targets if str(item or "").strip()]
 
 
 def _find_entry(uid_or_teksto: str, entries: list[dict]) -> dict | None:
@@ -849,7 +883,8 @@ def aldoni(
         "--tipo",
         help="Subtype (comma-separated for multiple): substantivo-neŭtra/su, "
         "substantivo-ina/sui, substantivo-vira/suv, verbo/ve, "
-        "verbo-transitiva/vt, verbo-netransitiva/vn, refleksiva-verbo/vr, "
+        "verbo-transitiva/vt, verbo-nerekta-transitiva/vnt, verbo-netransitiva/vn, "
+        "refleksiva-verbo/vr, "
         "adjektivo/aj, adverbo/av, "
         "parola/pa, skriba/sk, citaĵo/ci, ŝerco/ŝe, proverbo/pr, poemo/po, "
         "ekzemplo/ek. Example: --tipo 'aj,su' for adjective and noun.",
@@ -870,7 +905,8 @@ def aldoni(
         help=(
             "Definition. Repeat flag for multiple. "
             'Syntax: "{definition}:*{example}*" to attach an example. '
-            "If text starts with !, quote it in shell (e.g. -d '!grave')."
+            'Alternative shell-safe syntax: "{definition}::{example}". '
+            "If text contains !, prefer single quotes or escape ! in shell."
         ),
     ),
     etikedo: list[str] | None = typer.Option(
@@ -1219,6 +1255,12 @@ def serci(
         "--ordo",
         help="Order: graveco/g (relevance), dato/d (newest), inversa-dato/id (oldest).",
     ),
+    nur_uuid: bool = typer.Option(
+        False,
+        "-u",
+        "--uuid",
+        help="Eligi nur UUID-liston kiel JSON (8-signaj prefiksoj).",
+    ),
 ) -> None:
     """Search the wordbank. No filters → list all entries up to --limo."""
     entries = _load_entries()
@@ -1295,6 +1337,11 @@ def serci(
     if limo > 0:
         results = results[:limo]
 
+    if nur_uuid:
+        uuid_list = [str(e["uuid"])[:8] for e in results]
+        typer.echo(json.dumps(uuid_list, ensure_ascii=False))
+        return
+
     if fuzzy_used:
         typer.echo("Neniu preciza rezulto; montrante similajn kongruojn.")
     typer.echo(f"{len(results)} rezulto(j) trovita(j).")
@@ -1303,8 +1350,12 @@ def serci(
 
 @app.command("forigi")
 def forigi(
-    uid_or_teksto: str = typer.Argument(
-        ..., help="UUID (or prefix) or exact text of the entry to delete."
+    uid_or_teksto: list[str] = typer.Argument(
+        ...,
+        help=(
+            "Unu aŭ pluraj UUID/teksto-celoj por forigi; aŭ unu JSON-listo "
+            'kiel ["568b1385","3dfce5f3"].'
+        ),
     ),
 ) -> None:
     """Move a wordbank entry to the recycle bin (with confirmation).
@@ -1312,27 +1363,51 @@ def forigi(
     Entries in the recycle bin are permanently deleted after 30 days.
     Use  vorto rubujo reakiri <uuid>  to restore.
     """
+    if not uid_or_teksto:
+        typer.echo("Mankas celo por forigi.", err=True)
+        raise typer.Exit(code=2)
     entries = _load_entries()
-    entry = _find_entry(uid_or_teksto, entries)
-    if entry is None:
-        typer.echo(f"Eniro ne trovita: {uid_or_teksto!r}", err=True)
+    try:
+        targets = _parse_forigi_targets(uid_or_teksto)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    if not targets:
+        typer.echo("Mankas valida celo por forigi.", err=True)
         raise typer.Exit(code=1)
 
-    refs = _collect_vorto_incoming_refs(entries, {entry["uuid"]})
+    to_delete: list[dict] = []
+    seen: set[str] = set()
+    for target in targets:
+        entry = _find_entry(target, entries)
+        if entry is None:
+            typer.echo(f"Eniro ne trovita: {target!r}", err=True)
+            raise typer.Exit(code=1)
+        if entry["uuid"] in seen:
+            continue
+        seen.add(entry["uuid"])
+        to_delete.append(entry)
+
+    refs = _collect_vorto_incoming_refs(entries, {e["uuid"] for e in to_delete})
     if refs:
         typer.echo("[!] Averto: forigo rompos referencojn en aliaj vorto-eroj:")
         for line in refs:
             typer.echo(f"  {line}")
 
-    if not _show_diff_confirmation("forigi (→ rubujo)", entry):
-        typer.echo("Nuligita. (Cancelled.)")
+    typer.echo("Forigontaj eniroj:")
+    _display_results(to_delete)
+    confirm = typer.prompt("Ĉu daŭrigi? (j/N)", default="n")
+    if confirm.strip().lower() not in ("j", "jes", "y", "yes"):
+        typer.echo("Nuligita.")
         return
 
-    _move_to_rubujo(entry)
-    _push_undo({"op": "forigi", "uuid": entry["uuid"]})
+    for entry in to_delete:
+        _move_to_rubujo(entry)
+        _push_undo({"op": "forigi", "uuid": entry["uuid"]})
     typer.echo(
-        f"Sendis al rubujo: #{entry['uuid'][:8]}  \"{entry['teksto']}\""
-        f"  (aŭtomate forigita post {_RUBUJO_DAYS} tagoj)"
+        f"Sendis al rubujo: {len(to_delete)} eniro(j) "
+        f"(aŭtomate forigita post {_RUBUJO_DAYS} tagoj)"
     )
 
 

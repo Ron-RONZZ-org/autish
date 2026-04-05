@@ -6,6 +6,7 @@ from autish.commands import (
     bluetooth,
     disko,
     encik,
+    filmeto,
     kontakto,
     kp,
     md,
@@ -43,6 +44,7 @@ app.add_typer(md.app, name="md")
 app.add_typer(encik.app, name="encik")
 app.add_typer(disko.app, name="disko")
 app.add_typer(usb.app, name="usb")
+app.add_typer(filmeto.app, name="filmeto")
 
 
 @app.command("help")

@@ -526,6 +526,7 @@ class ComposePanel:
         self._body_visual_mode: str = ""  # "", "char", "line"
         self._body_visual_anchor_row: int | None = None
         self._body_visual_anchor_col: int | None = None
+        self._body_register: str = ""
         self._mode: str = "FIELD"  # FIELD | CMD
         self._cmd_buf: str = ""
         self._markdown_enabled: bool = False
@@ -908,6 +909,64 @@ class ComposePanel:
         self._body_lines[start_row:end_row + 1] = [merged]
         self._body_row = start_row
 
+    def _get_paste_text(self) -> str:
+        if self._body_register:
+            return self._body_register
+        try:
+            import pyperclip
+        except ImportError:
+            return ""
+        try:
+            return str(pyperclip.paste() or "")
+        except Exception:
+            return ""
+
+    def _insert_multiline_at_cursor(self, text: str) -> None:
+        if not text:
+            return
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        ed = self._body_lines[self._body_row]
+        prefix = ed.value[: ed.pos]
+        suffix = ed.value[ed.pos :]
+        chunks = normalized.split("\n")
+        if len(chunks) == 1:
+            ed.value = prefix + chunks[0] + suffix
+            ed.pos = len(prefix + chunks[0])
+            return
+        first = LineEditor(prefix + chunks[0])
+        middle = [LineEditor(chunk) for chunk in chunks[1:-1]]
+        last = LineEditor(chunks[-1] + suffix)
+        first.mode = "INSERT"
+        for item in middle:
+            item.mode = "INSERT"
+        last.mode = "INSERT"
+        insert_rows = [first, *middle, last]
+        self._body_lines[self._body_row:self._body_row + 1] = insert_rows
+        self._body_row += len(insert_rows) - 1
+        self._body_lines[self._body_row].pos = len(chunks[-1])
+
+    def _paste_linewise(self, *, above: bool) -> None:
+        text = self._get_paste_text()
+        if not text:
+            self._set_status("[!] Nenio por alglui.", transient=True)
+            return
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        lines = normalized.split("\n")
+        if lines and lines[-1] == "":
+            lines = lines[:-1]
+        if not lines:
+            self._set_status("[!] Nenio por alglui.", transient=True)
+            return
+        insert_at = self._body_row if above else self._body_row + 1
+        new_rows: list[LineEditor] = []
+        for line in lines:
+            item = LineEditor(line, insert_mode=False)
+            item.mode = "NORMAL"
+            new_rows.append(item)
+        self._body_lines[insert_at:insert_at] = new_rows
+        self._body_row = insert_at
+        self._set_status("Teksto algluita.", transient=True)
+
     def handle_key(self, key: int) -> str | None:
         """Returns 'send', 'cancel', or None to keep composing."""
         ch = _key_to_char(key)
@@ -1199,6 +1258,9 @@ class ComposePanel:
                 self._body_lines.insert(self._body_row + 1, new_line)
                 self._body_row += 1
             return None
+        if key == 22 and ed.mode == "INSERT":
+            self._insert_multiline_at_cursor(self._get_paste_text())
+            return None
         if _is_backspace(key) and ed.mode == "INSERT":
             if ed.pos == 0 and self._body_row > 0:
                 # Merge with previous line
@@ -1324,17 +1386,27 @@ class ComposePanel:
                     import pyperclip
                     text = self._body_visual_text()
                     if text:
+                        self._body_register = text
                         pyperclip.copy(text)
                 except ImportError:
                     pass
                 self._clear_body_visual()
                 self._set_status("Elekto kopiita.", transient=True)
                 return None
-            if ch == "d":
+            if ch in ("d", "x"):
+                selected = self._body_visual_text()
+                if selected:
+                    self._body_register = selected
                 self._delete_body_visual_selection()
                 self._clear_body_visual()
                 self._set_status("Elekto forigita.", transient=True)
                 return None
+            return None
+        if ed.mode == "NORMAL" and ch == "p":
+            self._paste_linewise(above=False)
+            return None
+        if ed.mode == "NORMAL" and ch == "P":
+            self._paste_linewise(above=True)
             return None
         ed.handle_key(key)
         return None
@@ -1543,7 +1615,7 @@ class MessagePanel:
         msgs = self._messages
 
         # Header
-        header = f" {'!':1}  {'De':22}  {'Subjekto':40}  {'Dato':10}"
+        header = f" {'✓':1} {'!':1}  {'De':22}  {'Subjekto':40}  {'Dato':10}"
         title_attr = curses.A_REVERSE if focused else curses.A_BOLD
         _safe_addstr(win, 0, 0, header[:w - 1].ljust(w - 1), title_attr)
 
@@ -1561,15 +1633,14 @@ class MessagePanel:
             )
             selected = int(msg.get("id", -1)) in self._selected_ids
 
-            flag = _fmt_priority(msg.get("prioritato"))
-            if selected:
-                flag = "✓"
+            status_flag = _fmt_priority(msg.get("prioritato"))
             if stelo:
-                flag = "★"
+                status_flag = "★"
             if spamo:
-                flag = "⚠"
+                status_flag = "⚠"
             elif legokonfirmo_petita:
-                flag = "↵"
+                status_flag = "↵"
+            selected_flag = "✓" if selected else " "
 
             sender = (msg.get("de") or "")[:22]
             subject = msg.get("subjekto") or ""
@@ -1579,7 +1650,10 @@ class MessagePanel:
             subject = subject[:40]
             date = _fmt_date(msg.get("ricevita_je"))
 
-            line = f" {flag:1}  {sender:22}  {subject:40}  {date:10}"
+            line = (
+                f" {selected_flag:1} {status_flag:1}  "
+                f"{sender:22}  {subject:40}  {date:10}"
+            )
             if is_cur:
                 attr = curses.A_STANDOUT
             elif unread:
@@ -4037,6 +4111,7 @@ class RetpostoTUI:
                     'SUBJECT "meeting"',
                     "SINCE 1-Jan-2024",
                     'BODY "invoice"',
+                    "FOLDER me@example.com/INBOX",
                 ]
                 row = 1
                 for ex in examples:
@@ -4084,22 +4159,126 @@ class RetpostoTUI:
         finally:
             self.stdscr.timeout(500)
 
+    def _resolve_search_folder(self, spec: str) -> tuple[int, int] | None:
+        raw = spec.strip().strip('"').strip("'")
+        if "/" not in raw:
+            return None
+        account_ident, folder_name = raw.split("/", 1)
+        account_ident = account_ident.strip()
+        folder_name = folder_name.strip()
+        if not account_ident or not folder_name:
+            return None
+        account: dict | None = None
+        for item in self._load_accounts():
+            if (
+                str(item.get("retposto", "")).lower() == account_ident.lower()
+                or str(item.get("id", "")) == account_ident
+            ):
+                account = item
+                break
+        if account is None:
+            return None
+        folders = self._load_folders(int(account["id"]))
+        for folder in folders:
+            if str(folder.get("nomo", "")).lower() == folder_name.lower():
+                return int(account["id"]), int(folder["id"])
+        return None
+
+    def _load_search_pool(self, folder_scope: tuple[int, int] | None) -> list[dict]:
+        if folder_scope is not None:
+            konto_id, folder_id = folder_scope
+            scope_messages = self._load_messages(
+                konto_id=konto_id,
+                dosierujo_id=folder_id,
+                spamo=False,
+                forigita=False,
+                limit=1000,
+            )
+            if not scope_messages:
+                folder_label = ""
+                for folder in self._load_folders(konto_id):
+                    if int(folder.get("id", -1)) == folder_id:
+                        folder_label = str(folder.get("nomo", "")).strip().lower()
+                        break
+                if (
+                    folder_label in ("spam", "junk")
+                    and self._load_messages_spam is not None
+                ):
+                    return self._load_messages_spam(
+                        konto_id=konto_id,
+                        dosierujo_id=folder_id,
+                        spamo=True,
+                        forigita=False,
+                        limit=1000,
+                    )
+            return scope_messages
+
+        pooled: list[dict] = []
+        seen: set[int] = set()
+        for account in self._load_accounts():
+            account_id = int(account["id"])
+            for folder in self._load_folders(account_id):
+                folder_label = str(folder.get("nomo", "")).strip().lower()
+                use_spam_loader = (
+                    folder_label in ("spam", "junk")
+                    and self._load_messages_spam is not None
+                )
+                rows = (
+                    self._load_messages_spam(
+                        konto_id=account_id,
+                        dosierujo_id=int(folder["id"]),
+                        spamo=True,
+                        forigita=False,
+                        limit=1000,
+                    )
+                    if use_spam_loader
+                    else self._load_messages(
+                        konto_id=account_id,
+                        dosierujo_id=int(folder["id"]),
+                        spamo=False,
+                        forigita=False,
+                        limit=1000,
+                    )
+                )
+                for msg in rows:
+                    msg_id = int(msg.get("id", -1))
+                    if msg_id in seen:
+                        continue
+                    seen.add(msg_id)
+                    pooled.append(msg)
+        return pooled
+
     def _apply_message_search(self, lines: list[str]) -> None:
         clauses: list[tuple[str, str]] = []
+        folder_scope: tuple[int, int] | None = None
         for raw in lines:
-            m = re.match(r"^(FROM|SUBJECT|SINCE|BODY)\s+(.+)$", raw.strip(), re.I)
+            m = re.match(
+                r"^(FROM|SUBJECT|SINCE|BODY|FOLDER)\s+(.+)$",
+                raw.strip(),
+                re.I,
+            )
             if not m:
                 continue
             field = m.group(1).upper()
             val = m.group(2).strip()
             if val.startswith('"') and val.endswith('"') and len(val) >= 2:
                 val = val[1:-1]
+            if field == "FOLDER":
+                resolved = self._resolve_search_folder(val)
+                if resolved is None:
+                    self._set_status(f"Nekonata FOLDER: {val}", transient=True)
+                    return
+                folder_scope = resolved
+                continue
             clauses.append((field, val))
-        if not clauses:
+        if not clauses and folder_scope is None:
             self._message_panel.reset_filter()
             self._set_status("Serĉo nuligita.", transient=True)
             return
-        pool = list(self._message_panel._all_messages)
+        if folder_scope is None and self._message_panel._all_messages:
+            pool = list(self._message_panel._all_messages)
+        else:
+            pool = self._load_search_pool(folder_scope)
         for field, val in clauses:
             needle = val.lower()
             if field == "FROM":
@@ -4127,7 +4306,10 @@ class RetpostoTUI:
                     if d >= min_dt:
                         filtered.append(m)
                 pool = filtered
-        query = " | ".join(f"{k} {v}" for k, v in clauses)
+        query_parts = [f"{k} {v}" for k, v in clauses]
+        if folder_scope is not None:
+            query_parts.insert(0, "FOLDER")
+        query = " | ".join(query_parts)
         self._message_panel.set_filtered_messages(pool, query)
         self._set_status(f"Serĉ-rezultoj: {len(pool)}", transient=True)
     def _action_aldoni_konton(self) -> None:

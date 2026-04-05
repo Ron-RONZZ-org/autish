@@ -10,8 +10,12 @@ Usage:
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import tempfile
 from pathlib import Path
+from urllib.parse import quote
 
 import typer
 from rich.console import Console
@@ -63,24 +67,70 @@ _STANDARD_FIELDS: tuple[str, ...] = (
 )
 
 
+def _ui_lang() -> str:
+    raw = os.environ.get("LC_ALL") or os.environ.get("LANG") or ""
+    lang = raw.split(".")[0].split("_")[0].lower()
+    return lang or "eo"
+
+
+def _url_action_labels() -> tuple[str, str]:
+    labels = {
+        "eo": ("Viziti", "Kopii"),
+        "en": ("Visit", "Copy"),
+        "fr": ("Visiter", "Copier"),
+    }
+    return labels.get(_ui_lang(), labels["eo"])
+
+
+def _build_copy_url_action_link(url: str) -> str:
+    safe_url = json.dumps(url, ensure_ascii=False)
+    doc = (
+        "<!doctype html><html><meta charset='utf-8'>"
+        "<body style='font-family:sans-serif;padding:1rem'>"
+        "<script>"
+        f"const _u={safe_url};"
+        "navigator.clipboard.writeText(_u)"
+        ".then(()=>{document.body.textContent='URL kopiita al tondujo.';})"
+        ".catch(()=>{document.body.textContent='Ne povis kopii URL.';});"
+        "</script></body></html>"
+    )
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".html", delete=False, encoding="utf-8"
+    ) as fh:
+        fh.write(doc)
+        return f"file://{quote(fh.name)}"
+
+
+def _render_url_actions(text: str) -> str:
+    value = str(text or "").strip()
+    if not re.match(r"^https?://", value, re.IGNORECASE):
+        return value
+    visit_label, copy_label = _url_action_labels()
+    copy_link = _build_copy_url_action_link(value)
+    return (
+        f"[link={value}]{visit_label}[/link]"
+        f" / [link={copy_link}]{copy_label}[/link]"
+    )
+
+
 def _display_profile_value(val: object) -> str:
     if isinstance(val, list):
         if val and isinstance(val[0], dict):
             chunks: list[str] = []
             for item in val:
                 if isinstance(item, dict):
-                    value = str(item.get("valoro") or "")
+                    value = _render_url_actions(str(item.get("valoro") or ""))
                     tag = str(item.get("etikedo") or "")
                     primary = bool(item.get("prima"))
                     suffix = " (prima)" if primary else ""
                     chunks.append(f"{value} ({tag}){suffix}")
                 else:
-                    chunks.append(str(item))
+                    chunks.append(_render_url_actions(str(item)))
             return "; ".join(chunks)
-        return ", ".join(str(x) for x in val)
+        return ", ".join(_render_url_actions(str(x)) for x in val)
     if isinstance(val, dict):
         return _toml_dumps(val).strip()
-    return str(val)
+    return _render_url_actions(str(val))
 
 
 def _normalize_multi_contact_item(raw: str, *, kind: str) -> dict:
@@ -297,7 +347,7 @@ def profilo_vidi(
         if val is None:
             typer.echo(f"[!] Kampo ne trovita: {kampo}", err=True)
             raise typer.Exit(1)
-        typer.echo(f"{kampo}: {val}")
+        console.print(f"{kampo}: {_display_profile_value(val)}")
         return
 
     if not selected:
@@ -306,8 +356,8 @@ def profilo_vidi(
             typer.echo("Neniu profilo trovita.")
             return
         table = Table(title="Uzanta Profilo")
-        table.add_column("Kampo", style="cyan")
-        table.add_column("Valoro")
+        table.add_column("Kampo", style="cyan", overflow="fold")
+        table.add_column("Valoro", overflow="fold")
         for key in _STANDARD_FIELDS:
             val = profile.get(key)
             if val is not None:
@@ -323,7 +373,7 @@ def profilo_vidi(
     for key in selected:
         val = profile.get(key)
         display = _display_profile_value(val) if val is not None else "—"
-        typer.echo(f"{key.replace('_', '-')}: {display}")
+        console.print(f"{key.replace('_', '-')}: {display}")
 
 
 @profilo_app.command("modifi")

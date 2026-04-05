@@ -76,6 +76,23 @@ class TestProfiloVidi:
         assert result.exit_code == 0
         assert "@alice" in result.output
 
+    def test_show_custom_long_url_not_truncated(self, isolated_profile):
+        long_url = (
+            "https://example.com/a/b/c?"
+            "utm_source=autish&utm_medium=cli&"
+            "token=abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        )
+        with patch(_NO_MASTER, return_value=None):
+            mod = runner.invoke(
+                app,
+                ["uzanto", "profilo", "modifi", "-k", f"retejo:{long_url}"],
+            )
+            assert mod.exit_code == 0, mod.output
+            result = runner.invoke(app, ["uzanto", "profilo", "vidi", "-k", "retejo"])
+        assert result.exit_code == 0
+        assert any(label in result.output for label in ("Viziti", "Visit", "Visiter"))
+        assert any(label in result.output for label in ("Kopii", "Copy", "Copier"))
+
     def test_missing_custom_field_exits_nonzero(self, isolated_profile):
         (isolated_profile / "uzanto_profilo.toml").write_text(
             'nomo = "Alice"\n', encoding="utf-8"

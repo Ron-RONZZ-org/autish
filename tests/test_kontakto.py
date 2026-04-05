@@ -96,7 +96,7 @@ class TestKontaktoFlow:
                 "-F",
                 "Lovelace",
                 "-d",
-                "1815-12-10",
+                "18151210",
                 "--naskig-loko",
                 "London",
                 "-L",
@@ -105,10 +105,12 @@ class TestKontaktoFlow:
                 "Analytical",
                 "--organiza-identiga-numero",
                 "ORG-42",
-                "--telefonnumeroj",
+                "--telefonnumero",
                 "0033123456789:hejmo:prima",
-                "--retposhtadreso",
+                "-r",
                 "person@example.com:labora:prima",
+                "-p",
+                "10 Downing Street",
                 "-k",
                 "fako:matematiko",
             ],
@@ -128,15 +130,61 @@ class TestKontaktoFlow:
         assert "LOVELACE" in vidi.output
         assert "ORG-42" in vidi.output
         assert "matematiko" in vidi.output
+        assert "10 Downing Street" in vidi.output
 
     def test_kontakto_aldoni_allows_missing_email(self, isolated_retposto_db):
         res = runner.invoke(
             app, ["kontakto", "aldoni", "-n", "No Mail", "-o", "Org"]
         )
         assert res.exit_code == 0
-        assert "sen retpoŝto" in res.output
+        assert "Saviĝis kontakto" in res.output
         out = runner.invoke(app, ["kontakto", "serci", "--nomo", "No Mail"])
         assert "1" in out.output
+
+    def test_kontakto_naskig_dato_accepts_yyyymmdd(self, isolated_retposto_db):
+        res = runner.invoke(
+            app,
+            [
+                "kontakto",
+                "aldoni",
+                "date@example.com",
+                "-n",
+                "Date",
+                "-d",
+                "20260131",
+            ],
+        )
+        assert res.exit_code == 0
+        search = runner.invoke(
+            app, ["kontakto", "serci", "--nomo", "Date", "--naskig-dato", "20260131"]
+        )
+        assert search.exit_code == 0
+        assert "date@example.com" in search.output
+
+    def test_kontakto_naskig_dato_rejects_dashed_format(self, isolated_retposto_db):
+        res = runner.invoke(
+            app,
+            [
+                "kontakto",
+                "aldoni",
+                "date2@example.com",
+                "-n",
+                "Date2",
+                "-d",
+                "2026-01-31",
+            ],
+        )
+        assert res.exit_code != 0
+        assert "YYYYMMDD" in (res.output + (res.stderr or ""))
+
+    def test_kontakto_vidi_missing_identifier_shows_hash_hint(
+        self, isolated_retposto_db
+    ):
+        res = runner.invoke(app, ["kontakto", "vidi"])
+        assert res.exit_code != 0
+        output = res.output + (res.stderr or "")
+        assert "Mankas identigilo" in output
+        assert 'kontakto vidi "#' in output
 
     def test_kontakto_aldoni_requires_identity_fields(self, isolated_retposto_db):
         res = runner.invoke(app, ["kontakto", "aldoni", "mail@example.com"])
@@ -302,6 +350,23 @@ class TestKontaktoFlow:
         )
         assert res.exit_code == 0
         assert "hello@ronzz.org" in res.output
+
+    def test_kontakto_serci_filters_by_postadreso(self, isolated_retposto_db):
+        runner.invoke(
+            app,
+            [
+                "kontakto",
+                "aldoni",
+                "post@example.com",
+                "-n",
+                "Post",
+                "-p",
+                "Rue de Metz",
+            ],
+        )
+        res = runner.invoke(app, ["kontakto", "serci", "--postadreso", "Metz"])
+        assert res.exit_code == 0
+        assert "post@example.com" in res.output
 
     def test_kontakto_serci_requires_query_or_filter(self, isolated_retposto_db):
         res = runner.invoke(app, ["kontakto", "serci"])

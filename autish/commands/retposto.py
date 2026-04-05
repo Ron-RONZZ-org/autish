@@ -35,6 +35,7 @@ import urllib.request
 import uuid as _uuid_mod
 import webbrowser
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
@@ -96,6 +97,7 @@ _KEYRING_SERVICE: str = "autish-retposto"
 _MAX_FOLDERS_PER_ACCOUNT: int = 20
 _ACCOUNT_CHECK_CONNECT_TIMEOUT: float = 4.0
 _ACCOUNT_CHECK_PROTOCOL_TIMEOUT: float = 8.0
+_IMAP_SYNC_EXECUTOR: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=4)
 
 class _EmailServerConfig(TypedDict):
     imap_servilo: str
@@ -287,6 +289,15 @@ CREATE TABLE IF NOT EXISTS mesago (
 );
 """
 
+_CREATE_MESAGO_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_mesago_konto_dosierujo_uid
+ON mesago(konto_id, dosierujo_id, uid);
+CREATE INDEX IF NOT EXISTS idx_mesago_konto_message_id
+ON mesago(konto_id, message_id);
+CREATE INDEX IF NOT EXISTS idx_mesago_konto_uid
+ON mesago(konto_id, uid);
+"""
+
 _CREATE_KONTAKTO = """
 CREATE TABLE IF NOT EXISTS kontakto (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -379,6 +390,7 @@ def _get_db() -> sqlite3.Connection:
         _CREATE_KONTO
         + _CREATE_DOSIERUJO
         + _CREATE_MESAGO
+        + _CREATE_MESAGO_INDEXES
         + _CREATE_KONTAKTO
         + _CREATE_KONTAKTO_KATEGORIO
         + _CREATE_KONTAKTO_UNDO
@@ -832,6 +844,83 @@ def _load_messages(
     return result
 
 
+def _resolve_folder_spec(folder_spec: str) -> tuple[int, int] | None:
+    """Resolve ACCOUNT/FOLDER spec to (konto_id, dosierujo_id)."""
+    raw = folder_spec.strip().strip('"').strip("'")
+    if "/" not in raw:
+        return None
+    account_ident, folder_name = raw.split("/", 1)
+    account = _find_account(account_ident.strip())
+    if account is None:
+        return None
+    folder = _find_folder_by_name(int(account["id"]), folder_name.strip())
+    if folder is None:
+        return None
+    return int(account["id"]), int(folder["id"])
+
+
+def _search_messages(
+    demando: str,
+    *,
+    de: str | None = None,
+    subjekto: str | None = None,
+    korpo: str | None = None,
+    dosierujo: str | None = None,
+    konto: str | None = None,
+    limo: int = 20,
+) -> list[dict]:
+    clauses = ["m.forigita = 0"]
+    params: list[object] = []
+    if konto:
+        acc = _find_account(konto)
+        if acc is None:
+            return []
+        clauses.append("m.konto_id = ?")
+        params.append(int(acc["id"]))
+    if dosierujo:
+        resolved = _resolve_folder_spec(dosierujo)
+        if resolved is None:
+            return []
+        konto_id, folder_id = resolved
+        clauses.append("m.konto_id = ?")
+        clauses.append("m.dosierujo_id = ?")
+        params.extend([konto_id, folder_id])
+    if de:
+        clauses.append("LOWER(m.de) LIKE ?")
+        params.append(f"%{de.lower()}%")
+    if subjekto:
+        clauses.append("LOWER(m.subjekto) LIKE ?")
+        params.append(f"%{subjekto.lower()}%")
+    if korpo:
+        needle = f"%{korpo.lower()}%"
+        clauses.append("(LOWER(m.korpo) LIKE ? OR LOWER(m.html_korpo) LIKE ?)")
+        params.extend([needle, needle])
+    if demando:
+        needle = f"%{demando.lower()}%"
+        clauses.append(
+            "("
+            "LOWER(COALESCE(m.de,'')) LIKE ? OR "
+            "LOWER(COALESCE(m.subjekto,'')) LIKE ? OR "
+            "LOWER(COALESCE(m.korpo,'')) LIKE ? OR "
+            "LOWER(COALESCE(m.html_korpo,'')) LIKE ?"
+            ")"
+        )
+        params.extend([needle, needle, needle, needle])
+    where = " AND ".join(clauses)
+    params.append(max(1, int(limo)))
+    query = (
+        "SELECT m.*, k.retposto AS konto_retposto, d.nomo AS dosierujo_nomo "
+        "FROM mesago m "
+        "LEFT JOIN konto k ON k.id = m.konto_id "
+        "LEFT JOIN dosierujo d ON d.id = m.dosierujo_id "
+        f"WHERE {where} "
+        "ORDER BY m.ricevita_je DESC LIMIT ?"
+    )
+    with _get_db() as con:
+        rows = con.execute(query, params).fetchall()
+    return [dict(r) for r in rows]
+
+
 def _coalesce_messages(messages: list[dict]) -> list[dict]:
     """Return one representative (latest) message per conversation."""
     def _thread_root(msg: dict) -> str:
@@ -872,13 +961,58 @@ def _get_message_by_uid(konto_id: int, dosierujo_id: int, uid: str) -> dict | No
     """Get a message by account, folder, and UID."""
     with _get_db() as con:
         row = con.execute(
-            """SELECT id, legita FROM mesago 
+            """SELECT id, legita, stelo FROM mesago 
                WHERE konto_id = ? AND dosierujo_id = ? AND uid = ?""",
             (konto_id, dosierujo_id, uid),
         ).fetchone()
         if row:
             return dict(row)
         return None
+
+
+def _get_message_by_uid_any_folder(konto_id: int, uid: str) -> dict | None:
+    """Get a message by account and UID regardless of folder."""
+    with _get_db() as con:
+        row = con.execute(
+            """SELECT id, legita, stelo, dosierujo_id FROM mesago
+               WHERE konto_id = ? AND uid = ?""",
+            (konto_id, uid),
+        ).fetchone()
+        if row:
+            return dict(row)
+        return None
+
+
+def _get_message_by_message_id_any_folder(
+    konto_id: int, message_id: str
+) -> dict | None:
+    with _get_db() as con:
+        row = con.execute(
+            """SELECT id, dosierujo_id, legita, stelo FROM mesago
+               WHERE konto_id = ? AND message_id = ?""",
+            (konto_id, message_id),
+        ).fetchone()
+        if row:
+            return dict(row)
+        return None
+
+
+def _load_known_uids(
+    konto_id: int,
+    dosierujo_id: int,
+    candidate_uids: list[str],
+) -> set[str]:
+    if not candidate_uids:
+        return set()
+    placeholders = ",".join("?" for _ in candidate_uids)
+    params: list[object] = [konto_id, dosierujo_id, *candidate_uids]
+    with _get_db() as con:
+        rows = con.execute(
+            f"""SELECT uid FROM mesago
+                WHERE konto_id = ? AND dosierujo_id = ? AND uid IN ({placeholders})""",
+            params,
+        ).fetchall()
+    return {str(r["uid"]) for r in rows if r["uid"]}
 
 
 def _save_message(msg: dict) -> int:
@@ -933,35 +1067,212 @@ def _update_message_field(msg_id: int, **fields: object) -> None:
     invalid = set(fields) - _MSG_UPDATABLE_COLS
     if invalid:
         raise ValueError(f"Disallowed column(s) in _update_message_field: {invalid}")
+    old_row: sqlite3.Row | None = None
     set_clause = ", ".join(f"{k} = ?" for k in fields)
     values = list(fields.values()) + [msg_id]
     with _get_db() as con:
+        old_row = con.execute(
+            "SELECT id, konto_id, dosierujo_id, uid FROM mesago WHERE id = ?",
+            (msg_id,),
+        ).fetchone()
         con.execute(f"UPDATE mesago SET {set_clause} WHERE id = ?", values)
+    _submit_imap_sync_task(_sync_message_update_to_imap_server, old_row, fields)
+
+
+def _sync_message_update_to_imap_server(
+    msg_row: sqlite3.Row | None, fields: dict[str, object]
+) -> None:
+    """Best-effort sync of read/star/move updates to IMAP server."""
+    if msg_row is None:
+        return
+    uid = str(msg_row["uid"] or "").strip()
+    if not uid:
+        return
+    src_konto_id = int(msg_row["konto_id"])
+    dst_konto_id = int(fields.get("konto_id", src_konto_id))
+    if src_konto_id != dst_konto_id:
+        return
+    dosierujo_id = msg_row["dosierujo_id"]
+    if dosierujo_id is None:
+        return
+    with _get_db() as con:
+        acc = con.execute(
+            "SELECT * FROM konto WHERE id = ?", (src_konto_id,)
+        ).fetchone()
+        src_folder = con.execute(
+            "SELECT server_nomo, nomo FROM dosierujo WHERE id = ?",
+            (dosierujo_id,),
+        ).fetchone()
+    if acc is None or src_folder is None:
+        return
+    password = _get_password(src_konto_id)
+    if not password:
+        return
+    host = str(acc["imap_servilo"] or "")
+    if not host:
+        return
+    port = int(acc["imap_haveno"] or 993)
+    use_ssl = bool(acc["imap_ssl"])
+    login = (
+        str(acc["imap_uzantonomo"] or "").strip()
+        or str(acc["uzantonomo"] or "").strip()
+        or str(acc["retposto"] or "").strip()
+    )
+    src_name = str(src_folder["server_nomo"] or src_folder["nomo"] or "INBOX")
+    try:
+        if use_ssl:
+            imap = imaplib.IMAP4_SSL(
+                host, port, ssl_context=ssl.create_default_context()
+            )
+        else:
+            imap = imaplib.IMAP4(host, port)
+        imap.login(login, password)
+        status, _ = imap.select(src_name, readonly=False)
+        if status != "OK":
+            imap.logout()
+            return
+        if "legita" in fields:
+            if bool(int(fields["legita"])):
+                imap.uid("STORE", uid, "+FLAGS", "(\\Seen)")
+            else:
+                imap.uid("STORE", uid, "-FLAGS", "(\\Seen)")
+        if "stelo" in fields:
+            if bool(int(fields["stelo"])):
+                imap.uid("STORE", uid, "+FLAGS", "(\\Flagged)")
+            else:
+                imap.uid("STORE", uid, "-FLAGS", "(\\Flagged)")
+        if "dosierujo_id" in fields:
+            with _get_db() as con:
+                dst_folder = con.execute(
+                    "SELECT server_nomo, nomo FROM dosierujo WHERE id = ?",
+                    (int(fields["dosierujo_id"]),),
+                ).fetchone()
+            if dst_folder is not None:
+                dst_name = str(dst_folder["server_nomo"] or dst_folder["nomo"] or "")
+                if dst_name and dst_name != src_name:
+                    copy_status, _ = imap.uid("COPY", uid, dst_name)
+                    if copy_status != "OK":
+                        imap.create(dst_name)
+                        copy_status, _ = imap.uid("COPY", uid, dst_name)
+                    if copy_status == "OK":
+                        imap.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+                        imap.expunge()
+        imap.logout()
+    except (imaplib.IMAP4.error, OSError, ssl.SSLError):
+        return
 
 
 def _delete_message(msg_id: int, permanent: bool = False) -> None:
+    msg_row: sqlite3.Row | None = None
+    trash_server_name: str | None = None
     with _get_db() as con:
+        msg_row = con.execute(
+            "SELECT id, konto_id, dosierujo_id, uid FROM mesago WHERE id = ?",
+            (msg_id,),
+        ).fetchone()
+        if msg_row is None:
+            return
         if permanent:
             con.execute("DELETE FROM mesago WHERE id = ?", (msg_id,))
         else:
-            row = con.execute(
-                "SELECT konto_id FROM mesago WHERE id = ?", (msg_id,)
+            trash_folder_id = _ensure_folder(
+                int(msg_row["konto_id"]), "Trash", "Trash"
+            )
+            trash_row = con.execute(
+                "SELECT server_nomo, nomo FROM dosierujo WHERE id = ?",
+                (trash_folder_id,),
             ).fetchone()
-            if row is None:
-                return
-            trash_folder_id = _ensure_folder(int(row["konto_id"]), "Trash", "Trash")
+            if trash_row is not None:
+                trash_server_name = str(
+                    trash_row["server_nomo"] or trash_row["nomo"] or "Trash"
+                )
             con.execute(
                 "UPDATE mesago SET dosierujo_id = ?, forigita = 0 WHERE id = ?",
                 (trash_folder_id, msg_id),
             )
+    _submit_imap_sync_task(
+        _sync_delete_to_imap_server, msg_row, permanent, trash_server_name
+    )
+
+
+def _sync_delete_to_imap_server(
+    msg_row: sqlite3.Row | None,
+    permanent: bool,
+    trash_server_name: str | None = None,
+) -> None:
+    """Best-effort delete sync to IMAP server using stored UID/folder metadata."""
+    if msg_row is None:
+        return
+    uid = str(msg_row["uid"] or "").strip()
+    if not uid:
+        return
+    konto_id = int(msg_row["konto_id"])
+    dosierujo_id = msg_row["dosierujo_id"]
+    if dosierujo_id is None:
+        return
+    with _get_db() as con:
+        acc = con.execute("SELECT * FROM konto WHERE id = ?", (konto_id,)).fetchone()
+        src_folder = con.execute(
+            "SELECT server_nomo, nomo FROM dosierujo WHERE id = ?", (dosierujo_id,)
+        ).fetchone()
+    if acc is None or src_folder is None:
+        return
+    password = _get_password(konto_id)
+    if not password:
+        return
+    host = str(acc["imap_servilo"] or "")
+    if not host:
+        return
+    port = int(acc["imap_haveno"] or 993)
+    use_ssl = bool(acc["imap_ssl"])
+    login = (
+        str(acc["imap_uzantonomo"] or "").strip()
+        or str(acc["uzantonomo"] or "").strip()
+        or str(acc["retposto"] or "").strip()
+    )
+    src_name = str(src_folder["server_nomo"] or src_folder["nomo"] or "INBOX")
+    dst_name = trash_server_name or "Trash"
+    try:
+        if use_ssl:
+            imap = imaplib.IMAP4_SSL(
+                host, port, ssl_context=ssl.create_default_context()
+            )
+        else:
+            imap = imaplib.IMAP4(host, port)
+        imap.login(login, password)
+        status, _ = imap.select(src_name, readonly=False)
+        if status != "OK":
+            imap.logout()
+            return
+        if permanent:
+            imap.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+            imap.expunge()
+            imap.logout()
+            return
+        copied = False
+        copy_status, _ = imap.uid("COPY", uid, dst_name)
+        if copy_status == "OK":
+            copied = True
+        else:
+            imap.create(dst_name)
+            copy_status, _ = imap.uid("COPY", uid, dst_name)
+            copied = copy_status == "OK"
+        if copied:
+            imap.uid("STORE", uid, "+FLAGS", "(\\Deleted)")
+            imap.expunge()
+        imap.logout()
+    except (imaplib.IMAP4.error, OSError, ssl.SSLError):
+        return
 
 
 def _copy_message(msg_id: int, konto_id: int, dosierujo_id: int) -> int | None:
     """Copy a message to another folder/account and return new message id."""
+    source_row: sqlite3.Row | None = None
     with _get_db() as con:
         row = con.execute("SELECT * FROM mesago WHERE id = ?", (msg_id,)).fetchone()
         if row is None:
             return None
+        source_row = row
         cur = con.execute(
             """INSERT INTO mesago
                (uuid, konto_id, dosierujo_id, message_id, in_reply_to,
@@ -995,7 +1306,83 @@ def _copy_message(msg_id: int, konto_id: int, dosierujo_id: int) -> int | None:
                 _now_iso(),
             ),
         )
-        return int(cur.lastrowid)
+        new_id = int(cur.lastrowid)
+    _submit_imap_sync_task(
+        _sync_copy_to_imap_server, source_row, konto_id, dosierujo_id
+    )
+    return new_id
+
+
+def _submit_imap_sync_task(func: object, *args: object) -> None:
+    try:
+        _IMAP_SYNC_EXECUTOR.submit(func, *args)
+    except RuntimeError:
+        return
+
+
+def _sync_copy_to_imap_server(
+    source_row: sqlite3.Row | None, konto_id: int, dosierujo_id: int
+) -> None:
+    """Best-effort sync of copy action to IMAP server."""
+    if source_row is None:
+        return
+    uid = str(source_row["uid"] or "").strip()
+    if not uid:
+        return
+    src_konto_id = int(source_row["konto_id"])
+    if src_konto_id != int(konto_id):
+        return
+    src_folder_id = source_row["dosierujo_id"]
+    if src_folder_id is None:
+        return
+    with _get_db() as con:
+        acc = con.execute(
+            "SELECT * FROM konto WHERE id = ?", (src_konto_id,)
+        ).fetchone()
+        src_folder = con.execute(
+            "SELECT server_nomo, nomo FROM dosierujo WHERE id = ?",
+            (src_folder_id,),
+        ).fetchone()
+        dst_folder = con.execute(
+            "SELECT server_nomo, nomo FROM dosierujo WHERE id = ?",
+            (dosierujo_id,),
+        ).fetchone()
+    if acc is None or src_folder is None or dst_folder is None:
+        return
+    password = _get_password(src_konto_id)
+    if not password:
+        return
+    host = str(acc["imap_servilo"] or "")
+    if not host:
+        return
+    port = int(acc["imap_haveno"] or 993)
+    use_ssl = bool(acc["imap_ssl"])
+    login = (
+        str(acc["imap_uzantonomo"] or "").strip()
+        or str(acc["uzantonomo"] or "").strip()
+        or str(acc["retposto"] or "").strip()
+    )
+    src_name = str(src_folder["server_nomo"] or src_folder["nomo"] or "INBOX")
+    dst_name = str(dst_folder["server_nomo"] or dst_folder["nomo"] or "INBOX")
+    if dst_name == src_name:
+        return
+    try:
+        if use_ssl:
+            imap = imaplib.IMAP4_SSL(
+                host, port, ssl_context=ssl.create_default_context()
+            )
+        else:
+            imap = imaplib.IMAP4(host, port)
+        imap.login(login, password)
+        status, _ = imap.select(src_name, readonly=False)
+        if status == "OK":
+            copy_status, _ = imap.uid("COPY", uid, dst_name)
+            if copy_status != "OK":
+                imap.create(dst_name)
+                imap.uid("COPY", uid, dst_name)
+        imap.logout()
+    except (imaplib.IMAP4.error, OSError, ssl.SSLError):
+        return
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1758,35 +2145,59 @@ def _fetch_account_mail(acc: dict, max_msgs: int = 100) -> tuple[int, int]:
 
             folder_id = _ensure_folder(acc["id"], sfolder, sfolder)
 
-            _, data = imap.search(None, "ALL")
+            use_uid_fetch = True
+            search_status, data = imap.uid("SEARCH", None, "ALL")
+            if (
+                search_status != "OK"
+                or not data
+                or not data[0]
+            ):
+                use_uid_fetch = False
+                _, data = imap.search(None, "ALL")
             uids_raw = (data[0] or b"").split()
+            known_uid_global = _load_latest_uid_for_account(acc["id"])
+            if known_uid_global is not None:
+                newer_uids: list[bytes] = []
+                for uid_raw in uids_raw:
+                    try:
+                        if int(uid_raw) > known_uid_global:
+                            newer_uids.append(uid_raw)
+                    except ValueError:
+                        continue
+                if newer_uids:
+                    uids_raw = newer_uids
             # take the most recent max_msgs
             recent_uids = uids_raw[-max_msgs:]
-            known_uid_rows = _load_messages(acc["id"], folder_id, limit=max_msgs * 3)
-            known_uids = {
-                str(m.get("uid") or "")
-                for m in known_uid_rows
-                if str(m.get("uid") or "")
-            }
+            recent_uid_strings = [
+                u.decode("utf-8", errors="ignore") for u in recent_uids if u
+            ]
+            known_uids = _load_known_uids(acc["id"], folder_id, recent_uid_strings)
             for uid_bytes in recent_uids:
                 uid = uid_bytes.decode()
                 if uid in known_uids:
                     skipped += 1
                     continue
                 # Fetch both RFC822 and FLAGS
-                _, msg_data = imap.fetch(uid, "(RFC822 FLAGS)")
+                if use_uid_fetch:
+                    _, msg_data = imap.uid("FETCH", uid, "(RFC822 FLAGS)")
+                    if not msg_data or not msg_data[0]:
+                        _, msg_data = imap.fetch(uid, "(RFC822 FLAGS)")
+                else:
+                    _, msg_data = imap.fetch(uid, "(RFC822 FLAGS)")
                 if not msg_data or not msg_data[0]:
                     skipped += 1
                     continue
                 
                 # Parse FLAGS from response
                 server_seen = False
+                server_flagged = False
                 for item in msg_data:
                     if isinstance(item, bytes):
                         flags_match = re.search(rb'FLAGS \(([^)]+)\)', item)
                         if flags_match:
                             flags = flags_match.group(1).decode()
                             server_seen = '\\Seen' in flags
+                            server_flagged = '\\Flagged' in flags
                 
                 raw = msg_data[0][1] if isinstance(msg_data[0], tuple) else None
                 if not isinstance(raw, bytes):
@@ -1814,13 +2225,19 @@ def _fetch_account_mail(acc: dict, max_msgs: int = 100) -> tuple[int, int]:
                     ff = parsed.pop("_filter_folder")
                     parsed["dosierujo_id"] = _ensure_folder(acc["id"], ff, ff)
 
-                # Check if message already exists locally
+                # Check if message already exists locally by folder+UID (primary),
+                # then by Message-ID across folders to keep local moves/deletes stable.
                 existing_msg = _get_message_by_uid(acc["id"], folder_id, uid)
-                
+                message_id = str(parsed.get("message_id") or "").strip()
+                existing_by_message_id: dict | None = None
+                if not existing_msg and message_id:
+                    existing_by_message_id = _get_message_by_message_id_any_folder(
+                        acc["id"], message_id
+                    )
                 if existing_msg:
                     # Message exists: sync flags (local first on conflict)
                     local_legita = bool(existing_msg.get("legita"))
-                    
+                    local_stelo = bool(existing_msg.get("stelo"))
                     # If local differs from server, push local to server
                     if local_legita != server_seen:
                         try:
@@ -1830,13 +2247,25 @@ def _fetch_account_mail(acc: dict, max_msgs: int = 100) -> tuple[int, int]:
                                 imap.uid('STORE', uid, '-FLAGS', '(\\Seen)')
                         except imaplib.IMAP4.error:
                             pass  # Ignore flag sync errors
+                    if local_stelo != server_flagged:
+                        try:
+                            if local_stelo:
+                                imap.uid('STORE', uid, '+FLAGS', '(\\Flagged)')
+                            else:
+                                imap.uid('STORE', uid, '-FLAGS', '(\\Flagged)')
+                        except imaplib.IMAP4.error:
+                            pass
                     
                     # Skip re-saving existing message
+                    skipped += 1
+                    continue
+                if existing_by_message_id:
                     skipped += 1
                     continue
                 
                 # New message: set legita based on server SEEN flag
                 parsed["legita"] = 1 if server_seen else 0
+                parsed["stelo"] = 1 if server_flagged else 0
 
                 # Save message and aldonajoj
                 msg_id = _save_message(parsed)
@@ -1862,6 +2291,21 @@ def _fetch_account_mail(acc: dict, max_msgs: int = 100) -> tuple[int, int]:
         for step in _imap_error_repair_steps(acc, exc):
             typer.echo(f"    - {step}", err=True)
         return 0, 0
+
+
+def _load_latest_uid_for_account(konto_id: int) -> int | None:
+    with _get_db() as con:
+        row = con.execute(
+            "SELECT MAX(CAST(uid AS INTEGER)) AS max_uid FROM mesago "
+            "WHERE konto_id = ? AND uid GLOB '[0-9]*'",
+            (konto_id,),
+        ).fetchone()
+    if not row or row["max_uid"] is None:
+        return None
+    try:
+        return int(row["max_uid"])
+    except (TypeError, ValueError):
+        return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -3173,6 +3617,71 @@ def vidi_mesagon(
     typer.echo(f"Dato: {(msg.get('ricevita_je') or '')[:19]}")
     typer.echo("")
     typer.echo(msg.get("korpo") or _strip_html_tags(msg.get("html_korpo") or ""))
+
+
+@app.command("serci")
+def serci_mesagojn(
+    ctx: typer.Context,
+    demando: str | None = typer.Argument(
+        None,
+        help="Serĉ-demando (defaŭlte tra de/subjekto/korpo).",
+    ),
+    de: str | None = typer.Option(
+        None, "--de", help="Filtri laŭ sendinto-retpoŝto."
+    ),
+    subjekto: str | None = typer.Option(
+        None, "--subjekto", help="Filtri laŭ subjekto."
+    ),
+    korpo: str | None = typer.Option(
+        None, "--korpo", help="Filtri laŭ mesaĝkorpo (teksto/HTML)."
+    ),
+    dosierujo: str | None = typer.Option(
+        None,
+        "-D",
+        "--dosierujo",
+        help='Filtri laŭ "konto@ekzemplo/INBOX".',
+    ),
+    konto: str | None = typer.Option(
+        None, "-k", "--konto", help="Filtri laŭ konto-id aŭ retpoŝto."
+    ),
+    limo: int = typer.Option(20, "-L", "--limo", help="Maksimuma nombro da rezultoj."),
+) -> None:
+    """Serĉi mesaĝojn en loka retpoŝta datumbazo."""
+    if not any([demando, de, subjekto, korpo, dosierujo, konto]):
+        typer.echo(ctx.get_help())
+        return
+    if dosierujo and _resolve_folder_spec(dosierujo) is None:
+        typer.echo(f"Nekonata dosierujo-specifo: {dosierujo}", err=True)
+        raise typer.Exit(1)
+    rows = _search_messages(
+        demando or "",
+        de=de,
+        subjekto=subjekto,
+        korpo=korpo,
+        dosierujo=dosierujo,
+        konto=konto,
+        limo=limo,
+    )
+    if not rows:
+        typer.echo("Neniuj mesaĝoj trovitaj.")
+        return
+    table = Table(title=f"Serĉ-rezultoj ({len(rows)})")
+    table.add_column("ID", style="dim")
+    table.add_column("De")
+    table.add_column("Subjekto")
+    table.add_column("Konto")
+    table.add_column("Dosierujo")
+    table.add_column("Dato", style="dim")
+    for row in rows:
+        table.add_row(
+            str(row["id"]),
+            str(row.get("de") or ""),
+            str(row.get("subjekto") or "(sen subjekto)"),
+            str(row.get("konto_retposto") or ""),
+            str(row.get("dosierujo_nomo") or ""),
+            str(row.get("ricevita_je") or "")[:19],
+        )
+    console.print(table)
 
 
 @app.command("respondi")

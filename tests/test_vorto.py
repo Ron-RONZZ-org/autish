@@ -102,6 +102,7 @@ class TestNormalizeTipo:
         assert _normalize_tipo("sum") == ["substantivo-vira"]
         assert _normalize_tipo("ve") == ["verbo"]
         assert _normalize_tipo("vt") == ["verbo-transitiva"]
+        assert _normalize_tipo("vnt") == ["verbo-nerekta-transitiva"]
         assert _normalize_tipo("vn") == ["verbo-netransitiva"]
         assert _normalize_tipo("vr") == ["refleksiva-verbo"]
         assert _normalize_tipo("aj") == ["adjektivo"]
@@ -381,6 +382,29 @@ class TestAldoni:
         assert result.exit_code == 0
         entry = mock_save.call_args[0][0][0]
         assert entry["difinoj"] == ["!grave"]
+
+    def test_difino_double_colon_syntax_splits_example_with_bang(self):
+        with (
+            patch(_LOAD, return_value=[]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "vorto",
+                    "aldoni",
+                    "defense",
+                    "-d",
+                    "ce qui permet::Ma seule defense sera la fuite !",
+                ],
+            )
+        assert result.exit_code == 0
+        entry = mock_save.call_args[0][0][0]
+        assert entry["difinoj"] == ["ce qui permet"]
+        assert entry["uzoj"] == ["Ma seule defense sera la fuite !"]
 
 
 class TestVidi:
@@ -705,6 +729,12 @@ class TestSerci:
         assert result.exit_code == 0
         assert "hello" in result.output
 
+    def test_uuid_option_outputs_json_list(self):
+        with patch(_LOAD, return_value=self.entries):
+            result = runner.invoke(app, ["vorto", "serci", "--uuid"])
+        assert result.exit_code == 0
+        assert result.output.strip() == '["aaaaaaaa", "11111111"]'
+
 
 class TestForigi:
     def test_deletes_entry(self):
@@ -714,7 +744,7 @@ class TestForigi:
             patch(_MOVE_TO_RUBUJO) as mock_move,
             patch(_LOAD_UNDO, return_value=[]),
             patch(_SAVE_UNDO),
-            patch(_CONFIRM, return_value=True),
+            patch("autish.commands.vorto.typer.prompt", return_value="j"),
         ):
             result = runner.invoke(app, ["vorto", "forigi", SAMPLE_UUID])
         assert result.exit_code == 0
@@ -727,7 +757,7 @@ class TestForigi:
             patch(_MOVE_TO_RUBUJO) as mock_move,
             patch(_LOAD_UNDO, return_value=[]),
             patch(_SAVE_UNDO),
-            patch(_CONFIRM, return_value=False),
+            patch("autish.commands.vorto.typer.prompt", return_value="n"),
         ):
             runner.invoke(app, ["vorto", "forigi", SAMPLE_UUID])
         mock_move.assert_not_called()
@@ -744,7 +774,7 @@ class TestForigi:
             patch(_MOVE_TO_RUBUJO),
             patch(_LOAD_UNDO, return_value=[]),
             patch(_SAVE_UNDO) as mock_save_undo,
-            patch(_CONFIRM, return_value=True),
+            patch("autish.commands.vorto.typer.prompt", return_value="j"),
         ):
             runner.invoke(app, ["vorto", "forigi", SAMPLE_UUID])
         saved_stack = mock_save_undo.call_args[0][0]
@@ -758,7 +788,7 @@ class TestForigi:
             patch(_MOVE_TO_RUBUJO) as mock_move,
             patch(_LOAD_UNDO, return_value=[]),
             patch(_SAVE_UNDO),
-            patch(_CONFIRM, return_value=True),
+            patch("autish.commands.vorto.typer.prompt", return_value="j"),
         ):
             result = runner.invoke(app, ["vorto", "forigi", "#aaaaaaaa"])
         assert result.exit_code == 0
@@ -772,13 +802,44 @@ class TestForigi:
             patch(_MOVE_TO_RUBUJO),
             patch(_LOAD_UNDO, return_value=[]),
             patch(_SAVE_UNDO),
-            patch(_CONFIRM, return_value=False),
+            patch("autish.commands.vorto.typer.prompt", return_value="n"),
         ):
             result = runner.invoke(app, ["vorto", "forigi", SAMPLE_UUID])
         assert result.exit_code == 0
         assert "Averto" in result.output
         assert "rompos referencojn" in result.output
         assert "ligilo" in result.output
+
+    def test_forigi_supports_multiple_targets(self):
+        a = _make_entry(uuid=SAMPLE_UUID, teksto="a")
+        b = _make_entry(uuid=SAMPLE_UUID2, teksto="b")
+        with (
+            patch(_LOAD, return_value=[a, b]),
+            patch(_MOVE_TO_RUBUJO) as mock_move,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch("autish.commands.vorto.typer.prompt", return_value="j"),
+        ):
+            result = runner.invoke(app, ["vorto", "forigi", "aaaaaaaa", "11111111"])
+        assert result.exit_code == 0
+        assert mock_move.call_count == 2
+        assert "2 eniro(j)" in result.output
+
+    def test_forigi_supports_json_list_target(self):
+        a = _make_entry(uuid=SAMPLE_UUID, teksto="a")
+        b = _make_entry(uuid=SAMPLE_UUID2, teksto="b")
+        with (
+            patch(_LOAD, return_value=[a, b]),
+            patch(_MOVE_TO_RUBUJO) as mock_move,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch("autish.commands.vorto.typer.prompt", return_value="j"),
+        ):
+            result = runner.invoke(
+                app, ["vorto", "forigi", '["11111111","aaaaaaaa"]']
+            )
+        assert result.exit_code == 0
+        assert mock_move.call_count == 2
 
 
 class TestMalfari:

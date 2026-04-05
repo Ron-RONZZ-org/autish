@@ -185,6 +185,8 @@ def _search_contact_match(contact: dict, query: str) -> bool:
         return True
     if q in (contact.get("naskig_loko") or "").lower():
         return True
+    if q in str((contact.get("kampoj") or {}).get("postadreso") or "").lower():
+        return True
     if any(q in str(v).lower() for v in (contact.get("kampoj") or {}).values()):
         return True
     return False
@@ -221,6 +223,7 @@ def _contact_search_blob(contact: dict) -> str:
             str(contact.get("organiza_identiga_numero") or ""),
             str(contact.get("naskig_loko") or ""),
             str(contact.get("telefono") or ""),
+            str((contact.get("kampoj") or {}).get("postadreso") or ""),
             phones,
             mails,
             cats,
@@ -232,8 +235,16 @@ def _contact_search_blob(contact: dict) -> str:
 def _insert_contact_without_email(
     nomo: str | None = None,
     familia_nomo: str | None = None,
+    naskig_dato: str | None = None,
+    naskig_loko: str | None = None,
+    lingvoj: list[str] | None = None,
     organizo: str | None = None,
+    organiza_identiga_numero: str | None = None,
     telefono: str | None = None,
+    telefonnumeroj: list[dict] | None = None,
+    retposhtadresoj: list[dict] | None = None,
+    kategorioj: list[str] | None = None,
+    kampoj: dict[str, str] | None = None,
     noto: str | None = None,
     konfirmita: int = 1,
 ) -> dict:
@@ -242,23 +253,27 @@ def _insert_contact_without_email(
     with retposto_mod._get_db() as con:
         con.execute(
             """INSERT INTO kontakto
-               (uuid, nomo, familia_nomo, lingvoj, retposto, organizo,
-                telefono, telefonnumeroj, retposhtadresoj, kampoj, konfirmita,
-                kategorioj, noto, kreita_je, modifita_je)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               (uuid, nomo, familia_nomo, naskig_dato, naskig_loko, lingvoj,
+                retposto, organizo, organiza_identiga_numero,
+                 telefono, telefonnumeroj, retposhtadresoj, kampoj, konfirmita,
+                 kategorioj, noto, kreita_je, modifita_je)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 uid,
                 nomo,
                 familia_nomo,
-                "[]",
+                naskig_dato,
+                naskig_loko,
+                json.dumps(lingvoj or [], ensure_ascii=False),
                 None,
                 organizo,
+                organiza_identiga_numero,
                 telefono,
-                "[]",
-                "[]",
-                "{}",
+                json.dumps(telefonnumeroj or [], ensure_ascii=False),
+                json.dumps(retposhtadresoj or [], ensure_ascii=False),
+                json.dumps(kampoj or {}, ensure_ascii=False),
                 int(bool(konfirmita)),
-                "[]",
+                json.dumps(kategorioj or [], ensure_ascii=False),
                 noto,
                 now,
                 now,
@@ -441,8 +456,15 @@ def listigi() -> None:
 
 @app.command("vidi")
 def vidi(
-    identigilo: str = typer.Argument(..., help="UUID aŭ prefikso."),
+    identigilo: str | None = typer.Argument(None, help="UUID aŭ prefikso."),
 ) -> None:
+    if not identigilo:
+        typer.echo(
+            "Mankas identigilo. Se vi uzas UUID kun #, citu ĝin:\n"
+            '  kontakto vidi "#3217c312"',
+            err=True,
+        )
+        raise typer.Exit(2)
     row = _find_by_uuid(identigilo)
     if row is None:
         typer.echo(f"[!] Kontakto ne trovita: {identigilo}", err=True)
@@ -507,7 +529,7 @@ def serci(
         None, "-F", "--familia-nomo", help="Filtri laŭ familia nomo."
     ),
     naskig_dato: str | None = typer.Option(
-        None, "-d", "--naskig-dato", help="Filtri laŭ naskiĝdato (YYYY-MM-DD)."
+        None, "-d", "--naskig-dato", help="Filtri laŭ naskiĝdato (YYYYMMDD)."
     ),
     naskig_loko: str | None = typer.Option(
         None, "--naskig-loko", help="Filtri laŭ naskiĝloko."
@@ -526,6 +548,9 @@ def serci(
     ),
     telefonnumero: str | None = typer.Option(
         None, "--telefonnumero", help="Filtri laŭ telefono."
+    ),
+    postadreso: str | None = typer.Option(
+        None, "-p", "--postadreso", help="Filtri laŭ poŝtadreso."
     ),
     kategorio: list[str] | None = typer.Option(
         None, "-k", "--kategorio", help="Filtri laŭ kategorio (ripetebla)."
@@ -551,6 +576,7 @@ def serci(
             organizo,
             organiza_identiga_numero,
             telefonnumero,
+            postadreso,
             kategorio,
             kampo,
             konfirmita is not None,
@@ -617,6 +643,12 @@ def serci(
                 for p in phone_values
             ):
                 return False
+        if postadreso and not _fuzzy_contains(
+            postadreso,
+            str((contact.get("kampoj") or {}).get("postadreso") or ""),
+            threshold=0.7 if fuzzy else 1.0,
+        ):
+            return False
         if lingvo:
             contact_langs = [str(v).lower() for v in (contact.get("lingvoj") or [])]
             if any(lang.lower() not in contact_langs for lang in lingvo):
@@ -675,6 +707,8 @@ def serci(
         extra_cols.append(("kategorioj", "Kategorioj"))
     if kampo:
         extra_cols.append(("kampoj", "Kampoj"))
+    if postadreso:
+        extra_cols.append(("kampoj", "Poŝtadreso"))
     if konfirmita is not None:
         extra_cols.append(("konfirmita", "Konfirmita"))
     for _key, label in extra_cols:
@@ -688,7 +722,10 @@ def serci(
     for c in results:
         row_values: list[str] = []
         for key, _label in extra_cols:
-            val = c.get(key)
+            if key == "kampoj" and postadreso:
+                val = (c.get("kampoj") or {}).get("postadreso")
+            else:
+                val = c.get(key)
             if isinstance(val, list):
                 row_values.append(", ".join(str(v) for v in val))
             elif isinstance(val, dict):
@@ -719,7 +756,7 @@ def aldoni(
         None, "-F", "--familia-nomo", help="Familia nomo."
     ),
     naskig_dato: str | None = typer.Option(
-        None, "-d", "--naskig-dato", help="Naskiĝdato (YYYY-MM-DD)."
+        None, "-d", "--naskig-dato", help="Naskiĝdato (YYYYMMDD)."
     ),
     naskig_loko: str | None = typer.Option(
         None, "--naskig-loko", help="Naskiĝloko."
@@ -731,23 +768,25 @@ def aldoni(
     organiza_identiga_numero: str | None = typer.Option(
         None, "--organiza-identiga-numero", help="Organiza identiga numero."
     ),
-    telefonnumero: str | None = typer.Option(
-        None, "-t", "--telefonnumero", help="Telefonnumero."
-    ),
     telefonnumeroj: list[str] | None = typer.Option(
         None,
-        "--telefonnumeroj",
+        "-t",
+        "--telefonnumero",
         help="Ripetu numero:etikedo[:prima], ekz. 0033...:hejmo:prima",
     ),
     retposhtadreso: list[str] | None = typer.Option(
         None,
+        "-r",
         "--retposhtadreso",
         help="Ripetu adreso:etikedo[:prima], ekz. uzanto@x.com:labora:prima",
+    ),
+    postadreso: str | None = typer.Option(
+        None, "-p", "--postadreso", help="Poŝtadreso."
     ),
     kampo: list[str] | None = typer.Option(
         None, "-c", "--kampo", help="Propra kampo KEY:VALUE (ripetebla)."
     ),
-    noto: str | None = typer.Option(None, "--noto", help="Noto."),
+    noto: str | None = typer.Option(None, "-N", "--noto", help="Noto."),
     kategorio: list[str] | None = typer.Option(
         None, "-k", "--kategorio", help="Kategorio (ripetebla)."
     ),
@@ -764,8 +803,8 @@ def aldoni(
     if konfirmita not in (0, 1):
         typer.echo("[!] --konfirmita devas esti 0 aŭ 1.", err=True)
         raise typer.Exit(1)
-    if naskig_dato is not None and not re.match(r"^\d{4}-\d{2}-\d{2}$", naskig_dato):
-        typer.echo("[!] --naskig-dato devas esti YYYY-MM-DD.", err=True)
+    if naskig_dato is not None and not re.match(r"^\d{8}$", naskig_dato):
+        typer.echo("[!] --naskig-dato devas esti YYYYMMDD.", err=True)
         raise typer.Exit(1)
     lingvo_list = [c.strip() for c in (lingvoj or "").split(",") if c.strip()]
     try:
@@ -779,6 +818,11 @@ def aldoni(
     except ValueError as exc:
         typer.echo(f"[!] {exc}", err=True)
         raise typer.Exit(1) from exc
+    if postadreso is not None:
+        kampoj_dict["postadreso"] = postadreso
+    telefono_primara = (
+        str((telefono_list[0] or {}).get("valoro") or "") if telefono_list else None
+    )
     cats = _norm_kategorioj(kategorio)
     _ensure_categories_exist(cats)
     all_contacts = _load_contacts()
@@ -820,8 +864,7 @@ def aldoni(
                 update_fields["organizo"] = organizo
             if organiza_identiga_numero is not None:
                 update_fields["organiza_identiga_numero"] = organiza_identiga_numero
-            if telefonnumero is not None:
-                update_fields["telefono"] = telefonnumero
+            update_fields["telefono"] = telefono_primara
             update_fields["telefonnumeroj"] = json.dumps(
                 telefono_list, ensure_ascii=False
             )
@@ -857,7 +900,7 @@ def aldoni(
             lingvoj=lingvo_list,
             organizo=organizo,
             organiza_identiga_numero=organiza_identiga_numero,
-            telefono=telefonnumero,
+            telefono=telefono_primara,
             telefonnumeroj=telefono_list,
             retposhtadresoj=retposhto_list,
             kampoj=kampoj_dict,
@@ -873,8 +916,16 @@ def aldoni(
         after = _insert_contact_without_email(
             nomo=nomo,
             familia_nomo=familia_nomo,
+            naskig_dato=naskig_dato,
+            naskig_loko=naskig_loko,
+            lingvoj=lingvo_list,
             organizo=organizo,
-            telefono=telefonnumero,
+            organiza_identiga_numero=organiza_identiga_numero,
+            telefono=telefono_primara,
+            telefonnumeroj=telefono_list,
+            retposhtadresoj=retposhto_list,
+            kategorioj=cats,
+            kampoj=kampoj_dict,
             noto=noto,
             konfirmita=konfirmita,
         )
@@ -885,10 +936,7 @@ def aldoni(
         _save_undo({"op": "aldoni", "uuid": after["uuid"]})
     else:
         _save_undo({"op": "modifi", "old": [before]})
-    if after.get("retposto"):
-        typer.echo(f"[✓] Saviĝis kontakto #{after['uuid'][:8]} ({after['retposto']}).")
-    else:
-        typer.echo(f"[✓] Saviĝis kontakto #{after['uuid'][:8]} (sen retpoŝto).")
+    typer.echo(f"[✓] Saviĝis kontakto #{after['uuid'][:8]}.")
 
 
 @app.command("modifi")
@@ -905,11 +953,15 @@ def modifi(
     organiza_identiga_numero: str | None = typer.Option(
         None, "--organiza-identiga-numero"
     ),
-    telefonnumero: str | None = typer.Option(None, "-t", "--telefonnumero"),
-    telefonnumeroj: list[str] | None = typer.Option(None, "--telefonnumeroj"),
-    retposhtadreso: list[str] | None = typer.Option(None, "--retposhtadreso"),
+    telefonnumeroj: list[str] | None = typer.Option(
+        None, "-t", "--telefonnumero"
+    ),
+    retposhtadreso: list[str] | None = typer.Option(
+        None, "-r", "--retposhtadreso"
+    ),
+    postadreso: str | None = typer.Option(None, "-p", "--postadreso"),
     kampo: list[str] | None = typer.Option(None, "-c", "--kampo"),
-    noto: str | None = typer.Option(None, "--noto"),
+    noto: str | None = typer.Option(None, "-N", "--noto"),
     kategorio: list[str] | None = typer.Option(None, "-k", "--kategorio"),
     anstatauxigi_kategoriojn: bool = typer.Option(
         False, "--anstatauxigi-kategoriojn", help="Anstataŭigi anstataŭ aldoni."
@@ -922,8 +974,8 @@ def modifi(
     if konfirmita is not None and konfirmita not in (0, 1):
         typer.echo("[!] --konfirmita devas esti 0 aŭ 1.", err=True)
         raise typer.Exit(1)
-    if naskig_dato is not None and not re.match(r"^\d{4}-\d{2}-\d{2}$", naskig_dato):
-        typer.echo("[!] --naskig-dato devas esti YYYY-MM-DD.", err=True)
+    if naskig_dato is not None and not re.match(r"^\d{8}$", naskig_dato):
+        typer.echo("[!] --naskig-dato devas esti YYYYMMDD.", err=True)
         raise typer.Exit(1)
     lingvo_list = (
         [c.strip() for c in lingvoj.split(",") if c.strip()]
@@ -987,8 +1039,13 @@ def modifi(
             if organiza_identiga_numero is not None
             else target.get("organiza_identiga_numero")
         )
+        telefono_primara = (
+            str((telefono_list[0] or {}).get("valoro") or "")
+            if telefono_list is not None and telefono_list
+            else None
+        )
         update_fields["telefono"] = (
-            telefonnumero if telefonnumero is not None else target.get("telefono")
+            telefono_primara if telefono_list is not None else target.get("telefono")
         )
         update_fields["telefonnumeroj"] = json.dumps(
             (
@@ -1004,10 +1061,12 @@ def modifi(
             else target.get("retposhtadresoj") or [],
             ensure_ascii=False,
         )
-        update_fields["kampoj"] = json.dumps(
-            kampoj_dict if kampoj_dict is not None else target.get("kampoj") or {},
-            ensure_ascii=False,
-        )
+        merged_kampoj = dict(target.get("kampoj") or {})
+        if kampoj_dict is not None:
+            merged_kampoj = dict(kampoj_dict)
+        if postadreso is not None:
+            merged_kampoj["postadreso"] = postadreso
+        update_fields["kampoj"] = json.dumps(merged_kampoj, ensure_ascii=False)
         update_fields["noto"] = noto if noto is not None else target.get("noto")
         update_fields["konfirmita"] = int(
             bool(konfirmita if konfirmita is not None else target.get("konfirmita"))
