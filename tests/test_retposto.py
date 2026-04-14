@@ -38,6 +38,7 @@ from autish.commands.retposto import (
     _parse_imap_message,
     _remove_spam_block,
     _reply_targets,
+    _sanitize_ascii_text,
     _save_account,
     _save_message,
     _should_autosave_contact_email,
@@ -88,6 +89,20 @@ class TestDecodeHeader:
         assert "caf" in result
 
 
+class TestSanitizeAsciiText:
+    def test_replaces_non_ascii_whitespace(self):
+        text = "A\u00a0B\u2009C\u200bD"
+        assert _sanitize_ascii_text(text) == "A B CD"
+
+    def test_normalizes_quotes_and_dashes(self):
+        text = "“alpha”—‘beta’"
+        assert _sanitize_ascii_text(text) == '"alpha"-\'beta\''
+
+    def test_normalizes_unicode_separator_and_format_chars(self):
+        text = "A\u2060B\u2028C"
+        assert _sanitize_ascii_text(text) == "AB C"
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Unit tests — _extract_address / _extract_address_list
 # ──────────────────────────────────────────────────────────────────────────────
@@ -119,9 +134,7 @@ class TestExtractAddressList:
         assert result == ["alice@a.com", "bob@b.com"]
 
     def test_with_display_names(self):
-        result = _extract_address_list(
-            "Alice <alice@a.com>, Bob <bob@b.com>"
-        )
+        result = _extract_address_list("Alice <alice@a.com>, Bob <bob@b.com>")
         assert "alice@a.com" in result
         assert "bob@b.com" in result
 
@@ -177,6 +190,48 @@ class TestParseImapMessage:
         assert "Hello" in (msg["korpo"] or "")
         assert msg["konto_id"] == 1
         assert aldonajoj == []
+
+    def test_parse_sanitizes_non_ascii_body_text(self):
+        raw = self._make_raw(body="A\u00a0B\u2009C\u200bD")
+        msg, _ = _parse_imap_message(raw, konto_id=1, dosierujo_id=1)
+        assert msg["korpo"] == "A B CD\r\n"
+
+    def test_save_message_sanitizes_received_text_fields(self, isolated_db):
+        konto_id = _save_account(
+            {
+                "nomo": "Test",
+                "retposto": "test@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+                "kreita_je": "2024-01-01T00:00:00+00:00",
+            }
+        )
+        dosierujo_id = _ensure_folder(konto_id, "INBOX", "INBOX")
+        msg_id = _save_message(
+            {
+                "konto_id": konto_id,
+                "dosierujo_id": dosierujo_id,
+                "subjekto": "Saluton\u00a0Mondo",
+                "korpo": "A\u2060B\u2028C",
+                "html_korpo": "<p>A\u00a0B</p>",
+                "de": "sender@example.com",
+                "al": ["to@example.com"],
+                "cc": [],
+                "bcc": [],
+            }
+        )
+        assert msg_id
+        import autish.commands.retposto as rp_mod
+
+        with rp_mod._get_db() as con:
+            row = con.execute(
+                "SELECT subjekto, korpo, html_korpo FROM mesago WHERE id = ?",
+                (msg_id,),
+            ).fetchone()
+        assert row is not None
+        assert row["subjekto"] == "Saluton Mondo"
+        assert row["korpo"] == "AB C"
+        assert row["html_korpo"] == "<p>A B</p>"
 
     def test_message_id_extracted(self):
         raw = self._make_raw()
@@ -270,9 +325,7 @@ class TestReplyTargets:
             "al": ["me@example.com", "bob@example.com"],
             "cc": ["carol@example.com", "me@example.com"],
         }
-        to_targets, cc_targets = _reply_targets(
-            "me@example.com", msg, reply_all=True
-        )
+        to_targets, cc_targets = _reply_targets("me@example.com", msg, reply_all=True)
         assert to_targets == ["alice@example.com", "bob@example.com"]
         assert cc_targets == ["carol@example.com"]
 
@@ -323,55 +376,71 @@ class TestEvalSieveCondition:
     def test_from_contains(self):
         assert _eval_sieve_condition(
             'from contains "spam"',
-            sender="spam@evil.com", recipients="me@ok.com",
-            subject="hi", body="content"
+            sender="spam@evil.com",
+            recipients="me@ok.com",
+            subject="hi",
+            body="content",
         )
 
     def test_from_contains_no_match(self):
         assert not _eval_sieve_condition(
             'from contains "spam"',
-            sender="legit@good.com", recipients="me@ok.com",
-            subject="hi", body="content"
+            sender="legit@good.com",
+            recipients="me@ok.com",
+            subject="hi",
+            body="content",
         )
 
     def test_subject_is(self):
         assert _eval_sieve_condition(
             'subject is "hello"',
-            sender="a@b.com", recipients="c@d.com",
-            subject="hello", body=""
+            sender="a@b.com",
+            recipients="c@d.com",
+            subject="hello",
+            body="",
         )
 
     def test_not_contains(self):
         assert _eval_sieve_condition(
             'from not contains "spam"',
-            sender="legit@ok.com", recipients="",
-            subject="", body=""
+            sender="legit@ok.com",
+            recipients="",
+            subject="",
+            body="",
         )
         assert not _eval_sieve_condition(
             'from not contains "spam"',
-            sender="spam@evil.com", recipients="",
-            subject="", body=""
+            sender="spam@evil.com",
+            recipients="",
+            subject="",
+            body="",
         )
 
     def test_body_contains(self):
         assert _eval_sieve_condition(
             'body contains "buy now"',
-            sender="a@b.com", recipients="",
-            subject="", body="Click here to buy now!"
+            sender="a@b.com",
+            recipients="",
+            subject="",
+            body="Click here to buy now!",
         )
 
     def test_multiple_conditions_all_match(self):
         assert _eval_sieve_condition(
             'from contains "evil" subject contains "win"',
-            sender="evil@domain.com", recipients="",
-            subject="you win a prize", body=""
+            sender="evil@domain.com",
+            recipients="",
+            subject="you win a prize",
+            body="",
         )
 
     def test_multiple_conditions_one_fails(self):
         assert not _eval_sieve_condition(
             'from contains "evil" subject contains "win"',
-            sender="evil@domain.com", recipients="",
-            subject="normal subject", body=""
+            sender="evil@domain.com",
+            recipients="",
+            subject="normal subject",
+            body="",
         )
 
 
@@ -383,64 +452,84 @@ class TestEvalSieveCondition:
 class TestApplyFilters:
     def _make_msg(self, **kwargs) -> dict:
         defaults = {
-            "id": 1, "konto_id": 1, "de": "sender@example.com",
-            "al": ["me@example.com"], "cc": [], "bcc": [],
-            "subjekto": "Hello", "korpo": "Normal content",
-            "spamo": 0, "forigita": 0, "legita": 0, "prioritato": 5,
+            "id": 1,
+            "konto_id": 1,
+            "de": "sender@example.com",
+            "al": ["me@example.com"],
+            "cc": [],
+            "bcc": [],
+            "subjekto": "Hello",
+            "korpo": "Normal content",
+            "spamo": 0,
+            "forigita": 0,
+            "legita": 0,
+            "prioritato": 5,
         }
         defaults.update(kwargs)
         return defaults
 
     def test_fileinto_action(self):
-        filters = [{
-            "nomo": "newsletter",
-            "sieve_kodo": 'from contains "newsletter" => fileinto "Newsletter"',
-        }]
+        filters = [
+            {
+                "nomo": "newsletter",
+                "sieve_kodo": 'from contains "newsletter" => fileinto "Newsletter"',
+            }
+        ]
         msg = self._make_msg(de="newsletter@company.com")
         result = _apply_filters(msg, filters)
         assert result.get("_filter_folder") == "Newsletter"
 
     def test_mark_spam_action(self):
-        filters = [{
-            "nomo": "spamfilter",
-            "sieve_kodo": 'subject contains "FREE MONEY" => mark-spam',
-        }]
+        filters = [
+            {
+                "nomo": "spamfilter",
+                "sieve_kodo": 'subject contains "FREE MONEY" => mark-spam',
+            }
+        ]
         msg = self._make_msg(subjekto="WIN FREE MONEY NOW")
         result = _apply_filters(msg, filters)
         assert result["spamo"] == 1
 
     def test_mark_read_action(self):
-        filters = [{
-            "nomo": "autoread",
-            "sieve_kodo": 'from contains "noreply" => mark-read',
-        }]
+        filters = [
+            {
+                "nomo": "autoread",
+                "sieve_kodo": 'from contains "noreply" => mark-read',
+            }
+        ]
         msg = self._make_msg(de="noreply@service.com")
         result = _apply_filters(msg, filters)
         assert result["legita"] == 1
 
     def test_set_priority_action(self):
-        filters = [{
-            "nomo": "boss",
-            "sieve_kodo": 'from contains "boss@" => set-priority "9"',
-        }]
+        filters = [
+            {
+                "nomo": "boss",
+                "sieve_kodo": 'from contains "boss@" => set-priority "9"',
+            }
+        ]
         msg = self._make_msg(de="boss@company.com")
         result = _apply_filters(msg, filters)
         assert result["prioritato"] == 9
 
     def test_discard_action(self):
-        filters = [{
-            "nomo": "discard-spam",
-            "sieve_kodo": 'subject contains "UNSUBSCRIBE" => discard',
-        }]
+        filters = [
+            {
+                "nomo": "discard-spam",
+                "sieve_kodo": 'subject contains "UNSUBSCRIBE" => discard',
+            }
+        ]
         msg = self._make_msg(subjekto="Click to UNSUBSCRIBE")
         result = _apply_filters(msg, filters)
         assert result["forigita"] == 1
 
     def test_no_match_unchanged(self):
-        filters = [{
-            "nomo": "test",
-            "sieve_kodo": 'from contains "evil" => mark-spam',
-        }]
+        filters = [
+            {
+                "nomo": "test",
+                "sieve_kodo": 'from contains "evil" => mark-spam',
+            }
+        ]
         msg = self._make_msg(de="good@person.com")
         result = _apply_filters(msg, filters)
         assert result["spamo"] == 0
@@ -463,27 +552,33 @@ class TestBuildSieveScript:
         assert "require" in script
 
     def test_fileinto_rule(self):
-        filters = [{
-            "nomo": "test",
-            "sieve_kodo": 'from contains "list" => fileinto "Lists"',
-        }]
+        filters = [
+            {
+                "nomo": "test",
+                "sieve_kodo": 'from contains "list" => fileinto "Lists"',
+            }
+        ]
         script = _build_sieve_script(filters)
         assert "fileinto" in script
         assert "Lists" in script
 
     def test_discard_rule(self):
-        filters = [{
-            "nomo": "test",
-            "sieve_kodo": 'subject contains "spam" => discard',
-        }]
+        filters = [
+            {
+                "nomo": "test",
+                "sieve_kodo": 'subject contains "spam" => discard',
+            }
+        ]
         script = _build_sieve_script(filters)
         assert "discard" in script
 
     def test_mark_spam_rule(self):
-        filters = [{
-            "nomo": "test",
-            "sieve_kodo": 'from contains "evil" => mark-spam',
-        }]
+        filters = [
+            {
+                "nomo": "test",
+                "sieve_kodo": 'from contains "evil" => mark-spam',
+            }
+        ]
         script = _build_sieve_script(filters)
         assert "Junk" in script or "addflag" in script
 
@@ -555,12 +650,7 @@ class TestVcfImportExport:
         assert any(c["retposto"] == "eve@example.com" for c in contacts)
 
     def test_import_missing_email_skipped(self, isolated_db, tmp_path):
-        vcf_no_email = (
-            "BEGIN:VCARD\r\n"
-            "VERSION:3.0\r\n"
-            "FN:Ghost\r\n"
-            "END:VCARD\r\n"
-        )
+        vcf_no_email = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Ghost\r\nEND:VCARD\r\n"
         vcf_path = tmp_path / "noemail.vcf"
         vcf_path.write_text(vcf_no_email, encoding="utf-8")
         count = _import_vcf(vcf_path)
@@ -895,9 +985,7 @@ class TestCliAldoniKonton:
         assert acc["imap_servilo"] == "imap.example.com"
         assert acc["smtp_servilo"] == "smtp.example.com"
 
-    def test_invalid_credentials_shows_repair_guidance(
-        self, isolated_db, monkeypatch
-    ):
+    def test_invalid_credentials_shows_repair_guidance(self, isolated_db, monkeypatch):
         monkeypatch.setattr(
             "autish.commands.retposto._infer_mail_config",
             lambda _addr: {
@@ -929,9 +1017,7 @@ class TestCliAldoniKonton:
         assert "Aŭtentigo malsukcesis" in result.output
         assert "Rimedo" in result.output
 
-    def test_validation_fails_fast_on_imap_tcp_timeout(
-        self, isolated_db, monkeypatch
-    ):
+    def test_validation_fails_fast_on_imap_tcp_timeout(self, isolated_db, monkeypatch):
         monkeypatch.setattr(
             "autish.commands.retposto._verify_account_connectivity",
             lambda _acc, _pw: (
@@ -945,11 +1031,7 @@ class TestCliAldoniKonton:
         result = runner.invoke(
             app,
             ["retposto", "aldoni-konton"],
-            input=(
-                "Test User\n"
-                "test@gmail.com\n"
-                "sekreto123\n"
-            ),
+            input=("Test User\ntest@gmail.com\nsekreto123\n"),
         )
         assert result.exit_code == 1
         assert "Konto ne aldonita" in result.output
@@ -1354,18 +1436,14 @@ class TestCliKontakto:
         )
         vcf_path = tmp_path / "test.vcf"
         vcf_path.write_text(vcf_content)
-        result = runner.invoke(
-            app, ["retposto", "kontakto", "importi", str(vcf_path)]
-        )
+        result = runner.invoke(app, ["retposto", "kontakto", "importi", str(vcf_path)])
         assert result.exit_code == 0
         assert "importis" in result.output.lower()
 
     def test_eksporti_vcf(self, isolated_db, tmp_path):
         _upsert_contact("export@test.com", "Export User")
         out = tmp_path / "out.vcf"
-        result = runner.invoke(
-            app, ["retposto", "kontakto", "eksporti", str(out)]
-        )
+        result = runner.invoke(app, ["retposto", "kontakto", "eksporti", str(out)])
         assert result.exit_code == 0
         assert out.exists()
 
@@ -1375,7 +1453,9 @@ class TestCliFiltro:
         result = runner.invoke(
             app,
             [
-                "retposto", "filtro", "aldoni",
+                "retposto",
+                "filtro",
+                "aldoni",
                 "test-filter",
                 'from contains "spam" => mark-spam',
             ],
@@ -1387,7 +1467,9 @@ class TestCliFiltro:
         runner.invoke(
             app,
             [
-                "retposto", "filtro", "aldoni",
+                "retposto",
+                "filtro",
+                "aldoni",
                 "myfilter",
                 'subject contains "buy" => discard',
             ],
@@ -1400,7 +1482,9 @@ class TestCliFiltro:
         runner.invoke(
             app,
             [
-                "retposto", "filtro", "aldoni",
+                "retposto",
+                "filtro",
+                "aldoni",
                 "del-filter",
                 'from contains "x" => discard',
             ],
@@ -1513,6 +1597,43 @@ class TestRetpostoTuiReader:
         joined = "\n".join(reader._lines)
         assert "assurance-protection-aide-juridique" in joined
         assert "assurance-protection-\naide-juridique" not in joined
+
+    def test_reader_ctrl_y_copies_full_url_under_cursor(self):
+        url = "https://example.com/path/" + ("x" * 120)
+        msg = {"de": "a@b.com", "al": ["x@y.com"], "subjekto": "S", "korpo": url}
+        reader = MessageReader(_FakeStdScr(), msg)
+        reader._row = len(reader._lines) - 1
+        line = reader._lines[reader._row]
+        start = line.index("https://")
+        reader._char_col = start + 10
+        result = reader._handle_key(25)  # Ctrl+Y
+        assert result == f"copy_url:{url}"
+
+    def test_reader_visual_yank_copies_ascii_sanitized_text(self):
+        msg = {"de": "a@b.com", "al": ["x@y.com"], "subjekto": "S", "korpo": "A\u00a0B"}
+        reader = MessageReader(_FakeStdScr(), msg)
+        reader._row = len(reader._lines) - 1
+        line = reader._lines[reader._row]
+        idx = line.index("A")
+        reader._char_col = idx + 2
+        reader._visual_mode = "char"
+        reader._visual_anchor_row = reader._row
+        reader._visual_anchor_col = idx
+        with patch("pyperclip.copy") as copy_mock:
+            result = reader._handle_key(ord("y"))
+        assert result == "yank_text"
+        copy_mock.assert_called_once_with("A B")
+
+    def test_reader_ctrl_o_opens_full_url_under_cursor(self):
+        url = "https://example.org/very/long/path/" + ("a" * 80)
+        msg = {"de": "a@b.com", "al": ["x@y.com"], "subjekto": "S", "korpo": url}
+        reader = MessageReader(_FakeStdScr(), msg)
+        reader._row = len(reader._lines) - 1
+        line = reader._lines[reader._row]
+        start = line.index("https://")
+        reader._char_col = start + 6
+        result = reader._handle_key(15)  # Ctrl+O
+        assert result == f"open_url:{url}"
 
     def test_compose_cancel_reopens_reader(self):
         tui = _make_tui_for_keys()
@@ -1785,7 +1906,7 @@ class TestRetpostoComposeBehavior:
             load_folders=lambda _acc_id: [{"id": 10, "nomo": "Inbox"}],
             fetch_account_mail=lambda _acc, _max: (0, 0),
             send_message=lambda *_a, **_k: False,
-            save_message=lambda m: (saved.append(m) or 101),
+            save_message=lambda m: saved.append(m) or 101,
             update_message_field=lambda *_a, **_k: None,
             delete_message=lambda *_a, **_k: None,
             load_contacts=lambda: [],
@@ -1891,7 +2012,7 @@ class TestRetpostoSignatureLoading:
             load_messages=lambda **_: [],
             load_folders=lambda _acc_id: [{"id": 10, "nomo": "Inbox"}],
             fetch_account_mail=lambda _acc, _max: (0, 0),
-            send_message=lambda *_a, **kwargs: (sent.update(kwargs) or True),
+            send_message=lambda *_a, **kwargs: sent.update(kwargs) or True,
             save_message=lambda _m: 1,
             update_message_field=lambda *_a, **_k: None,
             delete_message=lambda *_a, **_k: None,
@@ -1910,7 +2031,8 @@ class TestRetpostoSignatureLoading:
         ]
         tui._load_signature = (  # type: ignore[method-assign]
             lambda acc: (
-                ("\n\n-- \nS2", "<p>S2</p>") if acc.get("retposto") == "two@example.com"
+                ("\n\n-- \nS2", "<p>S2</p>")
+                if acc.get("retposto") == "two@example.com"
                 else ("\n\n-- \nS1", "<p>S1</p>")
             )
         )
@@ -2297,12 +2419,14 @@ class TestUpdateAccount:
             _update_account,
         )
 
-        acc_id = _save_account({
-            "nomo": "OldName",
-            "retposto": "user@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "OldName",
+                "retposto": "user@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
         _update_account(acc_id, {"nomo": "NewName"})
         accounts = _load_accounts()
         assert accounts[0]["nomo"] == "NewName"
@@ -2314,12 +2438,14 @@ class TestUpdateAccount:
             _update_account,
         )
 
-        acc_id = _save_account({
-            "nomo": "Test",
-            "retposto": "u@example.com",
-            "imap_servilo": "old.imap.com",
-            "smtp_servilo": "smtp.example.com",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "Test",
+                "retposto": "u@example.com",
+                "imap_servilo": "old.imap.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
         _update_account(acc_id, {"imap_servilo": "new.imap.com"})
         accounts = _load_accounts()
         assert accounts[0]["imap_servilo"] == "new.imap.com"
@@ -2327,12 +2453,14 @@ class TestUpdateAccount:
     def test_update_invalid_column_raises(self, isolated_db):
         from autish.commands.retposto import _save_account, _update_account
 
-        acc_id = _save_account({
-            "nomo": "Test",
-            "retposto": "u2@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "Test",
+                "retposto": "u2@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
         with pytest.raises(ValueError, match="Disallowed"):
             _update_account(acc_id, {"id": 99})
 
@@ -2343,12 +2471,14 @@ class TestUpdateAccount:
             _update_account,
         )
 
-        acc_id = _save_account({
-            "nomo": "Unchanged",
-            "retposto": "u3@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "Unchanged",
+                "retposto": "u3@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
         _update_account(acc_id, {})
         accounts = _load_accounts()
         assert accounts[0]["nomo"] == "Unchanged"
@@ -2358,12 +2488,14 @@ class TestSignatureColumn:
     def test_signature_default_null(self, isolated_db):
         from autish.commands.retposto import _load_accounts, _save_account
 
-        _save_account({
-            "nomo": "Test",
-            "retposto": "sig@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
+        _save_account(
+            {
+                "nomo": "Test",
+                "retposto": "sig@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
         accounts = _load_accounts()
         assert accounts[0].get("subskribo") is None
 
@@ -2374,12 +2506,14 @@ class TestSignatureColumn:
             _update_account,
         )
 
-        acc_id = _save_account({
-            "nomo": "Sig",
-            "retposto": "sig2@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "Sig",
+                "retposto": "sig2@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
         _update_account(acc_id, {"subskribo": "/home/user/sig.txt"})
         accounts = _load_accounts()
         assert accounts[0]["subskribo"] == "/home/user/sig.txt"
@@ -2391,12 +2525,14 @@ class TestSignatureColumn:
             _update_account,
         )
 
-        acc_id = _save_account({
-            "nomo": "Sig3",
-            "retposto": "sig3@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "Sig3",
+                "retposto": "sig3@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
         _update_account(acc_id, {"subskribo": "/some/path"})
         _update_account(acc_id, {"subskribo": None})
         accounts = _load_accounts()
@@ -2407,12 +2543,14 @@ class TestCliSubskribo:
     def test_view_no_signature(self, isolated_db):
         from autish.commands.retposto import _save_account
 
-        acc_id = _save_account({
-            "nomo": "Test",
-            "retposto": "cli@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "Test",
+                "retposto": "cli@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
         result = runner.invoke(app, ["retposto", "subskribo", str(acc_id)])
         assert result.exit_code == 0
         assert "Neniu" in result.output
@@ -2420,12 +2558,14 @@ class TestCliSubskribo:
     def test_set_signature(self, isolated_db):
         from autish.commands.retposto import _load_accounts, _save_account
 
-        acc_id = _save_account({
-            "nomo": "Sig",
-            "retposto": "clisig@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "Sig",
+                "retposto": "clisig@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
         result = runner.invoke(
             app, ["retposto", "subskribo", str(acc_id), "-a", "/sig.txt"]
         )
@@ -2441,16 +2581,16 @@ class TestCliSubskribo:
             _update_account,
         )
 
-        acc_id = _save_account({
-            "nomo": "Sig4",
-            "retposto": "clisig4@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
-        _update_account(acc_id, {"subskribo": "/tmp/sig.txt"})
-        result = runner.invoke(
-            app, ["retposto", "subskribo", str(acc_id), "-f"]
+        acc_id = _save_account(
+            {
+                "nomo": "Sig4",
+                "retposto": "clisig4@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
         )
+        _update_account(acc_id, {"subskribo": "/tmp/sig.txt"})
+        result = runner.invoke(app, ["retposto", "subskribo", str(acc_id), "-f"])
         assert result.exit_code == 0
         assert "forigita" in result.output.lower()
         accounts = _load_accounts()
@@ -2461,12 +2601,14 @@ class TestCliNovdos:
     def test_create_folder(self, isolated_db):
         from autish.commands.retposto import _load_folders, _save_account
 
-        acc_id = _save_account({
-            "nomo": "Fld",
-            "retposto": "fld@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "Fld",
+                "retposto": "fld@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
         result = runner.invoke(
             app, ["retposto", "novdos", "Projekto", "-k", str(acc_id)]
         )
@@ -2482,12 +2624,14 @@ class TestCliNovdos:
             _save_account,
         )
 
-        acc_id = _save_account({
-            "nomo": "Fld2",
-            "retposto": "fld2@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "Fld2",
+                "retposto": "fld2@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
         _ensure_folder(acc_id, "Inbox", "INBOX")  # create parent first
         result = runner.invoke(
             app,
@@ -2500,21 +2644,24 @@ class TestCliNovdos:
     def test_no_accounts_error(self, isolated_db):
         result = runner.invoke(app, ["retposto", "novdos", "SomeFolder"])
         assert result.exit_code != 0
-        assert "kontoj" in result.output.lower() or "kontoj" in (
-            result.stderr or ""
-        ).lower()
+        assert (
+            "kontoj" in result.output.lower()
+            or "kontoj" in (result.stderr or "").lower()
+        )
 
 
 class TestCliListigiDosierujojn:
     def test_list_empty(self, isolated_db):
         from autish.commands.retposto import _save_account
 
-        acc_id = _save_account({
-            "nomo": "Lst",
-            "retposto": "lst@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "Lst",
+                "retposto": "lst@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
         result = runner.invoke(
             app, ["retposto", "listigi-dosierujojn", "-k", str(acc_id)]
         )
@@ -2524,12 +2671,14 @@ class TestCliListigiDosierujojn:
     def test_list_with_folder(self, isolated_db):
         from autish.commands.retposto import _ensure_folder, _save_account
 
-        acc_id = _save_account({
-            "nomo": "Lst2",
-            "retposto": "lst2@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "Lst2",
+                "retposto": "lst2@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
         _ensure_folder(acc_id, "Archive", "Archive")
         result = runner.invoke(
             app, ["retposto", "listigi-dosierujojn", "-k", str(acc_id)]
@@ -2546,18 +2695,22 @@ class TestCliMoviMesagon:
             _save_message,
         )
 
-        acc_id = _save_account({
-            "nomo": "Move",
-            "retposto": "move@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
-        msg_id = _save_message({
-            "konto_id": acc_id,
-            "de": "a@b.com",
-            "al": ["move@example.com"],
-            "subjekto": "Test",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "Move",
+                "retposto": "move@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
+        msg_id = _save_message(
+            {
+                "konto_id": acc_id,
+                "de": "a@b.com",
+                "al": ["move@example.com"],
+                "subjekto": "Test",
+            }
+        )
         _ensure_folder(acc_id, "Archive", "Archive")
         result = runner.invoke(
             app, ["retposto", "movi-mesagon", str(msg_id), "Archive"]
@@ -2821,18 +2974,22 @@ class TestDeleteMessageBehavior:
             _save_message,
         )
 
-        acc_id = _save_account({
-            "nomo": "Trash Test",
-            "retposto": "trash@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
-        msg_id = _save_message({
-            "konto_id": acc_id,
-            "de": "a@b.com",
-            "al": ["trash@example.com"],
-            "subjekto": "Delete me",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "Trash Test",
+                "retposto": "trash@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
+        msg_id = _save_message(
+            {
+                "konto_id": acc_id,
+                "de": "a@b.com",
+                "al": ["trash@example.com"],
+                "subjekto": "Delete me",
+            }
+        )
 
         _delete_message(msg_id, permanent=False)
 
@@ -2902,23 +3059,27 @@ class TestDeleteMessageBehavior:
             lambda _id: "secret",
         )
 
-        acc_id = _save_account({
-            "nomo": "Sync Delete",
-            "retposto": "sync@example.com",
-            "imap_servilo": "imap.example.com",
-            "imap_haveno": 993,
-            "imap_ssl": True,
-            "smtp_servilo": "smtp.example.com",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "Sync Delete",
+                "retposto": "sync@example.com",
+                "imap_servilo": "imap.example.com",
+                "imap_haveno": 993,
+                "imap_ssl": True,
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
         inbox_id = _ensure_folder(acc_id, "INBOX", "INBOX")
-        msg_id = _save_message({
-            "konto_id": acc_id,
-            "dosierujo_id": inbox_id,
-            "uid": "42",
-            "de": "a@b.com",
-            "al": ["sync@example.com"],
-            "subjekto": "Delete me remote",
-        })
+        msg_id = _save_message(
+            {
+                "konto_id": acc_id,
+                "dosierujo_id": inbox_id,
+                "uid": "42",
+                "de": "a@b.com",
+                "al": ["sync@example.com"],
+                "subjekto": "Delete me remote",
+            }
+        )
 
         _delete_message(msg_id, permanent=False)
 
@@ -2984,31 +3145,34 @@ class TestDeleteMessageBehavior:
             lambda _id: "secret",
         )
 
-        acc_id = _save_account({
-            "nomo": "Sync Update",
-            "retposto": "sync-update@example.com",
-            "imap_servilo": "imap.example.com",
-            "imap_haveno": 993,
-            "imap_ssl": True,
-            "smtp_servilo": "smtp.example.com",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "Sync Update",
+                "retposto": "sync-update@example.com",
+                "imap_servilo": "imap.example.com",
+                "imap_haveno": 993,
+                "imap_ssl": True,
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
         inbox_id = _ensure_folder(acc_id, "INBOX", "INBOX")
         archive_id = _ensure_folder(acc_id, "Archive", "Archive")
-        msg_id = _save_message({
-            "konto_id": acc_id,
-            "dosierujo_id": inbox_id,
-            "uid": "99",
-            "de": "a@b.com",
-            "al": ["sync-update@example.com"],
-            "subjekto": "sync update",
-        })
+        msg_id = _save_message(
+            {
+                "konto_id": acc_id,
+                "dosierujo_id": inbox_id,
+                "uid": "99",
+                "de": "a@b.com",
+                "al": ["sync-update@example.com"],
+                "subjekto": "sync update",
+            }
+        )
 
         _update_message_field(msg_id, legita=1, stelo=1, dosierujo_id=archive_id)
 
         uid_calls = [entry for entry in actions if entry[0] == "uid"]
         assert any(
-            call[1][0] == "STORE" and call[1][2] == "+FLAGS"
-            for call in uid_calls
+            call[1][0] == "STORE" and call[1][2] == "+FLAGS" for call in uid_calls
         )
         assert any(call[1][0] == "COPY" and call[1][1] == "99" for call in uid_calls)
         assert any(entry[0] == "expunge" for entry in actions)
@@ -3039,23 +3203,27 @@ class TestDeleteMessageBehavior:
             lambda _id: "secret",
         )
 
-        acc_id = _save_account({
-            "nomo": "Async Test",
-            "retposto": "async@example.com",
-            "imap_servilo": "imap.example.com",
-            "imap_haveno": 993,
-            "imap_ssl": True,
-            "smtp_servilo": "smtp.example.com",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "Async Test",
+                "retposto": "async@example.com",
+                "imap_servilo": "imap.example.com",
+                "imap_haveno": 993,
+                "imap_ssl": True,
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
         inbox_id = _ensure_folder(acc_id, "INBOX", "INBOX")
-        msg_id = _save_message({
-            "konto_id": acc_id,
-            "dosierujo_id": inbox_id,
-            "uid": "7",
-            "de": "a@b.com",
-            "al": ["async@example.com"],
-            "subjekto": "Async path",
-        })
+        msg_id = _save_message(
+            {
+                "konto_id": acc_id,
+                "dosierujo_id": inbox_id,
+                "uid": "7",
+                "de": "a@b.com",
+                "al": ["async@example.com"],
+                "subjekto": "Async path",
+            }
+        )
 
         _update_message_field(msg_id, legita=1)
         assert submitted, "expected remote sync to be scheduled asynchronously"
@@ -3069,18 +3237,22 @@ class TestAccountOrdering:
             _save_account,
         )
 
-        id1 = _save_account({
-            "nomo": "A",
-            "retposto": "a@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
-        id2 = _save_account({
-            "nomo": "B",
-            "retposto": "b@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
+        id1 = _save_account(
+            {
+                "nomo": "A",
+                "retposto": "a@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
+        id2 = _save_account(
+            {
+                "nomo": "B",
+                "retposto": "b@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
         before = [a["id"] for a in _load_accounts()]
         assert before == [id1, id2]
         moved = _move_account_order(id2, -1)
@@ -3091,18 +3263,22 @@ class TestAccountOrdering:
     def test_cli_reordigi_konton(self, isolated_db):
         from autish.commands.retposto import _save_account
 
-        _save_account({
-            "nomo": "A",
-            "retposto": "aa@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
-        _save_account({
-            "nomo": "B",
-            "retposto": "bb@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
+        _save_account(
+            {
+                "nomo": "A",
+                "retposto": "aa@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
+        _save_account(
+            {
+                "nomo": "B",
+                "retposto": "bb@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
         result = runner.invoke(
             app,
             ["retposto", "reordigi-konton", "bb@example.com", "supren"],
@@ -3146,12 +3322,14 @@ class TestMessageSearchFiltering:
 
         def _fake_load_messages(**kwargs):
             if kwargs.get("dosierujo_id") == 11:
-                return [{
-                    "id": 99,
-                    "de": "alice@example.com",
-                    "subjekto": "archive target",
-                    "korpo": "body",
-                }]
+                return [
+                    {
+                        "id": 99,
+                        "de": "alice@example.com",
+                        "subjekto": "archive target",
+                        "korpo": "body",
+                    }
+                ]
             return []
 
         tui._load_messages = _fake_load_messages  # type: ignore[method-assign]
@@ -3163,16 +3341,18 @@ class TestMessageSearchFiltering:
 class TestMessagePanelRendering:
     def test_selected_tick_overrides_other_flags(self):
         panel = MessagePanel(_FakeStdScr(), load_messages=lambda **_: [])
-        panel._messages = [{
-            "id": 7,
-            "de": "alice@example.com",
-            "subjekto": "Subject",
-            "ricevita_je": "2026-03-01T12:00:00",
-            "stelo": 1,
-            "spamo": 1,
-            "etikedoj": ["read-receipt-requested"],
-            "legita": 1,
-        }]
+        panel._messages = [
+            {
+                "id": 7,
+                "de": "alice@example.com",
+                "subjekto": "Subject",
+                "ricevita_je": "2026-03-01T12:00:00",
+                "stelo": 1,
+                "spamo": 1,
+                "etikedoj": ["read-receipt-requested"],
+                "legita": 1,
+            }
+        ]
         panel._selected_ids = {7}
 
         class _RecordingWin:
@@ -3207,21 +3387,25 @@ class TestCliFolderAndCopyParity:
             _save_message,
         )
 
-        acc_id = _save_account({
-            "nomo": "Acct",
-            "retposto": "acct@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "Acct",
+                "retposto": "acct@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
         src = _ensure_folder(acc_id, "Inbox", "Inbox")
         dst = _ensure_folder(acc_id, "Archive", "Archive")
-        msg_id = _save_message({
-            "konto_id": acc_id,
-            "dosierujo_id": src,
-            "de": "a@b.com",
-            "al": ["acct@example.com"],
-            "subjekto": "Copy me",
-        })
+        msg_id = _save_message(
+            {
+                "konto_id": acc_id,
+                "dosierujo_id": src,
+                "de": "a@b.com",
+                "al": ["acct@example.com"],
+                "subjekto": "Copy me",
+            }
+        )
         result_copy = runner.invoke(
             app, ["retposto", "kopii-mesagon", str(msg_id), "Archive"]
         )
@@ -3258,28 +3442,34 @@ class TestCliSearch:
             _save_message,
         )
 
-        acc_id = _save_account({
-            "nomo": "Acct",
-            "retposto": "acct@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "Acct",
+                "retposto": "acct@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
         inbox_id = _ensure_folder(acc_id, "INBOX", "INBOX")
         archive_id = _ensure_folder(acc_id, "Archive", "Archive")
-        _save_message({
-            "konto_id": acc_id,
-            "dosierujo_id": inbox_id,
-            "de": "alice@example.com",
-            "subjekto": "inbox msg",
-            "korpo": "hello inbox",
-        })
-        _save_message({
-            "konto_id": acc_id,
-            "dosierujo_id": archive_id,
-            "de": "alice@example.com",
-            "subjekto": "archive msg",
-            "korpo": "hello archive",
-        })
+        _save_message(
+            {
+                "konto_id": acc_id,
+                "dosierujo_id": inbox_id,
+                "de": "alice@example.com",
+                "subjekto": "inbox msg",
+                "korpo": "hello inbox",
+            }
+        )
+        _save_message(
+            {
+                "konto_id": acc_id,
+                "dosierujo_id": archive_id,
+                "de": "alice@example.com",
+                "subjekto": "archive msg",
+                "korpo": "hello archive",
+            }
+        )
         result = runner.invoke(
             app,
             ["retposto", "serci", "alice", "--dosierujo", "acct@example.com/Archive"],
@@ -3293,17 +3483,22 @@ class TestCliGisdatigiKonton:
     def test_update_imap_server(self, isolated_db):
         from autish.commands.retposto import _load_accounts, _save_account
 
-        acc_id = _save_account({
-            "nomo": "Upd",
-            "retposto": "upd@example.com",
-            "imap_servilo": "old.imap.com",
-            "smtp_servilo": "smtp.example.com",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "Upd",
+                "retposto": "upd@example.com",
+                "imap_servilo": "old.imap.com",
+                "smtp_servilo": "smtp.example.com",
+            }
+        )
         result = runner.invoke(
             app,
             [
-                "retposto", "ĝisdatigi-konton", str(acc_id),
-                "--imap", "new.imap.com",
+                "retposto",
+                "ĝisdatigi-konton",
+                str(acc_id),
+                "--imap",
+                "new.imap.com",
             ],
         )
         assert result.exit_code == 0
@@ -3314,15 +3509,15 @@ class TestCliGisdatigiKonton:
     def test_no_change_specified(self, isolated_db):
         from autish.commands.retposto import _save_account
 
-        acc_id = _save_account({
-            "nomo": "NoChange",
-            "retposto": "nc@example.com",
-            "imap_servilo": "imap.example.com",
-            "smtp_servilo": "smtp.example.com",
-        })
-        result = runner.invoke(
-            app, ["retposto", "ĝisdatigi-konton", str(acc_id)]
+        acc_id = _save_account(
+            {
+                "nomo": "NoChange",
+                "retposto": "nc@example.com",
+                "imap_servilo": "imap.example.com",
+                "smtp_servilo": "smtp.example.com",
+            }
         )
+        result = runner.invoke(app, ["retposto", "ĝisdatigi-konton", str(acc_id)])
         assert result.exit_code == 0
         assert "neniu" in result.output.lower()
 
@@ -3445,12 +3640,14 @@ class TestTUIAccountWithNoFolders:
         )
 
         # Create account with NO folders
-        acc_id = _save_account({
-            "nomo": "NoFolders",
-            "retposto": "no.folders@test.com",
-            "imap_servilo": "imap.test.com",
-            "smtp_servilo": "smtp.test.com",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "NoFolders",
+                "retposto": "no.folders@test.com",
+                "imap_servilo": "imap.test.com",
+                "smtp_servilo": "smtp.test.com",
+            }
+        )
 
         # Verify no folders exist
         folders_before = _load_folders(acc_id)
@@ -3478,12 +3675,14 @@ class TestTUIAccountWithNoFolders:
         )
 
         # Create account with folder
-        acc_id = _save_account({
-            "nomo": "WithFolder",
-            "retposto": "with.folder@test.com",
-            "imap_servilo": "imap.test.com",
-            "smtp_servilo": "smtp.test.com",
-        })
+        acc_id = _save_account(
+            {
+                "nomo": "WithFolder",
+                "retposto": "with.folder@test.com",
+                "imap_servilo": "imap.test.com",
+                "smtp_servilo": "smtp.test.com",
+            }
+        )
         existing_folder_id = _ensure_folder(acc_id, "Sent", "Sent")
 
         # Load folders

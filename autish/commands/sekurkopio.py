@@ -21,7 +21,7 @@ from rich.table import Table
 
 app = typer.Typer(
     name="sekurkopio",
-    help="Sekurkopio — backup & restore all autish user data.",
+    help="Sekurkopio — sekurkopii kaj restaŭri ĉiujn autish-uzantajn datumojn.",
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )

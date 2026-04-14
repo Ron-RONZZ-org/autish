@@ -96,6 +96,8 @@ class TestNormalizeTipo:
 
     def test_abbreviation_expanded(self):
         assert _normalize_tipo("su") == ["substantivo-neŭtra"]
+        assert _normalize_tipo("si") == ["substantivo-ina"]
+        assert _normalize_tipo("sv") == ["substantivo-vira"]
         assert _normalize_tipo("sui") == ["substantivo-ina"]
         assert _normalize_tipo("suv") == ["substantivo-vira"]
         assert _normalize_tipo("suf") == ["substantivo-ina"]
@@ -286,6 +288,32 @@ class TestAldoni:
         assert entry["nivelo"] == 3.0
         assert "a greeting" in entry["difinoj"]
 
+    def test_aldoni_teksto_accepts_escaped_newline(self):
+        with (
+            patch(_LOAD, return_value=[]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            result = runner.invoke(app, ["vorto", "aldoni", r"linio1\nlinio2"])
+        assert result.exit_code == 0, result.output
+        entry = mock_save.call_args[0][0][0]
+        assert entry["teksto"] == "linio1\nlinio2"
+
+    def test_aldoni_teksto_accepts_br_markup(self):
+        with (
+            patch(_LOAD, return_value=[]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            result = runner.invoke(app, ["vorto", "aldoni", "linio1<br>linio2"])
+        assert result.exit_code == 0, result.output
+        entry = mock_save.call_args[0][0][0]
+        assert entry["teksto"] == "linio1\nlinio2"
+
     def test_ligilo_short_alias_L(self):
         with (
             patch(_LOAD, return_value=[]),
@@ -301,7 +329,7 @@ class TestAldoni:
         entry = mock_save.call_args[0][0][0]
         assert entry["ligiloj"] == [SAMPLE_UUID2]
 
-    def test_difino_with_uzo_syntax_is_split(self):
+    def test_difino_with_braced_uzo_syntax_is_split(self):
         with (
             patch(_LOAD, return_value=[]),
             patch(_SAVE) as mock_save,
@@ -311,11 +339,38 @@ class TestAldoni:
         ):
             runner.invoke(
                 app,
-                ["vorto", "aldoni", "hello", "-d", "saluto:*mi uzas tion*"],
+                ["vorto", "aldoni", "hello", "-d", "saluto:{mi uzas tion}"],
             )
         entry = mock_save.call_args[0][0][0]
         assert entry["difinoj"] == ["saluto"]
         assert entry["uzoj"] == ["mi uzas tion"]
+
+    def test_inline_markdown_link_in_difino_adds_ligilo(self):
+        linked = _make_entry(uuid=SAMPLE_UUID2, teksto="world", ligiloj=[])
+        with (
+            patch(_LOAD, return_value=[linked]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+            patch(
+                "autish.commands.vorto._uuid_mod.uuid4",
+                return_value=uuid.UUID(SAMPLE_UUID),
+            ),
+        ):
+            runner.invoke(
+                app,
+                [
+                    "vorto",
+                    "aldoni",
+                    "hello",
+                    "-d",
+                    "difino kun [world](#11111111)",
+                ],
+            )
+        saved_entries = mock_save.call_args[0][0]
+        entry_a = next(e for e in saved_entries if e["uuid"] == SAMPLE_UUID)
+        assert SAMPLE_UUID2 in entry_a["ligiloj"]
 
     def test_ligilo_adds_reciprocal_link(self):
         linked = _make_entry(uuid=SAMPLE_UUID2, teksto="world", ligiloj=[])
@@ -348,6 +403,28 @@ class TestAldoni:
             result = runner.invoke(app, ["vorto", "aldoni", "hello"])
         assert result.exit_code == 0
         mock_save.assert_not_called()
+
+    def test_aldoni_kopii_copies_short_uuid(self, monkeypatch):
+        copied: dict[str, str] = {}
+
+        def _fake_copy(value: str) -> None:
+            copied["value"] = value
+
+        monkeypatch.setattr("pyperclip.copy", _fake_copy)
+        with (
+            patch(_LOAD, return_value=[]),
+            patch(_SAVE),
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+            patch(
+                "autish.commands.vorto._uuid_mod.uuid4",
+                return_value=uuid.UUID(SAMPLE_UUID),
+            ),
+        ):
+            result = runner.invoke(app, ["vorto", "aldoni", "hello", "--kopii"])
+        assert result.exit_code == 0, result.output
+        assert copied["value"] == "#aaaaaaaa"
 
     def test_invalid_nivelo_exits_nonzero(self):
         result = runner.invoke(app, ["vorto", "aldoni", "hello", "-n", "11"])
@@ -409,11 +486,13 @@ class TestAldoni:
 
 class TestVidi:
     def test_displays_entry(self):
-        entry = _make_entry()
+        entry = _make_entry(autoro="Voltaire", verko="Candide:1759")
         with patch(_LOAD, return_value=[entry]):
             result = runner.invoke(app, ["vorto", "vidi", SAMPLE_UUID])
         assert result.exit_code == 0
         assert "hello" in result.output
+        assert "aŭtoro: Voltaire" in result.output
+        assert "verko: Candide:1759" in result.output
         assert "kreita:" not in result.output
         assert "modifita:" not in result.output
 
@@ -437,10 +516,29 @@ class TestVidi:
         assert result.exit_code == 0
         assert "hello" in result.output
 
+    def test_vidi_kopii_copies_short_uuid(self, monkeypatch):
+        entry = _make_entry()
+        copied: dict[str, str] = {}
+
+        def _fake_copy(value: str) -> None:
+            copied["value"] = value
+
+        monkeypatch.setattr("pyperclip.copy", _fake_copy)
+        with patch(_LOAD, return_value=[entry]):
+            result = runner.invoke(app, ["vorto", "vidi", SAMPLE_UUID, "--kopii"])
+        assert result.exit_code == 0, result.output
+        assert copied["value"] == "#aaaaaaaa"
+
     def test_not_found_exits_nonzero(self):
         with patch(_LOAD, return_value=[]):
             result = runner.invoke(app, ["vorto", "vidi", "notfound"])
         assert result.exit_code != 0
+
+    def test_vidi_copy_without_ref_fails(self):
+        with patch(_LOAD, return_value=[]):
+            result = runner.invoke(app, ["vorto", "vidi", "--kopii"])
+        assert result.exit_code != 0
+        assert "postulas UUID" in (result.output + (result.stderr or ""))
 
     def test_display_entry_formats_linked_content_and_bold_definitions(self):
         linked = _make_entry(
@@ -456,9 +554,9 @@ class TestVidi:
         assert isinstance(rendered, Group)
         md = rendered.renderables[2]
         assert md.__class__.__name__ == "Markdown"
-        assert "**1. short def**" in md.markup
-        assert "[**bonjour**: a very long description" in md.markup
-        assert "](file://" in md.markup
+        assert "**short def**" in md.markup
+        assert "[**bonjour**](file://" in md.markup
+        assert "(#11111111)" in md.markup
 
     def test_display_entry_renders_markdown_in_difino_and_uzo(self):
         entry = _make_entry(
@@ -477,10 +575,19 @@ class TestVidi:
         assert md.__class__.__name__ == "Markdown"
         assert "en - vorto/substantivo-neŭtra" in md.markup
         assert (
-            "**1. (de l'allemand _ambivalent_) "
+            "**(de l'allemand _ambivalent_) "
             "qui présente une ambivalence**"
         ) in md.markup
         assert "*_ekzemplo_ de uzo*" in md.markup
+
+    def test_display_entry_single_definition_is_not_numbered(self):
+        entry = _make_entry(difinoj=["nur unu difino"], uzoj=["unu uzo"])
+        with patch("autish.commands.vorto.console.print") as mock_print:
+            _display_entry(entry, [entry])
+        panel = mock_print.call_args[0][0]
+        md = panel.renderable.renderables[2]
+        assert "**nur unu difino**" in md.markup
+        assert "**1. nur unu difino**" not in md.markup
 
 
 class TestModifi:
@@ -506,6 +613,35 @@ class TestModifi:
         assert result.exit_code == 0
         updated = mock_save.call_args[0][0][0]
         assert updated["lingvo"] == "eo"
+
+    def test_modifi_semantika_kopii_copies_reference(self, monkeypatch):
+        entry = _make_entry()
+        copied: dict[str, str] = {}
+
+        def _fake_copy(value: str) -> None:
+            copied["value"] = value
+
+        monkeypatch.setattr("pyperclip.copy", _fake_copy)
+        with (
+            patch(_LOAD, return_value=[entry]),
+            patch(_SAVE),
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+        ):
+            result = runner.invoke(
+                app,
+                [
+                    "vorto",
+                    "modifi",
+                    SAMPLE_UUID,
+                    "--lingvo",
+                    "eo",
+                    "--semantika-kopii",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        assert copied["value"] == "[hello](#aaaaaaaa)"
 
     def test_cancelled_does_not_save(self):
         entry = _make_entry()
@@ -606,6 +742,14 @@ class TestSerci:
         assert "hello" in result.output
         assert "saluton" not in result.output
 
+    def test_single_result_displays_entry_directly(self):
+        with patch(_LOAD, return_value=self.entries):
+            result = runner.invoke(app, ["vorto", "serci", "hello"])
+        assert result.exit_code == 0
+        assert "hello  #aaaaaaaa" in result.output
+        assert "rezulto(j) trovita(j)" not in result.output
+        assert "UUID" not in result.output
+
     def test_lingvo_filter(self):
         with patch(_LOAD, return_value=self.entries):
             result = runner.invoke(app, ["vorto", "serci", "-l", "eo"])
@@ -636,6 +780,36 @@ class TestSerci:
             result = runner.invoke(app, ["vorto", "serci", "--limo", "3"])
         assert result.exit_code == 0
         assert "3 rezulto" in result.output
+
+    def test_ligilo_search_default_one_hop(self):
+        a = _make_entry(uuid=SAMPLE_UUID, teksto="a", ligiloj=[SAMPLE_UUID2])
+        b = _make_entry(uuid=SAMPLE_UUID2, teksto="b", ligiloj=[SAMPLE_UUID])
+        c = _make_entry(
+            uuid="22222222-3333-4444-5555-666666666666",
+            teksto="c",
+            ligiloj=[SAMPLE_UUID2],
+        )
+        with patch(_LOAD, return_value=[a, b, c]):
+            result = runner.invoke(app, ["vorto", "serci", "--ligilo", "aaaaaaaa"])
+        assert result.exit_code == 0
+        assert "b" in result.output
+        assert "c" not in result.output
+
+    def test_ligilo_search_multiple_hops_with_limo(self):
+        a = _make_entry(uuid=SAMPLE_UUID, teksto="a", ligiloj=[SAMPLE_UUID2])
+        b = _make_entry(uuid=SAMPLE_UUID2, teksto="b", ligiloj=[SAMPLE_UUID])
+        c = _make_entry(
+            uuid="22222222-3333-4444-5555-666666666666",
+            teksto="c",
+            ligiloj=[SAMPLE_UUID2],
+        )
+        with patch(_LOAD, return_value=[a, b, c]):
+            result = runner.invoke(
+                app, ["vorto", "serci", "--ligilo", "aaaaaaaa", "--limo", "2"]
+            )
+        assert result.exit_code == 0
+        assert "b" in result.output
+        assert "c" in result.output
 
     def test_nivelo_min_filter(self):
         with patch(_LOAD, return_value=self.entries):
@@ -928,6 +1102,17 @@ class TestRegistration:
         for sub in ("aldoni", "vidi", "modifi", "serci", "forigi", "malfari"):
             assert sub in result.output
 
+    def test_vorto_serci_help_is_localized_in_esperanto(self, monkeypatch):
+        monkeypatch.setenv("LANG", "eo_FR.UTF-8")
+        result = runner.invoke(app, ["vorto", "serci", "--help"])
+        assert result.exit_code == 0
+        assert "Filter by language code." not in result.output
+        assert "Filtri laŭ lingvokodo." in result.output
+        assert "Disable fuzzy fallback matching." not in result.output
+        assert "Malŝalti malklaran rezervan kongruigon." in result.output
+        assert "Search the wordbank." not in result.output
+        assert "Serĉi en la vortaro." in result.output
+
     def test_vorto_in_kp_subcommands(self):
         from autish.commands.kp import _AUTISH_SUBCOMMANDS
 
@@ -954,6 +1139,13 @@ class TestEntryToLines:
         joined = "\n".join(lines)
         assert "a greeting" in joined
         assert "a salutation" in joined
+
+    def test_single_definition_not_numbered(self):
+        entry = _make_entry(difinoj=["a greeting"])
+        lines = _entry_to_lines(entry)
+        joined = "\n".join(lines)
+        assert "    a greeting" in joined
+        assert "1. a greeting" not in joined
 
     def test_empty_optional_fields_omitted(self):
         entry = _make_entry(temo=None, tono=None, nivelo=None, etikedoj={})
@@ -1913,5 +2105,5 @@ class TestEntryToLinesAutoroVerko:
         entry = _make_entry()
         lines = _entry_to_lines(entry)
         joined = "\n".join(lines)
-        assert "autoro:" not in joined
+        assert "aŭtoro:" not in joined
         assert "verko:" not in joined

@@ -100,6 +100,15 @@ class TestBuildHtml:
         assert "h2 { font-size: 1.75rem;" in html
         assert "h3 { font-size: 1.45rem;" in html
 
+    def test_keeps_complex_display_math_unchanged(self):
+        formula = (
+            r"$$\overrightarrow{F}_{e_1 \to e_2}="
+            r"\frac{q_1 q_2}{4\pi \varepsilon_0}\frac{1}{r^2},\widehat{u}$$"
+        )
+        html = _build_html(formula)
+        assert formula in html
+        assert "renderMathInElement" in html
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CLI command tests
@@ -184,6 +193,26 @@ class TestEksporti:
         assert "<!DOCTYPE html>" in content
         assert "Hello" in content
 
+    def test_infers_html_from_destination_extension(self, tmp_path):
+        md_file = tmp_path / "test.md"
+        md_file.write_text("# Hello\n\nWorld", encoding="utf-8")
+        dest = tmp_path / "output.html"
+        result = runner.invoke(app, ["md", "eksporti", str(md_file), str(dest)])
+        assert result.exit_code == 0
+        assert dest.exists()
+
+    def test_infers_pdf_from_destination_extension(self, tmp_path):
+        md_file = tmp_path / "test.md"
+        md_file.write_text("# Hello", encoding="utf-8")
+        dest = tmp_path / "out.pdf"
+
+        fake_weasyprint = MagicMock()
+        fake_weasyprint.HTML.return_value.write_pdf.return_value = None
+        with patch.dict("sys.modules", {"weasyprint": fake_weasyprint}):
+            result = runner.invoke(app, ["md", "eksporti", str(md_file), str(dest)])
+        assert result.exit_code == 0
+        fake_weasyprint.HTML.assert_called_once()
+
     def test_exports_html_format_explicit(self, tmp_path):
         md_file = tmp_path / "test.md"
         md_file.write_text("# Hi", encoding="utf-8")
@@ -207,6 +236,14 @@ class TestEksporti:
         )
         assert result.exit_code != 0
         assert "nesubtenata" in result.output.lower() or "xyz" in result.output
+
+    def test_missing_format_and_unknown_extension_exits_nonzero(self, tmp_path):
+        md_file = tmp_path / "test.md"
+        md_file.write_text("# Hi", encoding="utf-8")
+        dest = tmp_path / "out.nekonata"
+        result = runner.invoke(app, ["md", "eksporti", str(md_file), str(dest)])
+        assert result.exit_code != 0
+        assert "ne povas konkludi formaton" in result.output
 
     def test_pdf_without_weasyprint_exits_nonzero(self, tmp_path):
         md_file = tmp_path / "test.md"

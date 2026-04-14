@@ -19,11 +19,11 @@ import json
 import re
 import sqlite3
 import sys
+import tempfile
 import uuid as _uuid_mod
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 
 import typer
 from rich.console import Console, Group
@@ -32,13 +32,19 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from autish.i18n import tr
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Typer app
 # ──────────────────────────────────────────────────────────────────────────────
 
 app = typer.Typer(
     name="vorto",
-    help="Mia Vorto — personal wordbook microapp.",
+    help=tr(
+        "Mia Vorto — persona vortaro-mikroapo.",
+        "Mia Vorto — personal wordbook microapp.",
+        "Mia Vorto — microapplication de vocabulaire personnel.",
+    ),
     no_args_is_help=False,
     invoke_without_command=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
@@ -197,9 +203,11 @@ _TIPO_MAP: dict[str, str] = {
     "substantivo": "substantivo-neŭtra",
     "substantivo-neŭtra": "substantivo-neŭtra",
     "sui": "substantivo-ina",
+    "si": "substantivo-ina",
     "suf": "substantivo-ina",
     "substantivo-ina": "substantivo-ina",
     "suv": "substantivo-vira",
+    "sv": "substantivo-vira",
     "sum": "substantivo-vira",
     "substantivo-vira": "substantivo-vira",
     "ve": "verbo",
@@ -468,17 +476,31 @@ def _normalize_oe(text: str) -> str:
     return text.replace("œ", "oe").replace("Œ", "OE")
 
 
+def _normalize_multiline_text(text: str) -> str:
+    """Convert escaped/newline markers into actual multiline text."""
+    normalized = str(text or "")
+    normalized = re.sub(r"(?i)<br\s*/?>", "\n", normalized)
+    normalized = normalized.replace("\\r\\n", "\n").replace("\\n", "\n").replace(
+        "\\r", "\n"
+    )
+    return normalized.strip()
+
+
 def _split_difino_uzo(raw: str) -> tuple[str, str]:
     """Split definition/example input.
 
     Supported forms:
+    - `difino:{uzo}` (preferred)
     - `difino:*uzo*` (legacy)
     - `difino::uzo` (shell-safe; avoids `!*` history expansion issues)
     """
-    text = raw.strip()
+    text = _normalize_multiline_text(raw)
     if "::" in text:
         left, right = text.split("::", 1)
         return left.strip(), right.strip()
+    m_braced = re.match(r"^(.*?):\{(.+)\}$", text)
+    if m_braced:
+        return m_braced.group(1).strip(), m_braced.group(2).strip()
     m = re.match(r"^(.*?):\*(.+)\*$", text)
     if not m:
         return text, ""
@@ -493,10 +515,99 @@ def _normalize_difinoj_uzoj(
     existing_uzoj = list(uzoj or [])
     for i, raw in enumerate(difinoj):
         d, parsed_u = _split_difino_uzo(raw)
-        fallback_u = existing_uzoj[i].strip() if i < len(existing_uzoj) else ""
+        fallback_u = (
+            _normalize_multiline_text(existing_uzoj[i])
+            if i < len(existing_uzoj)
+            else ""
+        )
         clean_difinoj.append(d)
         clean_uzoj.append(parsed_u or fallback_u)
     return clean_difinoj, clean_uzoj
+
+
+def _extract_markdown_link_refs(text: str) -> list[str]:
+    refs: list[str] = []
+    for match in re.finditer(r"\[[^\]]+\]\(#([^)]+)\)", str(text or "")):
+        raw_ref = match.group(1).split(",", 1)[0].strip().lstrip("#")
+        if raw_ref:
+            refs.append(raw_ref)
+    return refs
+
+
+def _normalize_link_refs(refs: list[str], entries: list[dict]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in refs:
+        target = _find_entry(raw, entries)
+        target_uuid = str(target["uuid"] if target is not None else raw).lstrip("#")
+        if not target_uuid or target_uuid in seen:
+            continue
+        seen.add(target_uuid)
+        normalized.append(target_uuid)
+    return normalized
+
+
+def _merge_links_with_inline_refs(
+    base_links: list[str], difinoj: list[str], uzoj: list[str], entries: list[dict]
+) -> list[str]:
+    inline_refs: list[str] = []
+    for part in [*(difinoj or []), *(uzoj or [])]:
+        inline_refs.extend(_extract_markdown_link_refs(part))
+    return _normalize_link_refs([*(base_links or []), *inline_refs], entries)
+
+
+def _write_entry_preview_file(entry: dict, all_entries: list[dict]) -> str:
+    lines = _entry_to_lines(entry)
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False, encoding="utf-8"
+    ) as fh:
+        fh.write("\n".join(lines))
+        return fh.name
+
+
+def _render_internal_markdown_links(text: str, all_entries: list[dict] | None) -> str:
+    if not text or all_entries is None:
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        label = match.group(1).strip()
+        raw_ref = match.group(2).split(",", 1)[0].strip().lstrip("#")
+        target = _find_entry(raw_ref, all_entries)
+        if target is None:
+            return f"{label} (#{raw_ref[:8]})"
+        preview_path = _write_entry_preview_file(target, all_entries)
+        short_uuid = str(target.get("uuid") or "")[:8]
+        return f"[{label}](file://{preview_path}) (#{short_uuid})"
+
+    return re.sub(r"\[([^\]]+)\]\(#([^)]+)\)", _replace, text)
+
+
+def _copy_to_clipboard(value: str, success_message: str) -> None:
+    try:
+        import pyperclip
+    except ImportError:
+        typer.echo("Tonduja subteno mankas (pyperclip ne disponeblas).", err=True)
+        raise typer.Exit(code=1) from None
+    try:
+        pyperclip.copy(value)
+    except pyperclip.PyperclipException as exc:
+        typer.echo(f"Ne povis kopii al tondujo: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(success_message)
+
+
+def _copy_entry_reference(entry: dict, *, semantika: bool = False) -> None:
+    entry_uuid = str(entry.get("uuid") or "")
+    if not entry_uuid:
+        typer.echo("Nevalida eniro: mankas UUID por kopii.", err=True)
+        raise typer.Exit(code=1)
+    short_ref = f"#{entry_uuid[:8]}"
+    if semantika:
+        label = str(entry.get("teksto") or "").strip() or short_ref
+        payload = f"[{label}]({short_ref})"
+        _copy_to_clipboard(payload, "Kopiis semantikan referencon al tondujo.")
+        return
+    _copy_to_clipboard(short_ref, f"Kopiis UUID al tondujo: {short_ref}")
 
 
 def _sync_bidirectional_links(
@@ -662,6 +773,52 @@ def _fuzzy_text_matches(entries: list[dict], query: str, limit: int = 50) -> lis
     return [entry for _, entry in scored[:limit]]
 
 
+def _ligilo_hops_of(root_uuid: str, entries: list[dict], max_depth: int) -> list[dict]:
+    """Traverse linked entries from a root UUID up to max_depth hops.
+
+    Traversal is undirected: outgoing and incoming links are both considered,
+    matching the relational search spirit used in encik.
+    """
+    by_uuid = {str(e.get("uuid") or ""): e for e in entries if e.get("uuid")}
+    if root_uuid not in by_uuid:
+        return []
+
+    adjacency: dict[str, set[str]] = {uid: set() for uid in by_uuid}
+    for source in entries:
+        source_uuid = str(source.get("uuid") or "")
+        if not source_uuid:
+            continue
+        for raw_ref in source.get("ligiloj") or []:
+            target = _find_entry(str(raw_ref), entries)
+            if target is None:
+                continue
+            target_uuid = str(target.get("uuid") or "")
+            if not target_uuid or target_uuid == source_uuid:
+                continue
+            adjacency.setdefault(source_uuid, set()).add(target_uuid)
+            adjacency.setdefault(target_uuid, set()).add(source_uuid)
+
+    visited: set[str] = {root_uuid}
+    queue: list[tuple[str, int]] = [(root_uuid, 0)]
+    ordered_hits: list[dict] = []
+    seen_hits: set[str] = set()
+    while queue:
+        current_uuid, depth = queue.pop(0)
+        if max_depth > 0 and depth >= max_depth:
+            continue
+        for next_uuid in sorted(adjacency.get(current_uuid, set())):
+            if next_uuid in visited:
+                continue
+            visited.add(next_uuid)
+            queue.append((next_uuid, depth + 1))
+            if next_uuid != root_uuid and next_uuid not in seen_hits:
+                hit = by_uuid.get(next_uuid)
+                if hit is not None:
+                    ordered_hits.append(hit)
+                    seen_hits.add(next_uuid)
+    return ordered_hits
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Display helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -698,14 +855,14 @@ def _display_entry(
         lines.append(f"{lang} - {tipo_full}")
     elif lang or tipo_full:
         lines.append(lang or tipo_full)
+    _row("aŭtoro:", entry.get("autoro") or "")
+    _row("verko:", entry.get("verko") or "")
     if montri_cxion:
         lines.append("")
         _row("temo:", entry.get("temo") or "")
         _row("tono:", entry.get("tono") or "")
         nivelo = entry.get("nivelo")
         _row("nivelo:", f"{nivelo:.1f}" if nivelo is not None else "")
-        _row("autoro:", entry.get("autoro") or "")
-        _row("verko:", entry.get("verko") or "")
 
     difinoj: list[str] = entry.get("difinoj") or []
     uzoj: list[str] = entry.get("uzoj") or []
@@ -713,10 +870,21 @@ def _display_entry(
         if lines and lines[-1] != "":
             lines.append("")
         lines.append("**difinoj:**")
-        for i, d in enumerate(difinoj, 1):
-            lines.append(f"**{i}. {d}**")
-            if i - 1 < len(uzoj) and uzoj[i - 1]:
-                lines.append(f"*{uzoj[i - 1]}*")
+        if len(difinoj) == 1:
+            rendered_difino = _render_internal_markdown_links(difinoj[0], all_entries)
+            lines.append(f"**{rendered_difino}**")
+            if uzoj and uzoj[0]:
+                rendered_uzo = _render_internal_markdown_links(uzoj[0], all_entries)
+                lines.append(f"*{rendered_uzo}*")
+        else:
+            for i, d in enumerate(difinoj, 1):
+                rendered_difino = _render_internal_markdown_links(d, all_entries)
+                lines.append(f"**{i}. {rendered_difino}**")
+                if i - 1 < len(uzoj) and uzoj[i - 1]:
+                    rendered_uzo = _render_internal_markdown_links(
+                        uzoj[i - 1], all_entries
+                    )
+                    lines.append(f"*{rendered_uzo}*")
 
     if montri_cxion:
         etikedoj: dict[str, str] = entry.get("etikedoj") or {}
@@ -739,24 +907,11 @@ def _display_entry(
                     linked_parts.append(lid)
                     continue
                 text = linked.get("teksto") or ""
-                defs = linked.get("difinoj") or []
-                detail = f"**{text}**: {defs[0]}" if defs else f"**{text}**"
-                if len(detail) > 42:
-                    detail = detail[:39] + "..."
-                tmp = NamedTemporaryFile(  # noqa: SIM115
-                    mode="w",
-                    encoding="utf-8",
-                    suffix=".md",
-                    prefix="autish-vorto-link-",
-                    delete=False,
+                short_uuid = str(linked.get("uuid") or "")[:8]
+                preview_path = _write_entry_preview_file(linked, all_entries)
+                linked_parts.append(
+                    f"[**{text}**](file://{preview_path}) (#{short_uuid})"
                 )
-                try:
-                    tmp.write(f"# {text}\n\n")
-                    if defs:
-                        tmp.write(f"{defs[0]}\n")
-                finally:
-                    tmp.close()
-                linked_parts.append(f"[{detail}](file://{tmp.name})")
         if lines and lines[-1] != "":
             lines.append("")
         _row("ligiloj:", " | ".join(linked_parts))
@@ -875,28 +1030,33 @@ def _confirm_esperante(prompt: str, *, default_yes: bool) -> bool:
 def aldoni(
     teksto: str = typer.Argument(..., help="Word, phrase, or sentence to add."),
     lingvo: str | None = typer.Option(
-        None, "-l", "--lingvo", help="2-letter language code (e.g. eo, en)."
+        None,
+        "-l",
+        "--lingvo",
+        help="2-letter language code (e.g. eo, en). Example: --lingvo eo",
     ),
     tipo: str | None = typer.Option(
         None,
         "-t",
         "--tipo",
         help="Subtype (comma-separated for multiple): substantivo-neŭtra/su, "
-        "substantivo-ina/sui, substantivo-vira/suv, verbo/ve, "
+        "substantivo-ina/si, substantivo-vira/sv, verbo/ve, "
         "verbo-transitiva/vt, verbo-nerekta-transitiva/vnt, verbo-netransitiva/vn, "
         "refleksiva-verbo/vr, "
         "adjektivo/aj, adverbo/av, "
         "parola/pa, skriba/sk, citaĵo/ci, ŝerco/ŝe, proverbo/pr, poemo/po, "
         "ekzemplo/ek. Example: --tipo 'aj,su' for adjective and noun.",
     ),
-    temo: str | None = typer.Option(None, "--temo", help="Theme (free text)."),
+    temo: str | None = typer.Option(
+        None, "--temo", help="Theme (free text). Example: --temo literaturo"
+    ),
     tono: str | None = typer.Option(
         None,
         "--tono",
-        help="Tonality: informala/in, formala/fo, ambaŭ/am.",
+        help="Tonality: informala/in, formala/fo, ambaŭ/am. Example: --tono in",
     ),
     nivelo: float | None = typer.Option(
-        None, "-n", "--nivelo", help="Lexical complexity 1–10."
+        None, "-n", "--nivelo", help="Lexical complexity 1–10. Example: --nivelo 4.5"
     ),
     difino: list[str] | None = typer.Option(
         None,
@@ -904,8 +1064,10 @@ def aldoni(
         "--difino",
         help=(
             "Definition. Repeat flag for multiple. "
-            'Syntax: "{definition}:*{example}*" to attach an example. '
-            'Alternative shell-safe syntax: "{definition}::{example}". '
+            'Preferred syntax uses braces for examples: "{definition}:{example}" '
+            '(e.g. -d "saluto:{mi uzas tion}"). '
+            'Legacy syntax still accepted: "{definition}:*{example}*" or '
+            '"{definition}::{example}". '
             "If text contains !, prefer single quotes or escape ! in shell."
         ),
     ),
@@ -913,13 +1075,19 @@ def aldoni(
         None,
         "-e",
         "--etikedo",
-        help="Custom tag KEY:VALUE. Repeat flag for multiple.",
+        help=(
+            "Custom tag KEY:VALUE. Repeat flag for multiple. "
+            "Example: -e fako:lingvistiko"
+        ),
     ),
     ligilo: list[str] | None = typer.Option(
-        None, "-L", "--ligilo", help="Linked entry UUID(s). Repeat flag for multiple."
+        None,
+        "-L",
+        "--ligilo",
+        help="Linked entry UUID(s). Repeat flag for multiple. Example: -L #952f2079",
     ),
     autoro: str | None = typer.Option(
-        None, "-A", "--autoro", help="Author of the text."
+        None, "-A", "--autoro", help='Author of the text. Example: --autoro "Voltaire"'
     ),
     verko: str | None = typer.Option(
         None,
@@ -927,11 +1095,29 @@ def aldoni(
         "--verko",
         help="Source work in 'Title:Year' format (e.g. 'Le Petit Prince:1943').",
     ),
+    kopii_uuid: bool = typer.Option(
+        False,
+        "-k",
+        "--kopii",
+        help="Kopii #xxxxxxxx de la aldonita/modifita eniro al tondujo.",
+    ),
+    semantika_kopii: bool = typer.Option(
+        False,
+        "-sk",
+        "--semantika-kopii",
+        help="Kopii [teksto](#xxxxxxxx) de la aldonita/modifita eniro al tondujo.",
+    ),
 ) -> None:
     """Add a new word, phrase, or sentence to the wordbank."""
+    if kopii_uuid and semantika_kopii:
+        typer.echo("Uzu nur unu el --kopii aŭ --semantika-kopii.", err=True)
+        raise typer.Exit(code=1)
     if nivelo is not None and not (1.0 <= nivelo <= 10.0):
         typer.echo("Error: nivelo must be between 1 and 10.", err=True)
         raise typer.Exit(code=1)
+
+    teksto = _normalize_multiline_text(teksto)
+    difino = [_normalize_multiline_text(d) for d in (difino or [])]
 
     # Apply French ligature normalization when language is French
     if (lingvo or "").lower() == "fr":
@@ -966,7 +1152,7 @@ def aldoni(
         if tipo is not None:
             existing_entry["tipo"] = _normalize_tipo(tipo)
         if temo is not None:
-            existing_entry["temo"] = temo
+            existing_entry["temo"] = _normalize_multiline_text(temo)
         if tono is not None:
             existing_entry["tono"] = _normalize_tono(tono)
         if nivelo is not None:
@@ -978,10 +1164,16 @@ def aldoni(
             existing_entry["etikedoj"] = _parse_etikedo(etikedo)
         if ligilo is not None:
             existing_entry["ligiloj"] = ligilo or []
+        existing_entry["ligiloj"] = _merge_links_with_inline_refs(
+            existing_entry.get("ligiloj") or [],
+            existing_entry.get("difinoj") or [],
+            existing_entry.get("uzoj") or [],
+            entries,
+        )
         if autoro is not None:
-            existing_entry["autoro"] = autoro
+            existing_entry["autoro"] = _normalize_multiline_text(autoro)
         if verko is not None:
-            existing_entry["verko"] = verko
+            existing_entry["verko"] = _normalize_multiline_text(verko)
         existing_entry["modifita_je"] = _now_iso()
         if not _show_diff_confirmation(
             "modifi (anstataŭigi)", existing_entry, old_entry
@@ -1003,6 +1195,8 @@ def aldoni(
         typer.echo(
             f"Modifis #{existing_entry['uuid'][:8]}  \"{existing_entry['teksto']}\""
         )
+        if kopii_uuid or semantika_kopii:
+            _copy_entry_reference(existing_entry, semantika=semantika_kopii)
         return
     # ── No duplicate — create a new entry ────────────────────────────────────
 
@@ -1013,18 +1207,24 @@ def aldoni(
         "lingvo": lingvo,
         "kategorio": _detect_kategorio(teksto),
         "tipo": _normalize_tipo(tipo),
-        "temo": temo,
+        "temo": _normalize_multiline_text(temo) if temo is not None else None,
         "tono": _normalize_tono(tono),
         "nivelo": nivelo,
         "difinoj": difinoj,
         "uzoj": uzoj,
         "etikedoj": _parse_etikedo(etikedo),
-        "ligiloj": ligilo or [],
-        "autoro": autoro,
-        "verko": verko,
+        "ligiloj": [],
+        "autoro": _normalize_multiline_text(autoro) if autoro is not None else None,
+        "verko": _normalize_multiline_text(verko) if verko is not None else None,
         "kreita_je": now,
         "modifita_je": now,
     }
+    entry["ligiloj"] = _merge_links_with_inline_refs(
+        ligilo or [],
+        entry.get("difinoj") or [],
+        entry.get("uzoj") or [],
+        entries,
+    )
 
     if not _show_diff_confirmation("aldoni", entry):
         typer.echo("Nuligita. (Cancelled.)")
@@ -1040,13 +1240,18 @@ def aldoni(
     _save_entries(entries)
     _push_undo({"op": "aldoni", "uuid": entry["uuid"]})
     typer.echo(f"Aldonis #{entry['uuid'][:8]}  \"{entry['teksto']}\"")
+    if kopii_uuid or semantika_kopii:
+        _copy_entry_reference(entry, semantika=semantika_kopii)
 
 
 @app.command("vidi")
 def vidi(
     uid: str | None = typer.Argument(
         None,
-        help="UUID (or prefix) of the entry to view. Omit to list latest 50.",
+        help=(
+            "UUID (or prefix) of the entry to view. Omit to list latest 50. "
+            "Example: vorto vidi #952f2079"
+        ),
     ),
     inverse: bool = typer.Option(
         False, "-i", "--inversa", help="List oldest 50 first (only without UUID)."
@@ -1054,9 +1259,30 @@ def vidi(
     montri_cxion: bool = typer.Option(
         False, "-a", "--cxio", help="Montri ĉiujn detalojn (inkluzive datojn)."
     ),
+    kopii_uuid: bool = typer.Option(
+        False,
+        "-k",
+        "--kopii",
+        help="Kopii #xxxxxxxx de la montrita eniro al tondujo.",
+    ),
+    semantika_kopii: bool = typer.Option(
+        False,
+        "-sk",
+        "--semantika-kopii",
+        help="Kopii [teksto](#xxxxxxxx) de la montrita eniro al tondujo.",
+    ),
 ) -> None:
     """View a wordbank entry, or list the latest 50 entries when called
     without argument."""
+    if kopii_uuid and semantika_kopii:
+        typer.echo("Uzu nur unu el --kopii aŭ --semantika-kopii.", err=True)
+        raise typer.Exit(code=1)
+    if uid is None and (kopii_uuid or semantika_kopii):
+        typer.echo(
+            "--kopii/--semantika-kopii postulas UUID aŭ tekstan referencon.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
     entries = _load_entries()
     if uid is None:
         # Show latest (or oldest) 50
@@ -1080,6 +1306,8 @@ def vidi(
                 f"Ekzakta kongruo ne trovita. Montras plej proksiman: "
                 f"\"{closest[0]['teksto']}\""
             )
+            if kopii_uuid or semantika_kopii:
+                _copy_entry_reference(closest[0], semantika=semantika_kopii)
             _display_entry(closest[0], entries, montri_cxion=montri_cxion)
             return
         # Multiple approximate matches — ask user to pick one
@@ -1104,43 +1332,102 @@ def vidi(
         except ValueError:
             typer.echo("Nevalida elekto.", err=True)
             raise typer.Exit(code=1) from None
+        if kopii_uuid or semantika_kopii:
+            _copy_entry_reference(closest[idx], semantika=semantika_kopii)
         _display_entry(closest[idx], entries, montri_cxion=montri_cxion)
         return
+    if kopii_uuid or semantika_kopii:
+        _copy_entry_reference(entry, semantika=semantika_kopii)
     _display_entry(entry, entries, montri_cxion=montri_cxion)
 
 
 @app.command("modifi")
 def modifi(
     ctx: typer.Context,
-    uid: str = typer.Argument(..., help="UUID (or prefix) of the entry to modify."),
-    teksto: str | None = typer.Option(None, "--teksto", help="New text."),
-    lingvo: str | None = typer.Option(
-        None, "-l", "--lingvo", help="New 2-letter language code."
+    uid: str = typer.Argument(
+        ...,
+        help=(
+            "UUID (or prefix) of the entry to modify. "
+            "Example: vorto modifi #952f2079"
+        ),
     ),
-    tipo: str | None = typer.Option(None, "-t", "--tipo", help="New subtype."),
-    temo: str | None = typer.Option(None, "--temo", help="New theme."),
-    tono: str | None = typer.Option(None, "--tono", help="New tonality."),
+    teksto: str | None = typer.Option(
+        None,
+        "--teksto",
+        help='New text. Example: --teksto "nova"',
+    ),
+    lingvo: str | None = typer.Option(
+        None,
+        "-l",
+        "--lingvo",
+        help="New 2-letter language code. Example: --lingvo eo",
+    ),
+    tipo: str | None = typer.Option(
+        None,
+        "-t",
+        "--tipo",
+        help="New subtype. Example: --tipo su",
+    ),
+    temo: str | None = typer.Option(
+        None,
+        "--temo",
+        help="New theme. Example: --temo literaturo",
+    ),
+    tono: str | None = typer.Option(
+        None,
+        "--tono",
+        help="New tonality. Example: --tono in",
+    ),
     nivelo: float | None = typer.Option(
-        None, "-n", "--nivelo", help="New lexical complexity 1–10."
+        None,
+        "-n",
+        "--nivelo",
+        help="New lexical complexity 1–10. Example: --nivelo 3.0",
     ),
     difino: list[str] | None = typer.Option(
-        None, "-d", "--difino", help="New definitions (replaces existing)."
+        None,
+        "-d",
+        "--difino",
+        help='New definitions (replaces existing). Example: -d "saluto:{mi uzas tion}"',
     ),
     etikedo: list[str] | None = typer.Option(
-        None, "-e", "--etikedo", help="New tags KEY:VALUE (replaces existing)."
+        None,
+        "-e",
+        "--etikedo",
+        help="New tags KEY:VALUE (replaces existing). Example: -e fako:lingvistiko",
     ),
     ligilo: list[str] | None = typer.Option(
-        None, "-L", "--ligilo", help="New linked UUIDs (replaces existing)."
+        None,
+        "-L",
+        "--ligilo",
+        help="New linked UUIDs (replaces existing). Example: -L #952f2079",
     ),
-    autoro: str | None = typer.Option(None, "-A", "--autoro", help="New author."),
+    autoro: str | None = typer.Option(
+        None, "-A", "--autoro", help='New author. Example: --autoro "Voltaire"'
+    ),
     verko: str | None = typer.Option(
         None,
         "-v",
         "--verko",
-        help="New source work in 'Title:Year' format.",
+        help="New source work in 'Title:Year' format. Example: --verko Candide:1759",
+    ),
+    kopii_uuid: bool = typer.Option(
+        False,
+        "-k",
+        "--kopii",
+        help="Kopii #xxxxxxxx de la modifita eniro al tondujo.",
+    ),
+    semantika_kopii: bool = typer.Option(
+        False,
+        "-sk",
+        "--semantika-kopii",
+        help="Kopii [teksto](#xxxxxxxx) de la modifita eniro al tondujo.",
     ),
 ) -> None:
     """Modify a wordbank entry. Pass at least one option to update."""
+    if kopii_uuid and semantika_kopii:
+        typer.echo("Uzu nur unu el --kopii aŭ --semantika-kopii.", err=True)
+        raise typer.Exit(code=1)
     opts = (
         teksto, lingvo, tipo, temo, tono, nivelo, difino, etikedo, ligilo,
         autoro, verko,
@@ -1195,6 +1482,12 @@ def modifi(
         entry["difinoj"] = [
             _apply_french_ligatures(d) for d in entry.get("difinoj") or []
         ]
+    entry["ligiloj"] = _merge_links_with_inline_refs(
+        entry.get("ligiloj") or [],
+        entry.get("difinoj") or [],
+        entry.get("uzoj") or [],
+        entries,
+    )
 
     if not _show_diff_confirmation("modifi", entry, old_entry):
         typer.echo("Nuligita. (Cancelled.)")
@@ -1211,49 +1504,158 @@ def modifi(
     _save_entries(entries)
     _push_undo({"op": "modifi", "old": old_entry})
     typer.echo(f"Modifis #{entry['uuid'][:8]}  \"{entry['teksto']}\"")
+    if kopii_uuid or semantika_kopii:
+        _copy_entry_reference(entry, semantika=semantika_kopii)
 
 
-@app.command("serci")
+@app.command(
+    "serci",
+    help=tr(
+        "Serĉi en la vortaro. Sen filtriloj → listigi enirojn ĝis --limo.",
+        "Search the wordbank. No filters → list all entries up to --limo.",
+        "Rechercher dans le lexique. Sans filtres → lister les entrées jusqu'à --limo.",
+    ),
+)
 def serci(
     teksto: str | None = typer.Argument(
-        None, help="Text to search for (default: show all)."
+        None,
+        help=tr(
+            "Teksto por serĉi (defaŭlte: montri ĉion).",
+            "Text to search for (default: show all).",
+            "Texte à rechercher (par défaut : tout afficher).",
+        ),
+    ),
+    ligilo_ref: str | None = typer.Option(
+        None,
+        "-L",
+        "--ligilo",
+        help=tr(
+            "Serĉi rilatajn enirojn el donita UUID/titolo per ligiloj.",
+            "Search related entries from a UUID/title via links.",
+            "Rechercher des entrées liées depuis un UUID/titre via des liens.",
+        ),
     ),
     lingvo: str | None = typer.Option(
-        None, "-l", "--lingvo", help="Filter by language code."
+        None,
+        "-l",
+        "--lingvo",
+        help=tr(
+            "Filtri laŭ lingvokodo.",
+            "Filter by language code.",
+            "Filtrer par code de langue.",
+        ),
     ),
-    tipo: str | None = typer.Option(None, "-t", "--tipo", help="Filter by subtype."),
-    temo: str | None = typer.Option(None, "--temo", help="Filter by theme."),
-    tono: str | None = typer.Option(None, "--tono", help="Filter by tonality."),
+    tipo: str | None = typer.Option(
+        None,
+        "-t",
+        "--tipo",
+        help=tr("Filtri laŭ subtipo.", "Filter by subtype.", "Filtrer par sous-type."),
+    ),
+    temo: str | None = typer.Option(
+        None,
+        "--temo",
+        help=tr("Filtri laŭ temo.", "Filter by theme.", "Filtrer par thème."),
+    ),
+    tono: str | None = typer.Option(
+        None,
+        "--tono",
+        help=tr(
+            "Filtri laŭ tonalo.",
+            "Filter by tonality.",
+            "Filtrer par tonalité.",
+        ),
+    ),
     autoro: str | None = typer.Option(
-        None, "-a", "--autoro", help="Filter by author."
+        None,
+        "-a",
+        "--autoro",
+        help=tr("Filtri laŭ aŭtoro.", "Filter by author.", "Filtrer par auteur."),
     ),
     verko: str | None = typer.Option(
-        None, "-v", "--verko", help="Filter by work (format: 'Title:Year')."
+        None,
+        "-v",
+        "--verko",
+        help=tr(
+            "Filtri laŭ verko (formato: 'Titolo:Jaro').",
+            "Filter by work (format: 'Title:Year').",
+            "Filtrer par œuvre (format : 'Titre:Année').",
+        ),
     ),
     nivelo_min: float | None = typer.Option(
-        None, "--nivelo-min", help="Minimum lexical level."
+        None,
+        "--nivelo-min",
+        help=tr(
+            "Minimuma leksika nivelo.",
+            "Minimum lexical level.",
+            "Niveau lexical minimum.",
+        ),
     ),
     nivelo_max: float | None = typer.Option(
-        None, "--nivelo-max", help="Maximum lexical level."
+        None,
+        "--nivelo-max",
+        help=tr(
+            "Maksimuma leksika nivelo.",
+            "Maximum lexical level.",
+            "Niveau lexical maximum.",
+        ),
     ),
     dato_de: str | None = typer.Option(
-        None, "--dato-de", help="Start date YYYY-MM-DD."
+        None,
+        "--dato-de",
+        help=tr(
+            "Komenca dato YYYY-MM-DD.",
+            "Start date YYYY-MM-DD.",
+            "Date de début AAAA-MM-JJ.",
+        ),
     ),
     dato_gis: str | None = typer.Option(
-        None, "--dato-gis", help="End date YYYY-MM-DD."
+        None,
+        "--dato-gis",
+        help=tr(
+            "Fina dato YYYY-MM-DD.",
+            "End date YYYY-MM-DD.",
+            "Date de fin AAAA-MM-JJ.",
+        ),
     ),
     regex: bool = typer.Option(
-        False, "-r", "--regex", help="Interpret teksto as a POSIX regex."
+        False,
+        "-r",
+        "--regex",
+        help=tr(
+            "Trakti tekston kiel POSIX-regulesprimon.",
+            "Interpret teksto as a POSIX regex.",
+            "Interpréter le texte comme regex POSIX.",
+        ),
     ),
     preciza: bool = typer.Option(
-        False, "-p", "--preciza", help="Disable fuzzy fallback matching."
+        False,
+        "-p",
+        "--preciza",
+        help=tr(
+            "Malŝalti malklaran rezervan kongruigon.",
+            "Disable fuzzy fallback matching.",
+            "Désactiver la correspondance approximative de secours.",
+        ),
     ),
-    limo: int = typer.Option(50, "--limo", help="Max number of results (default 50)."),
+    limo: int = typer.Option(
+        50,
+        "--limo",
+        help=tr(
+            "Maksimuma nombro da rezultoj (defaŭlte 50).",
+            "Max number of results (default 50).",
+            "Nombre maximum de résultats (50 par défaut).",
+        ),
+    ),
     ordo: str = typer.Option(
         "graveco",
         "-o",
         "--ordo",
-        help="Order: graveco/g (relevance), dato/d (newest), inversa-dato/id (oldest).",
+        help=tr(
+            "Ordo: graveco/g, dato/d (plej novaj), inversa-dato/id (plej malnovaj).",
+            "Order: graveco/g (relevance), dato/d (newest), inversa-dato/id (oldest).",
+            "Ordre : graveco/g (pertinence), dato/d (plus récent), "
+            "inversa-dato/id (plus ancien).",
+        ),
     ),
     nur_uuid: bool = typer.Option(
         False,
@@ -1262,10 +1664,34 @@ def serci(
         help="Eligi nur UUID-liston kiel JSON (8-signaj prefiksoj).",
     ),
 ) -> None:
-    """Search the wordbank. No filters → list all entries up to --limo."""
+    """Serĉi en la vortaro."""
     entries = _load_entries()
     results = list(entries)
     fuzzy_used = False
+
+    if ligilo_ref is not None:
+        root = _find_entry(ligilo_ref, entries)
+        if root is None:
+            typer.echo(f"Eniro ne trovita por --ligilo: {ligilo_ref!r}", err=True)
+            raise typer.Exit(code=1)
+        # Keep existing --limo default for regular search, but default to 1 hop here.
+        depth = 1 if limo == 50 else abs(limo)
+        results = _ligilo_hops_of(str(root.get("uuid") or ""), entries, max_depth=depth)
+        if norm_ordo := ordo.lower():
+            if norm_ordo in ("dato", "d"):
+                results.sort(key=lambda e: e.get("kreita_je") or "", reverse=True)
+            elif norm_ordo in ("inversa-dato", "id"):
+                results.sort(key=lambda e: e.get("kreita_je") or "")
+        if nur_uuid:
+            uuid_list = [str(e["uuid"])[:8] for e in results]
+            typer.echo(json.dumps(uuid_list, ensure_ascii=False))
+            return
+        typer.echo(
+            f"{len(results)} ligita(j) rezulto(j) trovita(j) "
+            f"por #{str(root.get('uuid') or '')[:8]} (limo={depth})."
+        )
+        _display_results(results)
+        return
 
     # Text filter
     if teksto:
@@ -1344,6 +1770,9 @@ def serci(
 
     if fuzzy_used:
         typer.echo("Neniu preciza rezulto; montrante similajn kongruojn.")
+    if len(results) == 1:
+        _display_entry(results[0], entries, montri_cxion=False)
+        return
     typer.echo(f"{len(results)} rezulto(j) trovita(j).")
     _display_results(results)
 
@@ -1599,17 +2028,22 @@ def _entry_to_lines(entry: dict) -> list[str]:
     _row("tono:", entry.get("tono") or "")
     nivelo = entry.get("nivelo")
     _row("nivelo:", f"{nivelo:.1f}" if nivelo is not None else "")
-    _row("autoro:", entry.get("autoro") or "")
+    _row("aŭtoro:", entry.get("autoro") or "")
     _row("verko:", entry.get("verko") or "")
 
     difinoj: list[str] = entry.get("difinoj") or []
     uzoj: list[str] = entry.get("uzoj") or []
     if difinoj:
         lines.append(f"  {'difinoj:':<14}")
-        for i, d in enumerate(difinoj, 1):
-            lines.append(f"    {i}. {d}")
-            if i - 1 < len(uzoj) and uzoj[i - 1]:
-                lines.append(f"       /{uzoj[i - 1]}/")
+        if len(difinoj) == 1:
+            lines.append(f"    {difinoj[0]}")
+            if uzoj and uzoj[0]:
+                lines.append(f"       /{uzoj[0]}/")
+        else:
+            for i, d in enumerate(difinoj, 1):
+                lines.append(f"    {i}. {d}")
+                if i - 1 < len(uzoj) and uzoj[i - 1]:
+                    lines.append(f"       /{uzoj[i - 1]}/")
 
     etikedoj: dict[str, str] = entry.get("etikedoj") or {}
     if etikedoj:

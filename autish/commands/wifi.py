@@ -18,7 +18,7 @@ import typer
 from autish.utils import echo_padded
 
 app = typer.Typer(
-    help="Wi-Fi management commands.",
+    help="Komandoj por administri Wi-Fi.",
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )

@@ -5,11 +5,13 @@ Usage:
     encik aldoni <file.enc>     — add a new knowledge node from an .enc file
     encik vidi <titolo|UUID>    — view an existing node
     encik modifi <title|UUID>   — edit an existing node in $EDITOR as a temp .enc file
+    encik agordi                — manage display settings in ~/.config/autish/encik.toml
     encik serci <demando>       — search nodes (title by default)
+    encik semantika-serci "<kondiĉoj>" — search by typed semantic value conditions
       -t/--teksto               — search full entry text instead of title only
       -s/--subklasoj <term>     — recursive subclass search
       -S/--superklasoj <term>   — recursive superclass search
-      -p/--paralela             — sister-class search (same parent)
+      -P/--paralela             — sister-class search (same parent)
       -L/--limo <int>           — depth limit for -s/-S (default 5),
                                   max results for -p (default 100)
 
@@ -18,6 +20,7 @@ Data is stored in an SQLite database at ~/.local/share/autish/encik.db.
 
 from __future__ import annotations
 
+import csv
 import json
 import os
 import re
@@ -25,6 +28,9 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid as _uuid_mod
 import webbrowser
 from collections import deque
@@ -57,7 +63,7 @@ except ImportError:
 
 app = typer.Typer(
     name="encik",
-    help="Encik — personal knowledge management microapp.",
+    help="Encik — persona sci-mastruma mikroapo.",
     no_args_is_help=False,
     invoke_without_command=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
@@ -71,6 +77,9 @@ console = Console()
 
 _DATA_DIR: Path = Path.home() / ".local" / "share" / "autish"
 _DB_FILE: Path = _DATA_DIR / "encik.db"
+_CONFIG_DIR: Path = Path.home() / ".config" / "autish"
+_ENCIK_CONFIG_FILE: Path = _CONFIG_DIR / "encik.toml"
+_SEMANTIKA_CONFIG_DIR: Path = _CONFIG_DIR / "semantika"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # DB schema
@@ -89,6 +98,7 @@ CREATE TABLE IF NOT EXISTS encik (
     fonto       TEXT NOT NULL DEFAULT '[]',
     citajo      TEXT NOT NULL DEFAULT '[]',
     datumo      TEXT NOT NULL DEFAULT '{}',
+    semantika   TEXT NOT NULL DEFAULT '[]',
     kreita_je   TEXT NOT NULL,
     modifita_je TEXT NOT NULL
 );
@@ -105,40 +115,437 @@ _ISO_690_TIPOJ: dict[str, str] = {
     "pre": "prelegoj",
 }
 
-_SEMANTIKAJ_LIGILOJ: dict[str, str] = {
-    "rdf:type": "rdf:type",
-    "type": "rdf:type",
-    "estas tipo de": "rdf:type",
-    "rdfs:subclassof": "rdfs:subClassOf",
-    "subklaso de": "rdfs:subClassOf",
-    "owl:disjointwith": "owl:disjointWith",
-    "malkongrua kun": "owl:disjointWith",
-    "owl:inverseof": "owl:inverseOf",
-    "inversa de": "owl:inverseOf",
-    "rdfs:superclassof": "rdfs:superClassOf",
-    "rdf:hasinstance": "rdf:hasInstance",
-}
-_AUTO_REVERSE_DATUMO_KEY = "__autish_auto_reverse_ligilo__"
-
-_ALLOWED_ENC_PLAIN_KEYS: frozenset[str] = frozenset({
-    "terminologio",
-    "difinio",
-    "difino",
-    "titolo",
-    "superklaso",
-    "ligilo",
-    "fonto",
-    "citajo",
-    "datumo",
-    "source",
-})
-_ALLOWED_ENC_PLAIN_KEYS_SORTED: tuple[str, ...] = tuple(
-    sorted(_ALLOWED_ENC_PLAIN_KEYS)
+_SEMANTIKA_LIGILO_DEFINOJ: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    (
+        "rdf:type",
+        "estas tipo de (klasigo; inkl. aliaso wdt:P31)",
+        (
+            "rdf:type",
+            "type",
+            "estas tipo de",
+            "wdt:p31",
+            "p31",
+            "instance of",
+            "instanco de",
+        ),
+    ),
+    (
+        "rdf:hasInstance",
+        "havas instancon (inversa de rdf:type)",
+        ("rdf:hasinstance",),
+    ),
+    (
+        "rdfs:subClassOf",
+        "subklaso de (kanona direkto; inkl. aliaso wdt:P279)",
+        ("rdfs:subclassof", "subklaso de", "wdt:p279", "p279", "subclass of"),
+    ),
+    (
+        "rdfs:hasSubClass",
+        "havas subklason (inversa de rdfs:subClassOf)",
+        ("rdfs:superclassof", "superklaso de"),
+    ),
+    (
+        "owl:disjointWith",
+        "malkongrua kun",
+        ("owl:disjointwith", "malkongrua kun"),
+    ),
+    ("owl:inverseOf", "inversa de", ("owl:inverseof", "inversa de")),
+    ("wdt:P50", "aŭtoro / kreinto", ("p50", "author", "creator", "aŭtoro", "kreinto")),
+    ("wdt:P361", "parto de", ("p361", "part of", "parto de")),
+    ("wdt:P527", "havas parton", ("p527", "has part", "havas parton")),
+    ("wdt:P276", "loko / situas en", ("p276", "located in", "location", "loko")),
+    ("wdt:P463", "membro de", ("p463", "member of", "membro de")),
+    (
+        "wdt:P106",
+        "okupo / profesio",
+        ("p106", "occupation", "profession", "okupo", "profesio"),
+    ),
+    ("wdt:P26", "geedzo / partnero", ("p26", "spouse", "partner", "geedzo")),
+    (
+        "wdt:P123",
+        "eldonisto / publikigita de",
+        ("p123", "publisher", "published by", "eldonisto"),
+    ),
+    ("wdt:P69", "edukita ĉe", ("p69", "educated at", "edukita ĉe")),
+    (
+        "wdt:P569",
+        "dato de naskiĝo",
+        ("p569", "date of birth", "naskigxdato", "naskiĝo"),
+    ),
+    ("wdt:P570", "dato de morto", ("p570", "date of death", "morto")),
+    ("wdt:P17", "lando", ("p17", "country", "lando")),
+    ("wdt:P131", "situas en administra unuo", ("p131", "located in admin unit")),
+    ("wdt:P571", "fondita / komenco", ("p571", "inception", "fondita")),
+    (
+        "wdt:P5191",
+        "devenas de leksiko (etimologia/abstrakta rilato)",
+        ("p5191", "derived from lexeme", "etimologio", "devenas de"),
+    ),
+    (
+        "wdt:P2046",
+        "areo (geografia kvanto)",
+        ("p2046", "area", "surface area", "areo"),
+    ),
+    (
+        "wdt:P1082",
+        "loĝantaro / populacio",
+        ("p1082", "population", "loĝantaro", "populacio"),
+    ),
 )
+
+
+def _build_semantika_ligilo_map() -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for canonical, _, aliases in _SEMANTIKA_LIGILO_DEFINOJ:
+        mapping[canonical.lower()] = canonical
+        for alias in aliases:
+            mapping[alias.lower()] = canonical
+    return mapping
+
+
+_SEMANTIKAJ_LIGILOJ: dict[str, str] = _build_semantika_ligilo_map()
+_KANONAJ_SEMANTIKAJ_LIGILOJ: set[str] = {
+    canonical for canonical, _, _ in _SEMANTIKA_LIGILO_DEFINOJ
+}
+_SEMANTIKA_DEFINOJ_MAP: dict[str, tuple[str, tuple[str, ...]]] = {
+    canonical: (description, aliases)
+    for canonical, description, aliases in _SEMANTIKA_LIGILO_DEFINOJ
+}
+_SEMANTIKA_KATEGORIOJ: dict[str, tuple[str, ...]] = {
+    "generala": (
+        "rdf:type",
+        "rdf:hasInstance",
+        "rdfs:subClassOf",
+        "rdfs:hasSubClass",
+        "owl:disjointWith",
+        "owl:inverseOf",
+        "wdt:P361",
+        "wdt:P527",
+    ),
+    "persono": (
+        "rdf:type",
+        "rdfs:subClassOf",
+        "wdt:P50",
+        "wdt:P106",
+        "wdt:P69",
+        "wdt:P26",
+        "wdt:P463",
+        "wdt:P569",
+        "wdt:P570",
+    ),
+    "geografio": (
+        "rdf:type",
+        "rdfs:subClassOf",
+        "wdt:P17",
+        "wdt:P131",
+        "wdt:P276",
+        "wdt:P361",
+        "wdt:P527",
+        "wdt:P2046",
+        "wdt:P1082",
+    ),
+    "abstrakta": (
+        "rdf:type",
+        "rdfs:subClassOf",
+        "owl:disjointWith",
+        "owl:inverseOf",
+        "wdt:P5191",
+        "wdt:P571",
+        "wdt:P123",
+    ),
+}
+_SEMANTIKA_HELPO_TEKSTO = (
+    "Kategoriigita helpo pri semantikaj ligiloj por Encik.\n"
+    "Grupoj estas CSV-dosieroj en ~/.config/autish/semantika/*.csv.\n"
+    "CSV-kolumnoj: LIGILO, PRISKRIBO, ALIAZOJ.\n"
+    "\n"
+    "Subkomandoj:\n"
+    "- encik semantika <grupo>\n"
+    "- encik semantika serci <demando>\n"
+    "- encik semantika aldoni <ID> <grupo>\n"
+    "\n"
+    "Uzo:\n"
+    "- `encik modifi <uuid> --ligilo <uuid>:<semantiko>`\n"
+    "- `encik serci --semantiko <semantiko> [--al <nodo>]`\n"
+    "\n"
+    "Defaŭlte prioritatu rdf/rdfs-ligilojn; poste kategori-rilatajn "
+    "Wikidata-P-ligilojn."
+)
+
+
+def _semantika_help_hint() -> str:
+    return (
+        "Vidu `encik semantika -h` por grupoj/subkomandoj, aŭ "
+        "`encik semantika serci <demando>` por trovi semantikan arkon."
+    )
+
+
+_AUTO_REVERSE_DATUMO_KEY = "__autish_auto_reverse_ligilo__"
+_MATH_TOKEN_PREFIX = "AUTISHMATHSEGMENT"
+_SEMANTIKA_VALORO_TIPOJ: frozenset[str] = frozenset({"int", "bool", "float", "str"})
+_SEMANTIKA_BOOL_TRUE: frozenset[str] = frozenset({"true", "vero", "jes", "j", "1"})
+_SEMANTIKA_BOOL_FALSE: frozenset[str] = frozenset(
+    {"false", "malvero", "ne", "n", "0"}
+)
+_SEMANTIKA_RANGE_RE = re.compile(r"^\(\s*([^,]+?)\s*,\s*([^)]+?)\s*\)$")
+
+_ALLOWED_ENC_PLAIN_KEYS: frozenset[str] = frozenset(
+    {
+        "terminologio",
+        "difinio",
+        "difino",
+        "titolo",
+        "superklaso",
+        "ligilo",
+        "fonto",
+        "citajo",
+        "datumo",
+        "semantika",
+        "source",
+    }
+)
+_ALLOWED_ENC_PLAIN_KEYS_SORTED: tuple[str, ...] = tuple(sorted(_ALLOWED_ENC_PLAIN_KEYS))
+_ENCIK_MONTRADO_DEF: dict[str, object] = {
+    "html": False,
+    "scienca_nombro": 4,
+    "spaco": 0,
+}
+_SEMANTIKA_CSV_HEADERS: tuple[str, str, str] = ("LIGILO", "PRISKRIBO", "ALIAZOJ")
+_SEMANTIKA_RESERVED_SUBCOMMANDS: frozenset[str] = frozenset({"serci", "aldoni"})
+_SEMANTIKA_CONFIG_CACHE: dict[str, object] = {"signature": None, "groups": None}
+_REGISTERED_SEMANTIKA_GROUP_COMMANDS: set[str] = set()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # DB helpers
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+def _default_semantika_group_rows() -> dict[str, list[tuple[str, str, str]]]:
+    rows_by_group: dict[str, list[tuple[str, str, str]]] = {}
+    for group_name, canonicals in _SEMANTIKA_KATEGORIOJ.items():
+        rows: list[tuple[str, str, str]] = []
+        for canonical in canonicals:
+            description, aliases = _SEMANTIKA_DEFINOJ_MAP.get(canonical, ("", ()))
+            alias_text = ",".join(dict.fromkeys(aliases))
+            rows.append((canonical, description, alias_text))
+        rows_by_group[group_name] = rows
+    return rows_by_group
+
+
+def _semantika_group_file(group_name: str) -> Path:
+    return _SEMANTIKA_CONFIG_DIR / f"{group_name}.csv"
+
+
+def _normalize_semantika_group_name(raw: str) -> str:
+    normalized = str(raw or "").strip().lower().replace(" ", "-")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", normalized):
+        raise ValueError(
+            "Nevalida grupo: uzu nur minusklojn, ciferojn, '-' aŭ '_'."
+        )
+    return normalized
+
+
+def _write_semantika_group_rows(
+    group_name: str,
+    rows: list[dict[str, object]],
+) -> None:
+    _SEMANTIKA_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    target = _semantika_group_file(group_name)
+    with target.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(_SEMANTIKA_CSV_HEADERS)
+        for row in rows:
+            ligilo = str(row.get("ligilo") or "").strip()
+            priskribo = str(row.get("priskribo") or "").strip()
+            aliases = row.get("aliasoj")
+            if isinstance(aliases, list):
+                alias_text = ",".join(
+                    str(alias).strip() for alias in aliases if str(alias).strip()
+                )
+            else:
+                alias_text = str(aliases or "").strip()
+            if ligilo:
+                writer.writerow([ligilo, priskribo, alias_text])
+
+
+def _parse_alias_list(raw: str) -> list[str]:
+    return [token.strip() for token in str(raw or "").split(",") if token.strip()]
+
+
+def _read_semantika_group_rows(path: Path) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames:
+            return rows
+        field_lookup = {name.strip().upper(): name for name in reader.fieldnames}
+        ligilo_col = field_lookup.get("LIGILO")
+        priskribo_col = field_lookup.get("PRISKRIBO")
+        alias_col = field_lookup.get("ALIAZOJ")
+        if not ligilo_col:
+            return rows
+        for raw_row in reader:
+            ligilo_raw = str(raw_row.get(ligilo_col) or "").strip()
+            if not ligilo_raw:
+                continue
+            canonical = _SEMANTIKAJ_LIGILOJ.get(ligilo_raw.lower(), ligilo_raw)
+            priskribo = (
+                str(raw_row.get(priskribo_col) or "").strip() if priskribo_col else ""
+            )
+            aliases = _parse_alias_list(raw_row.get(alias_col) if alias_col else "")
+            rows.append(
+                {
+                    "ligilo": canonical,
+                    "priskribo": priskribo,
+                    "aliasoj": aliases,
+                }
+            )
+    return rows
+
+
+def _semantika_config_signature() -> tuple[tuple[str, int, int], ...]:
+    if not _SEMANTIKA_CONFIG_DIR.exists():
+        return ()
+    signature: list[tuple[str, int, int]] = []
+    for path in sorted(_SEMANTIKA_CONFIG_DIR.glob("*.csv")):
+        stat = path.stat()
+        signature.append((path.name, stat.st_mtime_ns, stat.st_size))
+    return tuple(signature)
+
+
+def _ensure_semantika_group_files() -> None:
+    _SEMANTIKA_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    default_rows = _default_semantika_group_rows()
+    for group_name, canonical_rows in default_rows.items():
+        path = _semantika_group_file(group_name)
+        if path.exists():
+            continue
+        rows = [
+            {
+                "ligilo": ligilo,
+                "priskribo": priskribo,
+                "aliasoj": _parse_alias_list(aliases),
+            }
+            for ligilo, priskribo, aliases in canonical_rows
+        ]
+        _write_semantika_group_rows(group_name, rows)
+
+
+def _invalidate_semantika_config_cache() -> None:
+    _SEMANTIKA_CONFIG_CACHE["signature"] = None
+    _SEMANTIKA_CONFIG_CACHE["groups"] = None
+
+
+def _load_semantika_groups() -> dict[str, list[dict[str, object]]]:
+    _ensure_semantika_group_files()
+    signature = _semantika_config_signature()
+    cached_signature = _SEMANTIKA_CONFIG_CACHE.get("signature")
+    cached_groups = _SEMANTIKA_CONFIG_CACHE.get("groups")
+    if signature == cached_signature and isinstance(cached_groups, dict):
+        return {
+            name: [dict(row) for row in rows]
+            for name, rows in cached_groups.items()
+        }
+    groups: dict[str, list[dict[str, object]]] = {}
+    for path in sorted(_SEMANTIKA_CONFIG_DIR.glob("*.csv")):
+        group_name = path.stem.strip().lower()
+        if not group_name:
+            continue
+        rows = _read_semantika_group_rows(path)
+        if rows:
+            groups[group_name] = rows
+    _SEMANTIKA_CONFIG_CACHE["signature"] = signature
+    _SEMANTIKA_CONFIG_CACHE["groups"] = groups
+    return {name: [dict(row) for row in rows] for name, rows in groups.items()}
+
+
+def _runtime_semantika_alias_map() -> dict[str, str]:
+    mapping = dict(_SEMANTIKAJ_LIGILOJ)
+    for rows in _load_semantika_groups().values():
+        for row in rows:
+            ligilo = str(row.get("ligilo") or "").strip()
+            if not ligilo:
+                continue
+            canonical = _SEMANTIKAJ_LIGILOJ.get(ligilo.lower(), ligilo)
+            mapping[canonical.lower()] = canonical
+            for alias in row.get("aliasoj") or []:
+                alias_text = str(alias).strip()
+                if alias_text:
+                    mapping[alias_text.lower()] = canonical
+    return mapping
+
+
+def _runtime_known_semantika_ligiloj() -> set[str]:
+    return set(_runtime_semantika_alias_map().values())
+
+
+def _load_encik_montrado_settings() -> dict[str, object]:
+    settings: dict[str, object] = dict(_ENCIK_MONTRADO_DEF)
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if not _ENCIK_CONFIG_FILE.exists():
+        _save_encik_montrado_settings(settings)
+        return settings
+    try:
+        data = tomllib.loads(_ENCIK_CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return settings
+    montrado = data.get("montrado")
+    if not isinstance(montrado, dict):
+        return settings
+    if "html" in montrado:
+        raw_html = montrado.get("html")
+        if isinstance(raw_html, bool):
+            settings["html"] = raw_html
+        else:
+            try:
+                settings["html"] = _parse_semantika_bool(
+                    str(raw_html), field="montrado.html"
+                )
+            except ValueError:
+                pass
+    if "scienca_nombro" in montrado:
+        try:
+            settings["scienca_nombro"] = max(0, int(montrado.get("scienca_nombro")))
+        except (TypeError, ValueError):
+            pass
+    if "spaco" in montrado:
+        try:
+            settings["spaco"] = max(0, int(montrado.get("spaco")))
+        except (TypeError, ValueError):
+            pass
+    return settings
+
+
+def _save_encik_montrado_settings(settings: dict[str, object]) -> None:
+    _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    html_value = bool(settings.get("html"))
+    scienca_nombro = max(0, int(settings.get("scienca_nombro", 4)))
+    spaco = max(0, int(settings.get("spaco", 0)))
+    text = (
+        "[montrado]\n"
+        f"html = {'true' if html_value else 'false'}\n"
+        f"scienca_nombro = {scienca_nombro}\n"
+        f"spaco = {spaco}\n"
+    )
+    _ENCIK_CONFIG_FILE.write_text(text, encoding="utf-8")
+
+
+def _format_number_for_display(
+    value: float,
+    *,
+    integer_like: bool,
+) -> str:
+    settings = _load_encik_montrado_settings()
+    n = max(0, int(settings.get("scienca_nombro", 4)))
+    if value == 0:
+        return "0"
+    threshold = 10**n
+    abs_value = abs(value)
+    if abs_value >= threshold or abs_value <= (1 / threshold):
+        return f"{value:.6e}"
+    if integer_like:
+        return str(int(value))
+    return f"{value:g}"
 
 
 def _init_db() -> None:
@@ -188,6 +595,10 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE encik ADD COLUMN citajo TEXT NOT NULL DEFAULT '[]'")
     if "datumo" not in cols:
         conn.execute("ALTER TABLE encik ADD COLUMN datumo TEXT NOT NULL DEFAULT '{}'")
+    if "semantika" not in cols:
+        conn.execute(
+            "ALTER TABLE encik ADD COLUMN semantika TEXT NOT NULL DEFAULT '[]'"
+        )
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
@@ -195,7 +606,7 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     for field in ("superklaso", "ligilo", "fonto", "citajo", "source"):
         if isinstance(d.get(field), str):
             d[field] = json.loads(d[field])
-    for field in ("terminologio", "difinoj", "datumo"):
+    for field in ("terminologio", "difinoj", "datumo", "semantika"):
         if isinstance(d.get(field), str):
             d[field] = json.loads(d[field])
     if "fonto" not in d and "source" in d:
@@ -212,6 +623,8 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
         d["citajo"] = []
     if "datumo" not in d:
         d["datumo"] = {}
+    if "semantika" not in d:
+        d["semantika"] = []
     if not d.get("titolo"):
         d["titolo"] = next(iter(d.get("terminologio", {}).values()), "")
     if not d.get("difinio") and d.get("difino"):
@@ -233,13 +646,23 @@ def _load_all() -> list[dict]:
 
 
 def _find_by_uuid(uid: str) -> dict | None:
+    normalized = str(uid or "").strip().lstrip("#")
+    if not normalized:
+        return None
     conn = _get_conn()
     try:
         row = conn.execute(
-            "SELECT * FROM encik WHERE uuid = ? OR uuid LIKE ?",
-            (uid, f"{uid}%"),
+            "SELECT * FROM encik WHERE uuid = ?", (normalized,)
         ).fetchone()
-        return _row_to_dict(row) if row else None
+        if row:
+            return _row_to_dict(row)
+        rows = conn.execute(
+            "SELECT * FROM encik WHERE uuid LIKE ? ORDER BY uuid COLLATE NOCASE",
+            (f"{normalized}%",),
+        ).fetchall()
+        if len(rows) == 1:
+            return _row_to_dict(rows[0])
+        return None
     finally:
         conn.close()
 
@@ -324,9 +747,7 @@ def _search_entries(
         level_key = -level_val if prefer_high_level else level_val
         time_val = str(item.get("_time") or "")
         time_key = (
-            "".join(chr(255 - ord(c)) for c in time_val)
-            if prefer_newest
-            else time_val
+            "".join(chr(255 - ord(c)) for c in time_val) if prefer_newest else time_val
         )
         return (match_key, level_key, time_key)
 
@@ -340,15 +761,130 @@ def _fuzzy_title_matches(partial: str, max_results: int = 5) -> list[dict]:
     )
 
 
+def _compile_semantika_text_pattern(pattern: str, *, field: str) -> re.Pattern[str]:
+    if "\n" in pattern:
+        raise ValueError(f"Nevalida {field}: tekst-kondiĉo ne povas enhavi novliniojn.")
+    regex_src = "^" + re.escape(pattern).replace(r"\*", r"[^\n]*") + "$"
+    return re.compile(regex_src, re.IGNORECASE)
+
+
+def _parse_semantika_serci_conditions(raw_query: str) -> list[dict[str, object]]:
+    clauses = [part.strip() for part in str(raw_query or "").split(";") if part.strip()]
+    if not clauses:
+        raise ValueError(
+            "Nevalida semantika-serci: mankas kondiĉoj. "
+            "Ekzemplo: `wdt:P5191 *philosophia*; wdt:P1082 (0,1000)`."
+        )
+
+    conditions: list[dict[str, object]] = []
+    for idx, clause in enumerate(clauses, start=1):
+        arc_token, sep, expression = clause.partition(" ")
+        if not sep or not expression.strip():
+            raise ValueError(
+                f"Nevalida semantika-serci kondiĉo {idx}: "
+                "uzu `ARKO valoro` (ekz. `wdt:P31 true`)."
+            )
+        arko = _normalize_semantika_ligilo(arc_token.strip())
+        if not arko:
+            raise ValueError(
+                f"Nevalida semantika-serci kondiĉo {idx}: arko mankas."
+            )
+        expression = expression.strip()
+        range_match = _SEMANTIKA_RANGE_RE.fullmatch(expression)
+        field_name = f"semantika-serci kondiĉo {idx}"
+        if range_match:
+            lower = _parse_semantika_float(range_match.group(1), field=field_name)
+            upper = _parse_semantika_float(range_match.group(2), field=field_name)
+            if lower > upper:
+                raise ValueError(
+                    "Nevalida "
+                    f"{field_name}: minimumo ne povas esti pli granda ol maksimumo."
+                )
+            conditions.append(
+                {"kind": "range", "arko": arko, "minimumo": lower, "maksimumo": upper}
+            )
+            continue
+        lowered = expression.lower()
+        if lowered in _SEMANTIKA_BOOL_TRUE or lowered in _SEMANTIKA_BOOL_FALSE:
+            conditions.append(
+                {
+                    "kind": "bool",
+                    "arko": arko,
+                    "valoro": _parse_semantika_bool(expression, field=field_name),
+                }
+            )
+            continue
+        text_pattern = _parse_semantika_str(expression)
+        conditions.append(
+            {
+                "kind": "text",
+                "arko": arko,
+                "regex": _compile_semantika_text_pattern(
+                    text_pattern, field=field_name
+                ),
+            }
+        )
+    return conditions
+
+
+def _matches_semantika_condition(
+    semantikaj_valoroj: list[dict[str, object]],
+    condition: dict[str, object],
+) -> bool:
+    kind = str(condition.get("kind") or "")
+    arko = str(condition.get("arko") or "")
+    if not kind or not arko:
+        return False
+    for item in semantikaj_valoroj:
+        if str(item.get("arko") or "") != arko:
+            continue
+        tipo = str(item.get("tipo") or "")
+        valoro = item.get("valoro")
+        if kind == "text":
+            if tipo != "str":
+                continue
+            regex = condition.get("regex")
+            if isinstance(regex, re.Pattern) and regex.fullmatch(str(valoro or "")):
+                return True
+        elif kind == "bool":
+            if tipo != "bool":
+                continue
+            expected = bool(condition.get("valoro"))
+            if bool(valoro) == expected:
+                return True
+        elif kind == "range":
+            if tipo not in {"int", "float"}:
+                continue
+            current = _parse_semantika_float(valoro, field="semantika-serci")
+            minimumo = float(condition.get("minimumo") or 0.0)
+            maksimumo = float(condition.get("maksimumo") or 0.0)
+            if minimumo <= current <= maksimumo:
+                return True
+    return False
+
+
+def _entry_matches_semantika_conditions(
+    entry: dict,
+    conditions: list[dict[str, object]],
+) -> bool:
+    semantikaj_valoroj = _normalize_semantika_valoroj(entry.get("semantika"))
+    if not semantikaj_valoroj:
+        return False
+    return all(
+        _matches_semantika_condition(semantikaj_valoroj, condition)
+        for condition in conditions
+    )
+
+
 def _insert_entry(entry: dict) -> None:
     conn = _get_conn()
     try:
         conn.execute(
             "INSERT INTO encik"
             " (uuid, titolo, difinio, terminologio, difinoj, enhavo,"
-            " superklaso, ligilo, fonto, citajo, datumo,"
+            " superklaso, ligilo, fonto, citajo, datumo, semantika,"
             " kreita_je, modifita_je)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 entry["uuid"],
                 entry["titolo"],
@@ -361,6 +897,7 @@ def _insert_entry(entry: dict) -> None:
                 json.dumps(entry.get("fonto", []), ensure_ascii=False),
                 json.dumps(entry.get("citajo", []), ensure_ascii=False),
                 json.dumps(entry.get("datumo", {}), ensure_ascii=False),
+                json.dumps(entry.get("semantika", []), ensure_ascii=False),
                 entry["kreita_je"],
                 entry["modifita_je"],
             ),
@@ -376,7 +913,8 @@ def _update_entry(entry: dict) -> None:
         conn.execute(
             """UPDATE encik SET
                titolo=?, difinio=?, terminologio=?, difinoj=?, enhavo=?,
-               superklaso=?, ligilo=?, fonto=?, citajo=?, datumo=?, modifita_je=?
+               superklaso=?, ligilo=?, fonto=?, citajo=?, datumo=?, semantika=?,
+               modifita_je=?
                WHERE uuid=?""",
             (
                 entry["titolo"],
@@ -389,6 +927,7 @@ def _update_entry(entry: dict) -> None:
                 json.dumps(entry.get("fonto", []), ensure_ascii=False),
                 json.dumps(entry.get("citajo", []), ensure_ascii=False),
                 json.dumps(entry.get("datumo", {}), ensure_ascii=False),
+                json.dumps(entry.get("semantika", []), ensure_ascii=False),
                 entry["modifita_je"],
                 entry["uuid"],
             ),
@@ -436,6 +975,9 @@ citajo = {citajo}
 
 # Datumoj: datumo.{{nomo}} = \"\"\"{{...json...}}\"\"\"
 {datumo}
+
+# Semantikaj valoroj: semantika = \"\"\"tipo arko valoro [#unuo_uuid]\"\"\"
+{semantika}
 """
 
 
@@ -448,6 +990,7 @@ def _entry_to_enc(entry: dict) -> str:
     fonto = entry.get("fonto") or []
     citajo = entry.get("citajo") or []
     datumo = _public_datumo(entry)
+    semantika = _normalize_semantika_valoroj(entry.get("semantika"))
     enhavo = entry.get("enhavo", "")
 
     def _decode_visible_newlines(value: str) -> str:
@@ -473,7 +1016,7 @@ def _entry_to_enc(entry: dict) -> str:
                     # Output jaro as integer without quotes
                     items.append(f"{k} = {v}")
                 else:
-                    items.append(f'{k} = {json.dumps(v)}')
+                    items.append(f"{k} = {json.dumps(v)}")
             parts.append(f"{{{', '.join(items)}}}")
         return "[" + ", ".join(parts) + "]"
 
@@ -485,7 +1028,7 @@ def _entry_to_enc(entry: dict) -> str:
             items = []
             for k in ("teksto", "autoro", "verko", "jaro", "lingvo"):
                 if c.get(k) is not None and str(c.get(k)).strip():
-                    items.append(f'{k} = {json.dumps(str(c.get(k)))}')
+                    items.append(f"{k} = {json.dumps(str(c.get(k)))}")
             parts.append(f"{{{', '.join(items)}}}")
         return "[" + ", ".join(parts) + "]"
 
@@ -495,8 +1038,31 @@ def _entry_to_enc(entry: dict) -> str:
         lines: list[str] = []
         for name in sorted(datasets):
             payload = json.dumps(datasets[name], ensure_ascii=False, indent=2)
-            lines.append(f"datumo.{name} = \"\"\"\n{payload}\n\"\"\"")
+            lines.append(f'datumo.{name} = """\n{payload}\n"""')
         return "\n\n".join(lines)
+
+    def _semantika_block(items: list[dict[str, object]]) -> str:
+        if not items:
+            return ""
+        lines: list[str] = []
+        for item in items:
+            tipo = str(item.get("tipo") or "").strip().lower()
+            arko = str(item.get("arko") or "").strip()
+            valoro = _format_semantika_valoro(
+                item.get("valoro"), tipo=tipo, for_enc=True
+            )
+            unuo = _normalize_semantika_unuo(
+                item.get("unuo"), field="semantika.unuo"
+            )
+            if not tipo or not arko:
+                continue
+            if unuo:
+                lines.append(f"{tipo} {arko} {valoro} #{unuo}")
+            else:
+                lines.append(f"{tipo} {arko} {valoro}")
+        if not lines:
+            return ""
+        return 'semantika = """\n' + "\n".join(lines) + '\n"""'
 
     def _lang_map_lines(prefix: str, mapping: dict[str, str]) -> str:
         lines = []
@@ -518,6 +1084,7 @@ def _entry_to_enc(entry: dict) -> str:
         fonto=_fonto_list(fonto),
         citajo=_citajo_list(citajo),
         datumo=_datumo_block(datumo),
+        semantika=_semantika_block(semantika),
     )
 
 
@@ -531,44 +1098,44 @@ def _invalid_edit_path(uuid: str) -> Path:
 
 def _fix_inline_table_commas(text: str) -> str:
     """Add missing commas and fix bracket syntax in inline tables (fonto lines).
-    
+
     Fixes patterns like:
     - {a="x" b="y"} -> {a="x", b="y"}  (missing commas)
     - [[{...}]] -> [{...}]              (wrong brackets for inline table array)
-    
+
     Only applies to fonto= lines to avoid breaking other valid TOML.
     """
     lines = []
     for line in text.splitlines():
         # Only fix lines that look like fonto assignments
-        if re.match(r'^\s*fonto\s*=', line):
+        if re.match(r"^\s*fonto\s*=", line):
             # First, fix bracket syntax: [[ -> [ and ]] -> ]
             # This converts array-of-arrays notation to array-of-inline-tables
-            fixed = re.sub(r'=\s*\[\[', '=[{', line)  # [[ -> [{
-            fixed = re.sub(r'\]\]', '}]', fixed)       # ]] -> }]
-            
+            fixed = re.sub(r"=\s*\[\[", "=[{", line)  # [[ -> [{
+            fixed = re.sub(r"\]\]", "}]", fixed)  # ]] -> }]
+
             # Then add missing commas between fields in inline tables
             # Pattern: Look for " followed by space and a letter/underscore (next field)
-            # This matches: year="2021" author="..." 
+            # This matches: year="2021" author="..."
             # Replace with: year="2021", author="..."
             fixed = re.sub(
                 r'"\s+([a-zA-Z_])',  # " followed by whitespace and letter
-                r'", \1',             # Replace with ", followed by letter
-                fixed
+                r'", \1',  # Replace with ", followed by letter
+                fixed,
             )
             lines.append(fixed)
         else:
             lines.append(line)
-    return '\n'.join(lines)
+    return "\n".join(lines)
 
 
 def _fix_unquoted_uuids(text: str) -> str:
     """Auto-quote unquoted UUID-like values in ligilo and superklaso fields.
-    
+
     Fixes patterns like:
     - ligilo=abc123 -> ligilo="abc123"
     - ligilo=[abc123, def456] -> ligilo=["abc123", "def456"]
-    
+
     Only applies to ligilo/superklaso lines to avoid breaking other TOML.
     """
     lines = []
@@ -584,20 +1151,300 @@ def _fix_unquoted_uuids(text: str) -> str:
             if match:
                 lines.append(f'{match.group(1)}"{match.group(2)}"')
                 continue
-        
+
         # Fix ligilo/superklaso with array of unquoted UUIDs: ligilo=[abc, def]
-        if re.match(r'^\s*(ligilo|superklaso)\s*=\s*\[', line, re.IGNORECASE):
+        if re.match(r"^\s*(ligilo|superklaso)\s*=\s*\[", line, re.IGNORECASE):
             # Quote unquoted tokens in arrays, including #uuid and rdf/owl tags.
             fixed = re.sub(
-                r'(?<=[\[,])\s*([#a-zA-Z0-9_:\-\.]+)\s*(?=[,\]])',
+                r"(?<=[\[,])\s*([#a-zA-Z0-9_:\-\.]+)\s*(?=[,\]])",
                 lambda m: f'"{m.group(1).strip()}"',
-                line
+                line,
             )
             lines.append(fixed)
             continue
-        
+
         lines.append(line)
-    return '\n'.join(lines)
+    return "\n".join(lines)
+
+
+def _expand_multi_locale_assignments(text: str) -> str:
+    """Expand keys like terminologio.(en,fr)=... into one assignment per locale."""
+    lines: list[str] = []
+    pattern = re.compile(
+        r"^(?P<indent>\s*)(?P<field>terminologio|difino|difinio)\.\((?P<langs>[^)]+)\)\s*=\s*(?P<rhs>.+?)\s*$",
+        re.IGNORECASE,
+    )
+    for line in text.splitlines():
+        match = pattern.match(line)
+        if not match:
+            lines.append(line)
+            continue
+        field = match.group("field")
+        lang_raw = match.group("langs")
+        rhs = match.group("rhs").strip()
+        parsed_langs = _normalize_lingvo_codes(
+            lang_raw.replace(" ", ""), field=f"{field}.lingvo"
+        )
+        if not parsed_langs:
+            raise ValueError(f"Nevalida {field}.lingvo listo: {lang_raw!r}.")
+        # Be permissive for this shorthand: treat bare tokens as strings.
+        if rhs and rhs[0] not in ('"', "'", "[", "{"):
+            rhs = json.dumps(rhs, ensure_ascii=False)
+        indent = match.group("indent")
+        for lang in parsed_langs:
+            lines.append(f"{indent}{field}.{lang} = {rhs}")
+    return "\n".join(lines)
+
+
+def _parse_semantika_bool(raw: object, *, field: str) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    value = str(raw).strip().lower()
+    if value in _SEMANTIKA_BOOL_TRUE:
+        return True
+    if value in _SEMANTIKA_BOOL_FALSE:
+        return False
+    raise ValueError(f"Nevalida {field}: bool devas esti true/false (aŭ jes/ne).")
+
+
+def _parse_semantika_int(raw: object, *, field: str) -> int:
+    if isinstance(raw, bool):
+        raise ValueError(f"Nevalida {field}: int ne povas esti bool-valoro.")
+    if isinstance(raw, int):
+        return raw
+    value = str(raw).strip().replace(" ", "").replace("_", "")
+    if re.fullmatch(r"[+-]?\d+", value):
+        return int(value)
+    if "," in value and "." not in value:
+        normalized = value.replace(",", ".")
+    else:
+        normalized = value.replace(",", "")
+    try:
+        numeric = float(normalized)
+    except ValueError as exc:
+        raise ValueError(f"Nevalida {field}: int-valoro atendata.") from exc
+    if not numeric.is_integer():
+        raise ValueError(f"Nevalida {field}: int-valoro atendata.")
+    return int(numeric)
+
+
+def _parse_semantika_float(raw: object, *, field: str) -> float:
+    if isinstance(raw, bool):
+        raise ValueError(f"Nevalida {field}: float ne povas esti bool-valoro.")
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    value = str(raw).strip().replace(" ", "").replace("_", "")
+    if "," in value and "." not in value:
+        value = value.replace(",", ".")
+    else:
+        value = value.replace(",", "")
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"Nevalida {field}: float-valoro atendata.") from exc
+
+
+def _parse_semantika_str(raw: object) -> str:
+    if isinstance(raw, str):
+        value = raw.strip()
+    else:
+        value = str(raw).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        if value[0] == '"':
+            try:
+                decoded = json.loads(value)
+                if isinstance(decoded, str):
+                    return decoded
+            except json.JSONDecodeError:
+                pass
+        return value[1:-1]
+    return value
+
+
+def _normalize_semantika_unuo(raw: object, *, field: str) -> str | None:
+    if raw is None:
+        return None
+    unuo = str(raw).strip()
+    if not unuo:
+        return None
+    if unuo.lower() in {"si", "si-unuo"}:
+        return None
+    if unuo.startswith("#"):
+        unuo = unuo[1:]
+    if not unuo or any(ch.isspace() for ch in unuo):
+        raise ValueError(f"Nevalida {field}: unuo devas esti #UUID.")
+    return unuo
+
+
+def _extract_inline_semantika_unuo(
+    raw_valoro: object, *, tipo: str, field: str
+) -> tuple[object, str | None]:
+    if tipo not in {"int", "float", "bool"} or not isinstance(raw_valoro, str):
+        return raw_valoro, None
+    text = raw_valoro.strip()
+    if not text:
+        return text, None
+    value_part, sep, maybe_unuo = text.rpartition(" ")
+    if not sep or not value_part.strip():
+        return text, None
+    if not maybe_unuo.startswith("#"):
+        return text, None
+    normalized_unuo = _normalize_semantika_unuo(maybe_unuo, field=field)
+    return value_part.strip(), normalized_unuo
+
+
+def _parse_semantika_typed_value(raw: object, *, tipo: str, field: str) -> object:
+    if tipo == "bool":
+        return _parse_semantika_bool(raw, field=field)
+    if tipo == "int":
+        return _parse_semantika_int(raw, field=field)
+    if tipo == "float":
+        return _parse_semantika_float(raw, field=field)
+    if tipo == "str":
+        return _parse_semantika_str(raw)
+    raise ValueError(f"Nevalida {field}: nekonata tipo {tipo!r}.")
+
+
+def _coerce_semantika_item(item: object, *, field: str) -> dict[str, object]:
+    if not isinstance(item, dict):
+        raise ValueError(f"Nevalida {field}: devas esti objekto kun tipo/arko/valoro.")
+    raw_tipo = item.get("tipo", item.get("type"))
+    raw_arko = item.get("arko", item.get("arc"))
+    if raw_tipo is None or raw_arko is None:
+        raise ValueError(f"Nevalida {field}: mankas tipo aŭ arko.")
+    tipo = str(raw_tipo).strip().lower()
+    if tipo not in _SEMANTIKA_VALORO_TIPOJ:
+        allowed = ", ".join(sorted(_SEMANTIKA_VALORO_TIPOJ))
+        raise ValueError(f"Nevalida {field}: tipo devas esti unu el {allowed}.")
+    arko = _normalize_semantika_ligilo(str(raw_arko).strip())
+    if not arko:
+        raise ValueError(f"Nevalida {field}: arko mankas.")
+    if "valoro" in item:
+        raw_valoro = item.get("valoro")
+    elif "value" in item:
+        raw_valoro = item.get("value")
+    else:
+        raise ValueError(f"Nevalida {field}: mankas valoro.")
+    inline_valoro, inline_unuo = _extract_inline_semantika_unuo(
+        raw_valoro, tipo=tipo, field=field
+    )
+    valoro = _parse_semantika_typed_value(inline_valoro, tipo=tipo, field=field)
+    explicit_unuo = item.get("unuo", item.get("unit"))
+    normalized_unuo = _normalize_semantika_unuo(
+        explicit_unuo if explicit_unuo is not None else inline_unuo, field=field
+    )
+    coerced: dict[str, object] = {"tipo": tipo, "arko": arko, "valoro": valoro}
+    if normalized_unuo:
+        coerced["unuo"] = normalized_unuo
+    return coerced
+
+
+def _parse_semantika_field(raw_value: object) -> list[dict[str, object]]:
+    if raw_value is None:
+        return []
+    if isinstance(raw_value, list):
+        return [
+            _coerce_semantika_item(item, field=f"semantika[{idx}]")
+            for idx, item in enumerate(raw_value)
+        ]
+    if not isinstance(raw_value, str):
+        raise ValueError("Nevalida semantika: devas esti teksto aŭ listo.")
+    items: list[dict[str, object]] = []
+    for line_no, raw_line in enumerate(raw_value.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(maxsplit=2)
+        if len(parts) < 3:
+            raise ValueError(
+                "Nevalida semantika linio "
+                f"{line_no}: atendata formato `tipo arko valoro`."
+            )
+        tipo, arko, valoro = parts
+        item = _coerce_semantika_item(
+            {"tipo": tipo, "arko": arko, "valoro": valoro},
+            field=f"semantika linio {line_no}",
+        )
+        items.append(item)
+    return items
+
+
+def _normalize_semantika_valoroj(raw_value: object) -> list[dict[str, object]]:
+    if raw_value is None:
+        return []
+    if isinstance(raw_value, str):
+        try:
+            decoded = json.loads(raw_value)
+        except json.JSONDecodeError:
+            return []
+        raw_value = decoded
+    if not isinstance(raw_value, list):
+        return []
+    normalized: list[dict[str, object]] = []
+    for idx, item in enumerate(raw_value):
+        try:
+            normalized.append(_coerce_semantika_item(item, field=f"semantika[{idx}]"))
+        except ValueError:
+            continue
+    return normalized
+
+
+def _format_semantika_valoro(
+    value: object, *, tipo: str, for_enc: bool = False, markdown: bool = False
+) -> str:
+    if tipo == "bool":
+        rendered = "true" if bool(value) else "false"
+    elif tipo == "int":
+        parsed_int = _parse_semantika_int(value, field="semantika.valoro")
+        rendered = (
+            str(parsed_int)
+            if for_enc
+            else _format_number_for_display(float(parsed_int), integer_like=True)
+        )
+    elif tipo == "float":
+        parsed_float = _parse_semantika_float(value, field="semantika.valoro")
+        rendered = (
+            f"{parsed_float:g}"
+            if for_enc
+            else _format_number_for_display(parsed_float, integer_like=False)
+        )
+    else:
+        rendered = str(value)
+    if for_enc and tipo == "str":
+        return json.dumps(rendered, ensure_ascii=False)
+    if markdown and tipo == "str":
+        return _render_markdown_text(rendered)
+    return rendered
+
+
+def _format_semantika_unuo_cli(item: dict[str, object]) -> str:
+    tipo = str(item.get("tipo") or "").strip().lower()
+    unuo = _normalize_semantika_unuo(item.get("unuo"), field="semantika.unuo")
+    if tipo not in {"int", "float"}:
+        if not unuo:
+            return ""
+        return f"[dim](#{unuo})[/dim]"
+    if not unuo:
+        return "[dim](SI)[/dim]"
+    return f"[dim](#{unuo})[/dim]"
+
+
+def _format_semantika_unuo_html(item: dict[str, object], *, link_depth: int) -> str:
+    tipo = str(item.get("tipo") or "").strip().lower()
+    unuo = _normalize_semantika_unuo(item.get("unuo"), field="semantika.unuo")
+    if tipo not in {"int", "float"}:
+        if not unuo:
+            return ""
+    if tipo in {"int", "float"} and not unuo:
+        return "<em>SI</em>"
+    if not unuo:
+        return ""
+    resolved = _find_by_uuid(unuo)
+    if not resolved:
+        return f"#{escape(unuo)}"
+    target_uuid = str(resolved.get("uuid") or unuo)
+    target_title = _resolve_uuid_to_title(target_uuid)
+    return _render_relation_html_link(target_title, target_uuid, link_depth=link_depth)
 
 
 def _parse_enc_file(path: Path) -> dict:
@@ -608,6 +1455,7 @@ def _parse_enc_file(path: Path) -> dict:
     otherwise the first ``# …`` comment is used as the title.
     """
     raw = _normalize_multiline_value_spacing(path.read_text(encoding="utf-8"))
+    raw = _expand_multi_locale_assignments(raw)
     raw = _escape_latex_style_backslashes(raw)
     # Apply permissive fixes for common syntax errors
     raw = _fix_inline_table_commas(raw)
@@ -765,6 +1613,7 @@ def _parse_enc_file(path: Path) -> dict:
             elif isinstance(payload, dict):
                 _validate_dataset_payload(str(dataset_name), payload)
                 datumo[str(dataset_name)] = payload
+    semantika = _parse_semantika_field(data.get("semantika"))
 
     return {
         "titolo": titolo,
@@ -777,6 +1626,7 @@ def _parse_enc_file(path: Path) -> dict:
         "fonto": fonto,
         "citajo": citajo,
         "datumo": datumo,
+        "semantika": semantika,
     }
 
 
@@ -906,7 +1756,8 @@ def _normalize_markdown_text(text: str) -> str:
     """Normalize common markdown formatting issues for better readability."""
     if not text:
         return ""
-    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    recovered = _repair_latex_controls_in_math(text)
+    lines = recovered.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     out: list[str] = []
     i = 0
     while i < len(lines):
@@ -943,6 +1794,78 @@ def _normalize_markdown_text(text: str) -> str:
             blank = 0
             normalized.append(line)
     return "\n".join(normalized).strip()
+
+
+def _repair_latex_controls_in_math(text: str) -> str:
+    """Recover LaTeX control sequences in math spans.
+
+    This is robust against TOML-consumed escapes (e.g. \\text -> tab + 'ext').
+    It is applied both at parse-time and render-time so legacy stored entries are
+    also displayed correctly without requiring data migration.
+    """
+    if not text:
+        return ""
+
+    tokens = (
+        "theta",
+        "varepsilon",
+        "epsilon",
+        "alpha",
+        "beta",
+        "gamma",
+        "delta",
+        "lambda",
+        "mu",
+        "pi",
+        "sigma",
+        "phi",
+        "psi",
+        "omega",
+        "frac",
+        "sqrt",
+        "sum",
+        "int",
+        "widehat",
+        "overrightarrow",
+        "rightarrow",
+        "to",
+        "text",
+        "Longleftrightarrow",
+        "exists",
+        "mathbb",
+        "lim",
+        "in",
+    )
+
+    def _repair_chunk(chunk: str) -> str:
+        repaired = chunk
+        for token in tokens:
+            repaired = re.sub(
+                rf"(?<!\\)(?<![A-Za-z]){token}(\b|_)",
+                rf"\\{token}\1",
+                repaired,
+            )
+        # Recover consumed escapes (\t, \f, \r, \v, \b, \a) inside math chunks.
+        for token in tokens:
+            tail = token[1:]
+            repaired = re.sub(
+                rf"[\t\f\r\v\x08\x07]{tail}(\b|_)",
+                rf"\\{token}\1",
+                repaired,
+            )
+        return repaired
+
+    recovered = re.sub(
+        r"\$\$.*?\$\$",
+        lambda m: _repair_chunk(m.group(0)),
+        text,
+        flags=re.DOTALL,
+    )
+    return re.sub(
+        r"(?<!\\)\$(?!\$)[^\n$]*(?<!\\)\$",
+        lambda m: _repair_chunk(m.group(0)),
+        recovered,
+    )
 
 
 def _normalize_multiline_value_spacing(raw: str) -> str:
@@ -995,7 +1918,8 @@ def _build_parse_hints(error_text: str, line: str) -> list[str]:
             "Uzu validan TOML-sintekson: ŝlosilo = valoro "
             '(ekz. terminologio.eo = "RS232").'
         ),
-        "Kontrolu kampnomojn: terminologio.xx, difino.xx, superklaso, ligilo, fonto.",
+        "Kontrolu kampnomojn: terminologio.xx, difino.xx, superklaso, "
+        "ligilo, fonto, semantika.",
     ]
     if "invalid value" in lowered:
         hints.append(
@@ -1010,14 +1934,10 @@ def _build_parse_hints(error_text: str, line: str) -> list[str]:
         hints.append("Mankas ferma citilo, ] aŭ }.")
     left_side = line.split("=", 1)[0].strip().lower()
     dotted_key_like = bool(re.match(r"^[a-z_][a-z0-9_]*(\.[a-z0-9_]+)+$", left_side))
-    if (
-        line.strip().endswith("=")
-        and "invalid value" in lowered
-        and dotted_key_like
-    ):
+    if line.strip().endswith("=") and "invalid value" in lowered and dotted_key_like:
         hints.append(
-            "Por plurlinia teksto (`\"\"\"`), metu la malferman `\"\"\"` sur la "
-            "sama linio kiel `=` (ekz. difino.fr = \"\"\"...)."
+            'Por plurlinia teksto (`"""`), metu la malferman `"""` sur la '
+            'sama linio kiel `=` (ekz. difino.fr = """...).'
         )
     if "=" not in line:
         hints.append("Ĉiu kampolinio devus aspekti kiel: nomo = valoro")
@@ -1038,9 +1958,7 @@ def _validate_enc_keys(data: dict) -> None:
             )
         if key not in _ALLOWED_ENC_PLAIN_KEYS:
             suggestion = _suggest_enc_key(key, _ALLOWED_ENC_PLAIN_KEYS_SORTED)
-            raise ValueError(
-                f"Nevalida .enc: nekonata kampo '{key}'.{suggestion}"
-            )
+            raise ValueError(f"Nevalida .enc: nekonata kampo '{key}'.{suggestion}")
 
 
 def _suggest_enc_key(key: str, allowed: tuple[str, ...]) -> str:
@@ -1085,15 +2003,15 @@ def _collect_lang_fields(data: dict) -> tuple[dict[str, str], dict[str, str]]:
     if not difinoj and isinstance(difinio_obj, dict):
         for lang, value in difinio_obj.items():
             if str(value).strip():
-                difinoj[str(lang).strip().lower()] = str(value).strip().replace(
-                    "\\n", "\n"
+                difinoj[str(lang).strip().lower()] = (
+                    str(value).strip().replace("\\n", "\n")
                 )
     difino_obj = data.get("difino")
     if not difinoj and isinstance(difino_obj, dict):
         for lang, value in difino_obj.items():
             if str(value).strip():
-                difinoj[str(lang).strip().lower()] = str(value).strip().replace(
-                    "\\n", "\n"
+                difinoj[str(lang).strip().lower()] = (
+                    str(value).strip().replace("\\n", "\n")
                 )
 
     if not terminologio and isinstance(data.get("titolo"), str):
@@ -1133,15 +2051,39 @@ def _normalize_semantika_ligilo(raw: str | None) -> str | None:
     value = str(raw).strip()
     if not value:
         return None
-    return _SEMANTIKAJ_LIGILOJ.get(value.lower(), value)
+    runtime_map = _runtime_semantika_alias_map()
+    return runtime_map.get(value.lower(), value)
+
+
+def _is_known_semantika_ligilo(raw: str | None) -> bool:
+    normalized = _normalize_semantika_ligilo(raw)
+    return bool(normalized and normalized in _runtime_known_semantika_ligiloj())
 
 
 def _reverse_semantika_ligilo(raw: str | None) -> str | None:
+    raw_lower = str(raw or "").strip().lower()
+    if raw_lower == "rdfs:superclassof":
+        return "rdfs:subClassOf"
     rel = _normalize_semantika_ligilo(raw)
-    if rel == "rdfs:subClassOf":
-        return "rdfs:superClassOf"
-    if rel == "rdf:type":
-        return "rdf:hasInstance"
+    reverse_map: dict[str, str | None] = {
+        "rdfs:subClassOf": "rdfs:hasSubClass",
+        "rdfs:superClassOf": "rdfs:subClassOf",
+        "rdfs:hasSubClass": "rdfs:subClassOf",
+        "rdf:type": "rdf:hasInstance",
+        "rdf:hasInstance": "rdf:type",
+        "wdt:P361": "wdt:P527",
+        "wdt:P527": "wdt:P361",
+        # Symmetric relations keep the same semantic arc both directions.
+        "owl:disjointWith": "owl:disjointWith",
+        "owl:inverseOf": "owl:inverseOf",
+        "wdt:P26": "wdt:P26",
+    }
+    if rel in reverse_map:
+        return reverse_map[rel]
+    if rel in _runtime_known_semantika_ligiloj():
+        # Known directional properties without an explicit inverse in our
+        # supported set should not self-reverse semantically.
+        return None
     return rel
 
 
@@ -1149,8 +2091,10 @@ def _directional_semantic_family(rel: str | None) -> set[str]:
     normalized = _normalize_semantika_ligilo(rel)
     if normalized in {"rdf:type", "rdf:hasInstance"}:
         return {"rdf:type", "rdf:hasInstance"}
-    if normalized in {"rdfs:subClassOf", "rdfs:superClassOf"}:
-        return {"rdfs:subClassOf", "rdfs:superClassOf"}
+    if normalized in {"rdfs:subClassOf", "rdfs:superClassOf", "rdfs:hasSubClass"}:
+        return {"rdfs:subClassOf", "rdfs:superClassOf", "rdfs:hasSubClass"}
+    if normalized in {"wdt:P361", "wdt:P527"}:
+        return {"wdt:P361", "wdt:P527"}
     return {normalized} if normalized else set()
 
 
@@ -1163,7 +2107,7 @@ def _reconcile_all_semantic_reverse_links() -> None:
         source_uuid = str(source.get("uuid") or "")
         if not source_uuid:
             continue
-        for item in _public_ligilo_items(source):
+        for item in _normalize_ligilo_items(source.get("ligilo") or []):
             target = _find_by_uuid(str(item.get("uuid") or ""))
             if target is None:
                 continue
@@ -1220,21 +2164,21 @@ def _reconcile_all_semantic_reverse_links() -> None:
             expected_pairs, key=lambda item: (item[0], item[1] or "")
         ):
             family = _directional_semantic_family(reverse_sem)
-            target_items = [
-                item
-                for item in target_items
-                if not (
-                    str(item.get("uuid") or "") == source_uuid
-                    and _normalize_semantika_ligilo(item.get("tipo")) in family
-                    and _normalize_semantika_ligilo(item.get("tipo")) != reverse_sem
-                )
-            ]
-            if not any(
-                str(item.get("uuid") or "") == source_uuid
-                and _normalize_semantika_ligilo(item.get("tipo")) == reverse_sem
-                for item in target_items
-            ):
-                target_items.append({"uuid": source_uuid, "tipo": reverse_sem})
+            cleaned_items: list[dict[str, str | None]] = []
+            for item in target_items:
+                item_uuid = str(item.get("uuid") or "")
+                item_sem = _normalize_semantika_ligilo(item.get("tipo"))
+                if item_uuid != source_uuid:
+                    cleaned_items.append(item)
+                    continue
+                if family and item_sem not in family:
+                    cleaned_items.append(item)
+                    continue
+                if not family and item_sem != reverse_sem:
+                    cleaned_items.append(item)
+                    continue
+            target_items = cleaned_items
+            target_items.append({"uuid": source_uuid, "tipo": reverse_sem})
 
         original_serialized = _serialize_ligilo_items(target_items_original)
         reconciled_serialized = _serialize_ligilo_items(target_items)
@@ -1256,7 +2200,7 @@ def _public_datumo(entry: dict) -> dict:
 
 
 def _public_ligilo_items(entry: dict) -> list[dict[str, str | None]]:
-    ligilo_items = _normalize_ligilo_items(entry.get("ligilo") or [])
+    ligilo_items = _display_ligilo_items(entry)
     data = entry.get("datumo")
     if not isinstance(data, dict):
         return ligilo_items
@@ -1308,28 +2252,30 @@ def _semantic_conflicts_for_entry(entry: dict, all_entries: list[dict]) -> list[
                 f"- Kontraŭdiro inter rdf:type kaj rdf:hasInstance al {title} "
                 f"(#{target_uuid[:8]}). Sugesto: konservu nur unu direkton."
             )
-        if sem in {"rdfs:subClassOf", "rdfs:superClassOf"} and (
+        if sem in {"rdfs:subClassOf", "rdfs:superClassOf", "rdfs:hasSubClass"} and (
             (target_uuid, "rdfs:subClassOf") in source_pairs
-            and (target_uuid, "rdfs:superClassOf") in source_pairs
+            and (
+                (target_uuid, "rdfs:superClassOf") in source_pairs
+                or (target_uuid, "rdfs:hasSubClass") in source_pairs
+            )
         ):
             title = _resolve_uuid_to_title(target_uuid)
             conflicts.append(
-                f"- Kontraŭdiro inter rdfs:subClassOf kaj rdfs:superClassOf al {title} "
+                "- Kontraŭdiro inter rdfs:subClassOf kaj rdfs:hasSubClass "
+                f"al {title} "
                 f"(#{target_uuid[:8]}). Sugesto: konservu nur unu direkton."
             )
 
         target_entry = by_uuid.get(target_uuid)
         if target_entry is None:
             continue
-        reverse_links = _public_ligilo_items(target_entry)
+        reverse_links = _normalize_ligilo_items(target_entry.get("ligilo") or [])
         has_same_back = False
         for item in reverse_links:
             raw_back_ref = str(item.get("uuid") or "")
             resolved_back = _find_by_uuid(raw_back_ref)
             back_uuid = (
-                str(resolved_back.get("uuid") or "")
-                if resolved_back
-                else raw_back_ref
+                str(resolved_back.get("uuid") or "") if resolved_back else raw_back_ref
             )
             if (
                 back_uuid == source_uuid
@@ -1355,25 +2301,27 @@ def _semantic_conflicts_for_entry(entry: dict, all_entries: list[dict]) -> list[
             conflicts.append(
                 f"- Logika konflikto: #{source_uuid[:8]} kaj #{target_uuid[:8]} ambaŭ "
                 "uzas rdfs:subClassOf. Sugesto: en la kontraŭa direkto uzu "
-                "rdfs:superClassOf."
+                "rdfs:hasSubClass."
             )
-        elif sem == "rdfs:superClassOf":
+        elif sem in {"rdfs:superClassOf", "rdfs:hasSubClass"}:
             conflicts.append(
                 f"- Logika konflikto: #{source_uuid[:8]} kaj #{target_uuid[:8]} ambaŭ "
-                "uzas rdfs:superClassOf. Sugesto: en la kontraŭa direkto uzu "
+                "uzas rdfs:hasSubClass. Sugesto: en la kontraŭa direkto uzu "
                 "rdfs:subClassOf."
             )
     return sorted(set(conflicts))
 
 
-def _raise_if_semantic_conflicts(entry: dict) -> None:
-    _reconcile_all_semantic_reverse_links()
+def _raise_if_semantic_conflicts(entry: dict, *, strict: bool = True) -> None:
+    if not strict:
+        _reconcile_all_semantic_reverse_links()
     conflicts = _semantic_conflicts_for_entry(entry, _load_all())
     if not conflicts:
         return
     typer.echo("Semantika logika konflikto trovita en ligilo:", err=True)
     for line in conflicts:
         typer.echo(line, err=True)
+    typer.echo(_semantika_help_hint(), err=True)
     raise typer.Exit(code=1)
 
 
@@ -1438,6 +2386,72 @@ def _normalise_superklaso_refs(raw: list | str) -> list[str]:
     return _normalize_uuid_list(out)
 
 
+def _merge_superklaso_into_ligilo(superklaso: list[str], ligilo: list) -> list:
+    items = _normalize_ligilo_items(ligilo)
+    for parent_ref in _normalize_uuid_list(superklaso):
+        has_pair = any(
+            str(item.get("uuid") or "") == parent_ref
+            and _normalize_semantika_ligilo(item.get("tipo")) == "rdfs:subClassOf"
+            for item in items
+        )
+        if not has_pair:
+            items.append({"uuid": parent_ref, "tipo": "rdfs:subClassOf"})
+    return _serialize_ligilo_items(items)
+
+
+def _canonicalize_class_alias_fields(entry: dict) -> dict:
+    superklaso = _normalize_uuid_list(entry.get("superklaso") or [])
+    ligilo = _serialize_ligilo_items(_normalize_ligilo_items(entry.get("ligilo") or []))
+    entry["ligilo"] = _merge_superklaso_into_ligilo(superklaso, ligilo)
+    entry["superklaso"] = []
+    return entry
+
+
+def _build_class_relation_maps(
+    all_entries: list[dict],
+) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    by_uuid = {str(e.get("uuid") or ""): e for e in all_entries if e.get("uuid")}
+
+    def _resolve_ref(ref: str) -> str:
+        token = _clean_uuid_ref(ref)
+        if not token:
+            return ""
+        if token in by_uuid:
+            return token
+        matches = [uid for uid in by_uuid if uid.startswith(token)]
+        if len(matches) == 1:
+            return matches[0]
+        return ""
+
+    parents_of: dict[str, set[str]] = {uid: set() for uid in by_uuid}
+    children_of: dict[str, set[str]] = {uid: set() for uid in by_uuid}
+
+    for entry in all_entries:
+        uid = str(entry.get("uuid") or "")
+        if not uid:
+            continue
+
+        for parent_ref in _normalize_uuid_list(entry.get("superklaso") or []):
+            parent_uuid = _resolve_ref(parent_ref)
+            if not parent_uuid:
+                continue
+            parents_of.setdefault(uid, set()).add(parent_uuid)
+            children_of.setdefault(parent_uuid, set()).add(uid)
+
+        for item in _normalize_ligilo_items(entry.get("ligilo") or []):
+            sem = _normalize_semantika_ligilo(item.get("tipo"))
+            target_uuid = _resolve_ref(str(item.get("uuid") or ""))
+            if not target_uuid:
+                continue
+            if sem == "rdfs:subClassOf":
+                parents_of.setdefault(uid, set()).add(target_uuid)
+                children_of.setdefault(target_uuid, set()).add(uid)
+            elif sem in {"rdfs:hasSubClass", "rdfs:superClassOf"}:
+                parents_of.setdefault(target_uuid, set()).add(uid)
+                children_of.setdefault(uid, set()).add(target_uuid)
+    return parents_of, children_of
+
+
 def _normalize_ligilo_items(raw: list | str) -> list[dict[str, str | None]]:
     normalized = _normalise_uuids(raw)
     items: list[dict[str, str | None]] = []
@@ -1461,6 +2475,30 @@ def _normalize_ligilo_items(raw: list | str) -> list[dict[str, str | None]]:
     return deduped
 
 
+def _display_ligilo_items(
+    entry_or_ligilo: dict | list | str,
+) -> list[dict[str, str | None]]:
+    raw_ligilo = (
+        entry_or_ligilo.get("ligilo") or []
+        if isinstance(entry_or_ligilo, dict)
+        else entry_or_ligilo
+    )
+    raw_items = _normalize_ligilo_items(raw_ligilo)
+    deduped: list[dict[str, str | None]] = []
+    seen: set[tuple[str, str | None]] = set()
+    for item in raw_items:
+        raw_uuid = str(item.get("uuid") or "")
+        resolved = _find_by_uuid(raw_uuid)
+        canonical_uuid = str(resolved.get("uuid") or "") if resolved else raw_uuid
+        sem = _normalize_semantika_ligilo(item.get("tipo"))
+        key = (canonical_uuid, sem)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append({"uuid": canonical_uuid, "tipo": sem})
+    return deduped
+
+
 def _serialize_ligilo_items(items: list[dict[str, str | None]]) -> list:
     out: list = []
     for item in items:
@@ -1477,7 +2515,7 @@ def _serialize_ligilo_items(items: list[dict[str, str | None]]) -> list:
 
 def _resolve_uuid_to_title(uuid: str) -> str:
     """Resolve a UUID to its entry title. Returns shortened UUID if not found.
-    
+
     Supports prefix matching (e.g., 'c487fa8b' matches 'c487fa8b-...-...').
     """
     normalized_uuid = str(uuid or "").strip().lstrip("#")
@@ -1489,7 +2527,7 @@ def _resolve_uuid_to_title(uuid: str) -> str:
         ).fetchone()
         if row:
             return str(row["titolo"])
-        
+
         # Try prefix match
         rows = conn.execute(
             "SELECT titolo FROM encik WHERE uuid LIKE ?", (normalized_uuid + "%",)
@@ -1555,6 +2593,11 @@ def _parse_ligilo_cli_values(values: list[str]) -> list:
             uuid_part, tipo_part = token.split(":", 1)
             uuid_part = _clean_uuid_ref(uuid_part)
             tipo_norm = _normalize_semantika_ligilo(tipo_part)
+            if tipo_part.strip() and not _is_known_semantika_ligilo(tipo_norm):
+                raise ValueError(
+                    f"Nevalida semantika ligilo: {tipo_part.strip()!r}. "
+                    f"{_semantika_help_hint()}"
+                )
             if uuid_part:
                 items.append({"uuid": uuid_part, "tipo": tipo_norm})
         else:
@@ -1591,9 +2634,7 @@ def _extract_auto_ligilo_refs(parsed: dict) -> list[dict[str, str | None]]:
     refs.extend(_extract_markdown_ligilo_refs(str(parsed.get("enhavo") or "")))
     for payload in (parsed.get("datumo") or {}).values():
         refs.extend(
-            _extract_markdown_ligilo_refs(
-                json.dumps(payload, ensure_ascii=False)
-            )
+            _extract_markdown_ligilo_refs(json.dumps(payload, ensure_ascii=False))
         )
     return refs
 
@@ -1684,9 +2725,31 @@ def _sync_bidirectional_relations_for_entry(entry: dict) -> None:
     if current is None:
         return
 
+    def _resolve_ref(raw_ref: str) -> str:
+        token = _clean_uuid_ref(raw_ref)
+        if not token:
+            return ""
+        if token in by_uuid:
+            return token
+        matches = [uid for uid in by_uuid if uid.startswith(token)]
+        if len(matches) == 1:
+            return matches[0]
+        return token
+
     changed: list[dict] = []
-    current_lig_items = _normalize_ligilo_items(current.get("ligilo") or [])
-    current_sup = _normalize_uuid_list(current.get("superklaso") or [])
+    current_lig_items = [
+        {"uuid": _resolve_ref(str(item.get("uuid") or "")), "tipo": item.get("tipo")}
+        for item in _normalize_ligilo_items(current.get("ligilo") or [])
+        if _resolve_ref(str(item.get("uuid") or ""))
+    ]
+    current_lig_items = _normalize_ligilo_items(
+        _serialize_ligilo_items(current_lig_items)
+    )
+    current_sup = [
+        resolved
+        for raw in _normalize_uuid_list(current.get("superklaso") or [])
+        if (resolved := _resolve_ref(raw))
+    ]
     current["ligilo"] = _serialize_ligilo_items(current_lig_items)
     current["superklaso"] = current_sup
     current["modifita_je"] = _now_iso()
@@ -1694,10 +2757,10 @@ def _sync_bidirectional_relations_for_entry(entry: dict) -> None:
 
     # Bidirectional ligilo with semantic inverse mapping where needed
     for item in current_lig_items:
-        other_ref = str(item.get("uuid") or "")
+        other_ref = _resolve_ref(str(item.get("uuid") or ""))
         sem = _normalize_semantika_ligilo(item.get("tipo"))
         reverse_sem = _reverse_semantika_ligilo(sem)
-        other = _find_by_uuid(other_ref)
+        other = by_uuid.get(other_ref) or _find_by_uuid(other_ref)
         if other is None:
             continue
         other_lig_items = _normalize_ligilo_items(other.get("ligilo") or [])
@@ -1755,6 +2818,8 @@ def _display_entry(
     panel_lines: list[str] = []
     panel_lines.append(f"  [dim]{'uuid:':<14}[/dim] {uid_short}")
     panel_lines.append(f"  [dim]{'lingvo:':<14}[/dim] {selected_lang or '-'}")
+    all_entries = _load_all()
+    class_parents_map, class_children_map = _build_class_relation_maps(all_entries)
 
     if montri_cxion and terminologio:
         panel_lines.append(f"  [dim]{'terminologio:':<14}[/dim]")
@@ -1766,36 +2831,46 @@ def _display_entry(
         or entry.get("difinio", "")
         or next(iter(difinoj.values()), "")
     ).strip()
+    needs_browser_for_difino = _has_non_cli_renderable_markup(difinio)
+    needs_browser_for_enhavo = _has_non_cli_renderable_markup(
+        (entry.get("enhavo") or "").strip()
+    )
+    fallback_path: str | None = None
+
+    def _browser_fallback_link() -> str:
+        nonlocal fallback_path
+        if fallback_path is None:
+            fallback_html = _render_entry_html(
+                entry, lingvo=selected_lang, link_depth=1
+            )
+            fallback_path = _write_html_document(fallback_html)
+        return (
+            f"[link=file://{fallback_path}]Malfermu en retumilo por KaTeX/bildoj[/link]"
+        )
+
     if montri_cxion and difinoj:
         panel_lines.append(f"  [dim]{'difino:':<14}[/dim]")
         for lang, term_def in sorted(difinoj.items()):
-            panel_lines.append(f"    {lang}: {_render_markdown_text(term_def)}")
+            if _has_non_cli_renderable_markup(term_def):
+                panel_lines.append(f"    {lang}: {_browser_fallback_link()}")
+            else:
+                panel_lines.append(f"    {lang}: {_render_markdown_text(term_def)}")
     elif difinio:
         panel_lines.append(f"  [dim]{'difino:':<14}[/dim]")
-        for ln in difinio.splitlines():
-            panel_lines.append(f"    {_render_markdown_text(ln)}")
+        if needs_browser_for_difino:
+            panel_lines.append(f"    {_browser_fallback_link()}")
+        else:
+            for ln in difinio.splitlines():
+                panel_lines.append(f"    {_render_markdown_text(ln)}")
 
     enhavo = (entry.get("enhavo") or "").strip()
     if enhavo and montri_cxion:
         panel_lines.append(f"  [dim]{'enhavo:':<14}[/dim]")
-        for ln in enhavo.splitlines():
-            panel_lines.append(f"    {_render_markdown_text(ln)}")
-
-    superklaso = _normalize_uuid_list(entry.get("superklaso") or [])
-    if superklaso:
-        panel_lines.append(f"  [dim]{'superklaso:':<14}[/dim]")
-        for parent_ref in superklaso:
-            parent = _find_by_uuid(parent_ref)
-            if parent is None:
-                panel_lines.append(
-                    f"    {_render_relation_cli_link('', str(parent_ref))}"
-                )
-            else:
-                parent_title = str(parent["titolo"])
-                parent_uuid = str(parent["uuid"])
-                panel_lines.append(
-                    f"    {_render_relation_cli_link(parent_title, parent_uuid)}"
-                )
+        if needs_browser_for_enhavo:
+            panel_lines.append(f"    {_browser_fallback_link()}")
+        else:
+            for ln in enhavo.splitlines():
+                panel_lines.append(f"    {_render_markdown_text(ln)}")
 
     if montri_cxion:
         sub = _subklasoj_of(entry["uuid"], max_depth=1)
@@ -1806,25 +2881,68 @@ def _display_entry(
                     f"    {child['titolo']}  [dim]#{child['uuid'][:8]}[/dim]"
                 )
 
-    ligilo_items = sorted(
-        _normalize_ligilo_items(entry.get("ligilo") or []),
-        key=_ligilo_rank,
-    )
+    ligilo_items = _display_ligilo_items(entry)
     if ligilo_items:
-        panel_lines.append(f"  [dim]{'ligilo:':<14}[/dim]")
+        grouped_ligilo: dict[str, dict[str, object]] = {}
         for item in ligilo_items:
             uuid = str(item.get("uuid") or "")
-            sem = item.get("tipo")
+            if not uuid:
+                continue
+            sem = _normalize_semantika_ligilo(item.get("tipo"))
+            group = grouped_ligilo.setdefault(
+                uuid,
+                {"sems": set(), "has_plain": False},
+            )
+            if sem:
+                sems = group["sems"]
+                if isinstance(sems, set):
+                    sems.add(sem)
+            else:
+                group["has_plain"] = True
+
+        rank_map = {
+            "rdf:type": 0,
+            "rdfs:subClassOf": 1,
+            "owl:inverseOf": 2,
+            "owl:disjointWith": 3,
+        }
+
+        def _sem_display_value(sem_value: str, target_uuid: str) -> str:
+            sem_norm = _normalize_semantika_ligilo(sem_value)
+            if sem_norm in {"rdfs:subClassOf", "rdfs:superClassOf", "rdfs:hasSubClass"}:
+                current_uid = str(entry.get("uuid") or "")
+                parents = class_parents_map.get(current_uid, set())
+                children = class_children_map.get(current_uid, set())
+                if target_uuid in children and target_uuid not in parents:
+                    sem_norm = "rdfs:hasSubClass"
+                elif target_uuid in parents:
+                    sem_norm = "rdfs:subClassOf"
+            return sem_norm or sem_value
+
+        def _group_sort_key(target_uuid: str) -> tuple[int, tuple[str, str]]:
+            group = grouped_ligilo[target_uuid]
+            sems = group["sems"]
+            sem_values = sorted(sems) if isinstance(sems, set) else []
+            rank = min((rank_map.get(sem, 4) for sem in sem_values), default=4)
+            title = _resolve_uuid_to_title(target_uuid)
+            return (rank, _proper_noun_sort_key(title))
+
+        sorted_uuids = sorted(grouped_ligilo, key=_group_sort_key)
+        panel_lines.append(f"  [dim]{'ligilo:':<14}[/dim]")
+        for uuid in sorted_uuids:
+            group = grouped_ligilo[uuid]
             linked_title = _resolve_uuid_to_title(uuid)
             line = _render_relation_cli_link(linked_title, uuid)
-            if sem:
-                detail = _resolve_uuid_to_title(uuid)
-                line = f"[dim]{sem}[/dim] {line}"
-                if detail and detail != f"#{uuid[:8]}":
-                    line = (
-                        f"[dim]{sem}[/dim] {detail} "
-                        f"[dim]#{uuid[:8]}[/dim]"
-                    )
+            sems = group["sems"]
+            sem_values = sorted(sems) if isinstance(sems, set) else []
+            sem_display = [_sem_display_value(sem, uuid) for sem in sem_values]
+            sem_display_sorted = sorted(
+                sem_display,
+                key=lambda sem: (rank_map.get(sem, 4), sem),
+            )
+            if sem_display_sorted:
+                sem_prefix = ", ".join(sem_display_sorted)
+                line = f"[dim]{sem_prefix}[/dim] {line}"
             panel_lines.append(f"    {line}")
 
     fonto = entry.get("fonto") or []
@@ -1844,9 +2962,7 @@ def _display_entry(
                 parts.append(f"lingvo={s['lingvo']}")
             if s.get("noto"):
                 note_text = _render_markdown_text(str(s["noto"]))
-                parts.append(
-                    f"noto={json.dumps(note_text, ensure_ascii=False)}"
-                )
+                parts.append(f"noto={json.dumps(note_text, ensure_ascii=False)}")
             if s.get("ligilo"):
                 parts.append(f"ligilo={_render_markdown_text(str(s['ligilo']))}")
             title_lang_items = sorted(
@@ -1854,9 +2970,7 @@ def _display_entry(
             )
             for k, v in title_lang_items:
                 val_text = _render_markdown_text(str(v))
-                parts.append(
-                    f"{k}={json.dumps(val_text, ensure_ascii=False)}"
-                )
+                parts.append(f"{k}={json.dumps(val_text, ensure_ascii=False)}")
             panel_lines.append(f"    {' '.join(parts)}")
 
     citajo = entry.get("citajo") or []
@@ -1875,9 +2989,26 @@ def _display_entry(
             jaro = str(quote.get("jaro") or "").strip()
             suffix_parts = [p for p in (autoro, verko, jaro) if p]
             suffix = f" — {'; '.join(suffix_parts)}" if suffix_parts else ""
-            panel_lines.append(f"    \"{text}\"{suffix}")
+            panel_lines.append(f'    "{text}"{suffix}')
         if should_show_hint and not montri_cxion:
             panel_lines.append(f"    [dim]{_language_preference_hint()}[/dim]")
+
+    semantika = _normalize_semantika_valoroj(entry.get("semantika"))
+    if semantika:
+        panel_lines.append(f"  [dim]{'semantika:':<14}[/dim]")
+        for item in semantika:
+            tipo = str(item.get("tipo") or "")
+            arko = str(item.get("arko") or "")
+            rendered_value = _format_semantika_valoro(
+                item.get("valoro"), tipo=tipo, markdown=True
+            )
+            rendered_unuo = _format_semantika_unuo_cli(item)
+            if rendered_unuo:
+                panel_lines.append(
+                    f"    {tipo} {arko} {rendered_value} {rendered_unuo}"
+                )
+            else:
+                panel_lines.append(f"    {tipo} {arko} {rendered_value}")
 
     datumo = entry.get("datumo") or {}
     datumo = _public_datumo(entry)
@@ -1895,9 +3026,23 @@ def _display_entry(
         panel_lines.append(f"  [dim]{'modifita_je:':<14}[/dim] {mj}")
 
     display_title = _render_markdown_text(title)
+    spacing = max(0, int(_load_encik_montrado_settings().get("spaco", 0)))
+    if spacing > 0:
+        spaced_lines: list[str] = []
+        seen_section = False
+        for line in panel_lines:
+            is_section = line.strip().startswith("[dim]") and ":" in line
+            if is_section and seen_section:
+                spaced_lines.extend([""] * spacing)
+            if is_section:
+                seen_section = True
+            spaced_lines.append(line)
+        panel_body = "\n".join(spaced_lines)
+    else:
+        panel_body = "\n".join(panel_lines)
     console.print(
         Panel(
-            "\n".join(panel_lines),
+            panel_body,
             title=f"[bold]{display_title}[/bold]",
             expand=False,
         )
@@ -1937,12 +3082,32 @@ def _render_markdown_text(text: str) -> str:
     return rendered
 
 
+def _has_non_cli_renderable_markup(text: str) -> bool:
+    content = str(text or "")
+    if not content.strip():
+        return False
+    if re.search(r"\$\$.*?\$\$", content, flags=re.DOTALL):
+        return True
+    if re.search(r"(?<!\\)\$(?!\$)[^\n$]*(?<!\\)\$", content):
+        return True
+    if re.search(r"!\[[^\]]*\]\([^)]+\)", content):
+        return True
+    if "<img" in content.lower():
+        return True
+    return False
+
+
+def _strip_markdown_links(text: str) -> str:
+    stripped = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", str(text or ""))
+    return re.sub(r"(\*\*|__|\*|_|`)", "", stripped)
+
+
 def _render_relation_cli_link(label: str, ref: str) -> str:
     """Render a clickable CLI relation link for an encik UUID reference."""
     normalized_ref = str(ref or "").strip().lstrip("#")
     target = _find_by_uuid(normalized_ref)
     short_ref = normalized_ref[:8]
-    clean_label = str(label or "").strip()
+    clean_label = _strip_markdown_links(str(label or "")).strip()
     if clean_label.startswith("##"):
         clean_label = "#" + clean_label.lstrip("#")
     if re.fullmatch(r"#?[0-9a-fA-F]{1,8}\*?", clean_label):
@@ -1957,10 +3122,7 @@ def _render_relation_cli_link(label: str, ref: str) -> str:
     target_path = _write_html_document(target_html)
     short_target = str(target.get("uuid") or "")[:8]
     shown_label = clean_label or str(target.get("titolo") or "")
-    return (
-        f"[link=file://{target_path}]{shown_label}[/link] "
-        f"[dim]#{short_target}[/dim]"
-    )
+    return f"[link=file://{target_path}]{shown_label}[/link] [dim]#{short_target}[/dim]"
 
 
 def _render_relation_html_link(label: str, ref: str, *, link_depth: int = 0) -> str:
@@ -1968,7 +3130,7 @@ def _render_relation_html_link(label: str, ref: str, *, link_depth: int = 0) -> 
     normalized_ref = str(ref or "").strip().lstrip("#")
     target = _find_by_uuid(normalized_ref)
     short_ref = normalized_ref[:8]
-    clean_label = str(label or "").strip()
+    clean_label = _strip_markdown_links(str(label or "")).strip()
     if clean_label.startswith("##"):
         clean_label = "#" + clean_label.lstrip("#")
     if re.fullmatch(r"#?[0-9a-fA-F]{1,8}\*?", clean_label):
@@ -1987,22 +3149,50 @@ def _render_relation_html_link(label: str, ref: str, *, link_depth: int = 0) -> 
     target_path = _write_html_document(target_html)
     return (
         f'<a href="file://{escape(target_path)}">{escape(shown_label)}</a> '
-        f"#{escape(short_target)}"
+        f'<a href="file://{escape(target_path)}">#{escape(short_target)}</a>'
     )
 
 
 def _markdown_to_html_fragment_with_links(md_text: str, *, link_depth: int = 0) -> str:
     if link_depth <= 0:
         md_text = _replace_internal_markdown_links_with_file_urls(md_text)
+    md_text = _repair_latex_controls_in_math(md_text)
     try:
         import markdown  # type: ignore[import-untyped]
     except ImportError:
         return f"<pre>{escape(md_text)}</pre>"
+    safe_text, math_chunks = _protect_math_segments(md_text)
     extensions = ["extra", "toc", "tables", "fenced_code", "codehilite"]
     try:
-        return markdown.markdown(md_text, extensions=extensions)
+        html = markdown.markdown(safe_text, extensions=extensions)
     except Exception:
-        return markdown.markdown(md_text)
+        html = markdown.markdown(safe_text)
+    return _restore_math_segments(html, math_chunks)
+
+
+def _protect_math_segments(text: str) -> tuple[str, list[str]]:
+    chunks: list[str] = []
+
+    def _reserve(match: re.Match[str]) -> str:
+        chunks.append(match.group(0))
+        return f"{_MATH_TOKEN_PREFIX}{len(chunks) - 1}END"
+
+    protected = text
+    for pattern in (
+        re.compile(r"\$\$.*?\$\$", re.DOTALL),
+        re.compile(r"\\\\\[.*?\\\\\]", re.DOTALL),
+        re.compile(r"\\\\\(.*?\\\\\)", re.DOTALL),
+        re.compile(r"(?<!\\)\$(?!\$)[^\n$]*(?<!\\)\$", re.DOTALL),
+    ):
+        protected = pattern.sub(_reserve, protected)
+    return protected, chunks
+
+
+def _restore_math_segments(html: str, chunks: list[str]) -> str:
+    restored = html
+    for idx, raw in enumerate(chunks):
+        restored = restored.replace(f"{_MATH_TOKEN_PREFIX}{idx}END", raw)
+    return restored
 
 
 def _replace_internal_markdown_links_with_file_urls(md_text: str) -> str:
@@ -2085,16 +3275,6 @@ def _render_entry_html(
             )
         )
 
-    superklaso = _normalize_uuid_list(entry.get("superklaso") or [])
-    if superklaso:
-        sup = "<br>".join(
-            _render_relation_html_link(
-                _resolve_uuid_to_title(str(uid)), str(uid), link_depth=link_depth
-            )
-            for uid in superklaso
-        )
-        rows.append(("superklaso", sup))
-
     if montri_cxion:
         sub = _subklasoj_of(entry["uuid"], max_depth=1)
         if sub:
@@ -2103,10 +3283,8 @@ def _render_entry_html(
             )
             rows.append(("subklaso", sub_rows))
 
-    ligilo_items = sorted(
-        _normalize_ligilo_items(entry.get("ligilo") or []),
-        key=_ligilo_rank,
-    )
+    ligilo_items = _normalize_ligilo_items(entry.get("ligilo") or [])
+    ligilo_items = sorted(ligilo_items, key=_ligilo_rank)
     if ligilo_items:
         links = "<br>".join(
             (
@@ -2142,9 +3320,7 @@ def _render_entry_html(
                 title_html = _markdown_to_html_fragment_with_links(
                     str(s["titolo"]), link_depth=link_depth
                 )
-                parts.append(
-                    f'"{title_html}"'
-                )
+                parts.append(f'"{title_html}"')
             if s.get("tipo"):
                 parts.append(f"tipo={escape(str(s['tipo']))}")
             if s.get("lingvo"):
@@ -2158,10 +3334,7 @@ def _render_entry_html(
                 val_html = _markdown_to_html_fragment_with_links(
                     str(v), link_depth=link_depth
                 )
-                parts.append(
-                    f"{escape(k)}="
-                    f"{val_html}"
-                )
+                parts.append(f"{escape(k)}={val_html}")
             fonto_lines.append(" ".join(parts))
         rows.append(("fonto", "<br>".join(fonto_lines)))
 
@@ -2200,6 +3373,22 @@ def _render_entry_html(
             data_sections.append(section)
         rows.append(("datumo", "".join(data_sections)))
 
+    semantika = _normalize_semantika_valoroj(entry.get("semantika"))
+    if semantika:
+        sem_lines: list[str] = []
+        for item in semantika:
+            tipo = str(item.get("tipo") or "")
+            arko = str(item.get("arko") or "")
+            rendered = _format_semantika_valoro(item.get("valoro"), tipo=tipo)
+            rendered_unuo = _format_semantika_unuo_html(item, link_depth=link_depth)
+            if rendered_unuo:
+                sem_lines.append(
+                    f"{escape(tipo)} {escape(arko)} {escape(rendered)} {rendered_unuo}"
+                )
+            else:
+                sem_lines.append(f"{escape(tipo)} {escape(arko)} {escape(rendered)}")
+        rows.append(("semantika", "<br>".join(sem_lines)))
+
     if montri_cxion:
         rows.extend(
             [
@@ -2234,7 +3423,9 @@ def _render_entry_html(
         "document.addEventListener('DOMContentLoaded', function(){"
         "if(window.renderMathInElement){"
         "renderMathInElement(document.body,{"
-        "delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]"
+        "delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false},"
+        "{left:'\\\\[',right:'\\\\]',display:true},{left:'\\\\(',right:'\\\\)',display:false}],"
+        "throwOnError:false,strict:'ignore'"
         "});"
         "}"
         "});"
@@ -2326,23 +3517,55 @@ def _open_html_document(html_doc: str) -> str:
     return tmp_path
 
 
-def _print_candidates(candidates: list[dict]) -> None:
+def _entry_user_locale_title(entry: dict) -> str:
     env_lang = (os.environ.get("LC_ALL") or os.environ.get("LANG") or "").split(".")[0]
     env_lang = env_lang.split("_")[0].lower()
+    terms = entry.get("terminologio") or {}
+    return (
+        terms.get(env_lang)
+        or terms.get("eo")
+        or entry.get("titolo")
+        or next(iter(terms.values()), "")
+    )
+
+
+def _print_candidates(candidates: list[dict]) -> None:
     table = Table(show_header=True, header_style="dim", box=None)
     table.add_column("#", style="dim", width=3)
     table.add_column("UUID", style="dim", width=10)
     table.add_column("Titolo")
     for i, e in enumerate(candidates, 1):
-        terms = e.get("terminologio") or {}
-        display_title = (
-            terms.get(env_lang)
-            or terms.get("eo")
-            or e.get("titolo")
-            or next(iter(terms.values()), "")
-        )
+        display_title = _entry_user_locale_title(e)
         table.add_row(str(i), e["uuid"][:8], display_title)
     console.print(table)
+
+
+def _copy_to_clipboard(value: str, success_message: str) -> None:
+    try:
+        import pyperclip
+    except ImportError:
+        typer.echo("Tonduja subteno mankas (pyperclip ne disponeblas).", err=True)
+        raise typer.Exit(code=1) from None
+    try:
+        pyperclip.copy(value)
+    except pyperclip.PyperclipException as exc:
+        typer.echo(f"Ne povis kopii al tondujo: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(success_message)
+
+
+def _copy_entry_reference(entry: dict, *, semantika: bool = False) -> None:
+    entry_uuid = str(entry.get("uuid") or "")
+    if not entry_uuid:
+        typer.echo("Nevalida nodo: mankas UUID por kopii.", err=True)
+        raise typer.Exit(code=1)
+    short_ref = f"#{entry_uuid[:8]}"
+    if semantika:
+        display_title = _entry_user_locale_title(entry)
+        payload = f"[{display_title}]({short_ref})"
+        _copy_to_clipboard(payload, "Kopiis semantikan referencon al tondujo.")
+        return
+    _copy_to_clipboard(short_ref, f"Kopiis UUID al tondujo: {short_ref}")
 
 
 def _preferred_lang(terminologio: dict[str, str], difinoj: dict[str, str]) -> str:
@@ -2369,7 +3592,9 @@ def _preferred_lang(terminologio: dict[str, str], difinoj: dict[str, str]) -> st
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _resolve_entry(ref: str, *, interactive: bool = True) -> dict | None:
+def _resolve_entry(
+    ref: str, *, interactive: bool = True, precise: bool = False
+) -> dict | None:
     """Return the entry matching *ref* (UUID prefix or partial title).
 
     If multiple candidates exist and *interactive* is True, prompt the user to
@@ -2418,6 +3643,9 @@ def _resolve_entry(ref: str, *, interactive: bool = True) -> dict | None:
                 return candidates[idx]
         except ValueError:
             return None
+
+    if precise:
+        return None
 
     # 3. Fuzzy title search
     candidates = _fuzzy_title_matches(normalized_ref, max_results=5)
@@ -2476,15 +3704,8 @@ def _subklasoj_of(root_uuid: str, max_depth: int) -> list[dict]:
         return []
     root_full_uuid = root["uuid"]
 
-    # Build a parent-UUID → list-of-child-entries index
-    children_of: dict[str, list[dict]] = {}
-    for entry in all_entries:
-        for parent_ref in _normalize_uuid_list(entry.get("superklaso") or []):
-            parent = _find_by_uuid(parent_ref)
-            if parent is None:
-                continue
-            parent_uuid = parent["uuid"]
-            children_of.setdefault(parent_uuid, []).append(entry)
+    _, children_map = _build_class_relation_maps(all_entries)
+    by_uuid = {str(e.get("uuid") or ""): e for e in all_entries if e.get("uuid")}
 
     visited: set[str] = {root_full_uuid}
     results: list[dict] = []
@@ -2494,7 +3715,10 @@ def _subklasoj_of(root_uuid: str, max_depth: int) -> list[dict]:
         current_uuid, depth = queue.popleft()
         if max_depth > 0 and depth >= max_depth:
             continue
-        for child in children_of.get(current_uuid, []):
+        for child_uuid in sorted(children_map.get(current_uuid, set())):
+            child = by_uuid.get(child_uuid)
+            if child is None:
+                continue
             if child["uuid"] in visited:
                 continue
             visited.add(child["uuid"])
@@ -2514,18 +3738,18 @@ def _superklasoj_of(root_uuid: str, max_depth: int) -> list[dict]:
     results: list[dict] = []
     queue: deque[tuple[str, int]] = deque([(root_full_uuid, 0)])
 
+    all_entries = _load_all()
+    parents_map, _ = _build_class_relation_maps(all_entries)
+    by_uuid = {str(e.get("uuid") or ""): e for e in all_entries if e.get("uuid")}
+
     while queue:
         current_uuid, depth = queue.popleft()
         if max_depth > 0 and depth >= max_depth:
             continue
-        entry = _find_by_uuid(current_uuid)
-        if entry is None:
-            continue
-        for parent_ref in _normalize_uuid_list(entry.get("superklaso") or []):
-            parent = _find_by_uuid(parent_ref)
+        for parent_uuid in sorted(parents_map.get(current_uuid, set())):
+            parent = by_uuid.get(parent_uuid)
             if parent is None:
                 continue
-            parent_uuid = parent["uuid"]
             if parent_uuid in visited:
                 continue
             visited.add(parent_uuid)
@@ -2543,20 +3767,18 @@ def _linked_graph_of(
     if root is None:
         return [], []
     start_uuid = str(root["uuid"])
-    children_of: dict[str, list[str]] = {}
-    parents_of: dict[str, list[str]] = {}
+    parents_map, children_map = _build_class_relation_maps(all_entries)
+    children_of: dict[str, list[str]] = {
+        uid: sorted(children) for uid, children in children_map.items()
+    }
+    parents_of: dict[str, list[str]] = {
+        uid: sorted(parents) for uid, parents in parents_map.items()
+    }
     links_of: dict[str, list[str]] = {}
     for entry in all_entries:
         uid = str(entry.get("uuid") or "")
         if not uid:
             continue
-        for parent_ref in _normalize_uuid_list(entry.get("superklaso") or []):
-            parent = _find_by_uuid(parent_ref)
-            if not parent:
-                continue
-            parent_uuid = str(parent["uuid"])
-            parents_of.setdefault(uid, []).append(parent_uuid)
-            children_of.setdefault(parent_uuid, []).append(uid)
         links = []
         for link_item in _normalize_ligilo_items(entry.get("ligilo") or []):
             target = _find_by_uuid(str(link_item.get("uuid") or ""))
@@ -2624,71 +3846,243 @@ def _linked_graph_of(
 def _render_linked_graph_html(
     root: dict, nodes: list[dict], edges: list[tuple[str, str, str, str | None]]
 ) -> str:
-    node_json = []
+    try:
+        from pyvis.network import Network  # type: ignore[import-untyped]
+    except ImportError:
+        typer.echo(
+            "Eraro: pako 'pyvis' ne instalita. Rulu: poetry add pyvis",
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
+
+    env_lang = (os.environ.get("LC_ALL") or os.environ.get("LANG") or "").split(".")[0]
+    env_lang = env_lang.split("_")[0].lower()
+
+    def _graph_title(entry: dict) -> str:
+        terms = entry.get("terminologio") or {}
+        return (
+            str(terms.get(env_lang) or "")
+            or str(terms.get("eo") or "")
+            or str(entry.get("titolo") or "")
+            or str(entry.get("uuid") or "")[:8]
+        )
+
+    root_uuid = str(root.get("uuid") or "")
+    net = Network(
+        height="85vh",
+        width="100%",
+        directed=True,
+        bgcolor="#111111",
+        font_color="#e5e7eb",
+        cdn_resources="remote",
+    )
+    net.barnes_hut(
+        gravity=-14000,
+        central_gravity=0.18,
+        spring_length=95,
+        spring_strength=0.06,
+        damping=0.88,
+    )
+    net.toggle_physics(True)
+
     for entry in nodes:
         uid = str(entry.get("uuid") or "")
-        node_json.append({
-            "id": uid,
-            "label": str(entry.get("titolo") or uid[:8]),
-            "title": f"#{uid[:8]}",
-            "shape": "dot",
-            "size": 22 if uid == str(root.get("uuid")) else 14,
-            "color": "#f5a524" if uid == str(root.get("uuid")) else "#5dade2",
-        })
-    edge_json = []
+        title = _graph_title(entry)
+        is_root = uid == root_uuid
+        net.add_node(
+            uid,
+            label=title,
+            title=f"{escape(title)}<br>#{uid[:8]}",
+            color="#f5a524" if is_root else "#5dade2",
+            size=24 if is_root else 16,
+            shape="dot",
+            group=0 if is_root else 1,
+        )
+
+    seen_edges: set[tuple[str, str, str, str | None]] = set()
     for src, dst, rel, sem in edges:
+        key = (src, dst, rel, sem)
+        if key in seen_edges:
+            continue
+        seen_edges.add(key)
         if rel == "ligilo":
-            label = sem or "ligilo"
-            edge_json.append(
-                {
-                    "from": src,
-                    "to": dst,
-                    "label": label,
-                    "color": {"color": "#27ae60"},
-                }
+            annotation = sem or "ligilo"
+            net.add_edge(
+                src,
+                dst,
+                color="#27ae60",
+                label=annotation,
+                title=escape(annotation),
+                arrows="to",
+                width=1.6,
+                font={"size": 18, "color": "#d1fae5", "strokeWidth": 2},
             )
-        elif rel == "subklaso":
-            edge_json.append(
-                {
-                    "from": src,
-                    "to": dst,
-                    "label": "sub",
-                    "arrows": "to",
-                    "color": {"color": "#8e44ad"},
-                }
+            continue
+        if rel == "subklaso":
+            net.add_edge(
+                src,
+                dst,
+                color="#8e44ad",
+                label="sub",
+                title="subklaso",
+                arrows="to",
+                width=1.6,
+                font={"size": 15, "color": "#e9d5ff", "strokeWidth": 2},
             )
-        else:
-            edge_json.append(
-                {
-                    "from": src,
-                    "to": dst,
-                    "label": "sup",
-                    "arrows": "to",
-                    "color": {"color": "#e67e22"},
-                }
-            )
+            continue
+        net.add_edge(
+            src,
+            dst,
+            color="#e67e22",
+            label="sup",
+            title="superklaso",
+            arrows="to",
+            width=1.6,
+            font={"size": 15, "color": "#fed7aa", "strokeWidth": 2},
+        )
+
     root_label = escape(str(root.get("titolo") or root.get("uuid") or "nodo"))
-    return (
-        "<!doctype html><html><head><meta charset='utf-8'>"
-        "<title>encik ligilo mapo</title>"
-        "<script src='https://unpkg.com/vis-network@9.1.9/"
-        "dist/vis-network.min.js'></script>"
-        "<style>body{font-family:system-ui,sans-serif;margin:0;padding:1rem;"
-        "background:#111;color:#eee;}"
-        "#net{height:85vh;border:1px solid #333;border-radius:8px;"
-        "background:#1b1b1b;}h1{font-size:1rem;}</style>"
-        "</head><body>"
-        f"<h1>Rilata mapo por {root_label}</h1>"
-        "<div id='net'></div><script>"
-        f"const nodes = new vis.DataSet({json.dumps(node_json, ensure_ascii=False)});"
-        f"const edges = new vis.DataSet({json.dumps(edge_json, ensure_ascii=False)});"
-        "const container=document.getElementById('net');"
-        "const data={nodes,edges};"
-        "const options={interaction:{hover:true},"
-        "physics:{stabilization:true},edges:{font:{align:'middle'}}};"
-        "new vis.Network(container,data,options);"
-        "</script></body></html>"
+    net.set_options(
+        json.dumps(
+            {
+                "interaction": {
+                    "hover": True,
+                    "navigationButtons": True,
+                    "keyboard": {"enabled": True, "bindToWindow": False},
+                    "multiselect": True,
+                },
+                "edges": {
+                    "smooth": {"enabled": True, "type": "dynamic"},
+                    "selectionWidth": 2,
+                },
+                "nodes": {
+                    "font": {
+                        "size": 28,
+                        "face": "system-ui",
+                        "color": "#e5e7eb",
+                        "strokeWidth": 3,
+                    },
+                    "scaling": {"label": {"enabled": True, "min": 16, "max": 36}},
+                },
+                "layout": {"improvedLayout": True},
+                "physics": {
+                    "enabled": True,
+                    "barnesHut": {
+                        "gravitationalConstant": -14000,
+                        "centralGravity": 0.18,
+                        "springLength": 95,
+                        "springConstant": 0.06,
+                        "damping": 0.88,
+                    },
+                },
+                "configure": {
+                    "enabled": True,
+                    "filter": ["physics", "layout", "interaction"],
+                    "showButton": True,
+                },
+            },
+            ensure_ascii=False,
+        )
     )
+
+    intro = (
+        f"<h1>Rilata mapo por {root_label}</h1>"
+        "<details open><summary>Helpo pri navigado</summary>"
+        "<ul>"
+        "<li>Rulumilo: zomi/malzomi</li>"
+        "<li>Treni fonon: movi (pan)</li>"
+        "<li>Treni nodon: ŝanĝi aranĝon</li>"
+        "<li>Dekstre: agordoj por fiziko/interago (fold/unfold paneloj)</li>"
+        "</ul></details>"
+    )
+    html = net.generate_html(notebook=False)
+    style_inject = (
+        "<style>"
+        "body{font-family:system-ui,sans-serif;background:#111;color:#e5e7eb;}"
+        "#mynetwork{border:1px solid #333;border-radius:8px;}"
+        "details{margin:.6rem 0;color:#d1d5db;} summary{cursor:pointer;}"
+        "h1{font-size:1.25rem;margin:.4rem 0 .7rem 0;}"
+        "</style>"
+    )
+    html = html.replace("</head>", f"{style_inject}</head>", 1)
+    zoom_shortcuts = (
+        "<script>"
+        "document.addEventListener('keydown', function(ev){"
+        "if(!ev.ctrlKey) return;"
+        "const k=(ev.key||'').toLowerCase();"
+        "if(!['+','-','=','_'].includes(k)) return;"
+        "if(typeof network==='undefined' || !network.getScale) return;"
+        "ev.preventDefault();"
+        "const scale=network.getScale();"
+        "const factor=(k==='-'||k==='_')?0.9:1.1;"
+        "network.moveTo({"
+        "scale: Math.max(0.1, Math.min(4, scale*factor)),"
+        "animation:true"
+        "});"
+        "});"
+        "</script>"
+    )
+    html = html.replace("<body>", f"<body>{intro}{zoom_shortcuts}", 1)
+    return html
+
+
+def _render_semantika_matches_html(
+    rel: str, matches: list[tuple[dict, str]]
+) -> tuple[dict, list[dict], list[tuple[str, str, str, str | None]]]:
+    all_entries = _load_all()
+    by_uuid = {str(e.get("uuid") or ""): e for e in all_entries}
+    nodes_by_uuid: dict[str, dict] = {}
+    edges: list[tuple[str, str, str, str | None]] = []
+    seen_edges: set[tuple[str, str, str, str | None]] = set()
+    root: dict | None = None
+    for source, target_uuid in matches:
+        source_uuid = str(source.get("uuid") or "")
+        if not source_uuid:
+            continue
+        if root is None:
+            root = source
+        nodes_by_uuid[source_uuid] = source
+        target = by_uuid.get(target_uuid) or _find_by_uuid(target_uuid)
+        if target:
+            nodes_by_uuid[str(target.get("uuid") or target_uuid)] = target
+        edge = (source_uuid, target_uuid, "ligilo", rel)
+        if edge not in seen_edges:
+            seen_edges.add(edge)
+            edges.append(edge)
+    root_entry = root or next(iter(nodes_by_uuid.values()))
+    nodes = sorted(
+        nodes_by_uuid.values(), key=lambda e: str(e.get("titolo") or "").casefold()
+    )
+    return root_entry, nodes, edges
+
+
+def _search_graph_of(
+    candidates: list[dict], max_depth: int
+) -> tuple[dict, list[dict], list[tuple[str, str, str, str | None]]]:
+    all_nodes: dict[str, dict] = {}
+    all_edges: list[tuple[str, str, str, str | None]] = []
+    seen_edges: set[tuple[str, str, str, str | None]] = set()
+    for entry in candidates:
+        nodes, edges = _linked_graph_of(
+            str(entry.get("uuid") or ""), max_depth=max_depth
+        )
+        for node in nodes:
+            uid = str(node.get("uuid") or "")
+            if uid:
+                all_nodes[uid] = node
+        for edge in edges:
+            if edge in seen_edges:
+                continue
+            seen_edges.add(edge)
+            all_edges.append(edge)
+    if not all_nodes:
+        seed = candidates[0]
+        all_nodes[str(seed.get("uuid") or "")] = seed
+    root = candidates[0]
+    nodes = sorted(
+        all_nodes.values(), key=lambda e: str(e.get("titolo") or "").casefold()
+    )
+    return root, nodes, all_edges
 
 
 def _paralela_of(root_uuid: str, max_results: int) -> list[dict]:
@@ -2696,24 +4090,20 @@ def _paralela_of(root_uuid: str, max_results: int) -> list[dict]:
     root = _find_by_uuid(root_uuid)
     if root is None:
         return []
-    root_parents: set[str] = set()
-    for parent_ref in _normalize_uuid_list(root.get("superklaso") or []):
-        parent = _find_by_uuid(parent_ref)
-        if parent is not None:
-            root_parents.add(parent["uuid"])
+    all_entries = _load_all()
+    parents_map, _children_map = _build_class_relation_maps(all_entries)
+    by_uuid = {str(e.get("uuid") or ""): e for e in all_entries if e.get("uuid")}
+
+    root_parents = set(parents_map.get(str(root.get("uuid") or ""), set()))
     if not root_parents:
         return []
 
-    all_entries = _load_all()
     sisters: list[dict] = []
-    for entry in all_entries:
-        if entry["uuid"] == root_uuid:
+    for entry in by_uuid.values():
+        uid = str(entry.get("uuid") or "")
+        if uid == str(root.get("uuid") or ""):
             continue
-        entry_parents: set[str] = set()
-        for parent_ref in _normalize_uuid_list(entry.get("superklaso") or []):
-            parent = _find_by_uuid(parent_ref)
-            if parent is not None:
-                entry_parents.add(parent["uuid"])
+        entry_parents = set(parents_map.get(uid, set()))
         if root_parents & entry_parents:
             sisters.append(entry)
         if len(sisters) >= max_results:
@@ -2756,30 +4146,112 @@ def _main(ctx: typer.Context) -> None:
         _welcome()
 
 
+def _print_encik_montrado_settings(settings: dict[str, object]) -> None:
+    table = Table(
+        title="encik agordo — montrado",
+        show_header=True,
+        header_style="bold",
+        expand=False,
+    )
+    table.add_column("KAMPO", style="cyan", no_wrap=True)
+    table.add_column("VALORO", style="white", no_wrap=True)
+    table.add_column("PRISKRIBO", style="dim")
+    table.add_row(
+        "html",
+        "1" if bool(settings.get("html")) else "0",
+        "Defaŭlte malfermi `encik vidi` kiel HTML.",
+    )
+    table.add_row(
+        "scienca_nombro",
+        str(int(settings.get("scienca_nombro", 4))),
+        "Scienca noto kiam |x| >= 10^n aŭ |x| <= 1/10^n.",
+    )
+    table.add_row(
+        "spaco",
+        str(int(settings.get("spaco", 0))),
+        "Nombro de malplenaj linioj inter kampoj en `encik vidi`.",
+    )
+    console.print(table)
+    typer.echo(f"Dosiero: {_ENCIK_CONFIG_FILE}")
+
+
+@app.command("agordi")
+def agordi(
+    html: str | None = typer.Option(
+        None,
+        "--html",
+        help="Defaŭlta HTML-montrado por `encik vidi` (0/1, false/true).",
+    ),
+    scienca_nombro: int | None = typer.Option(
+        None,
+        "-sn",
+        "--scienca-nombro",
+        help="n por limoj 10^n kaj 1/10^n en nombro-montrado (ekz: -sn 4).",
+    ),
+    spaco: int | None = typer.Option(
+        None,
+        "--spaco",
+        help="Malplenaj linioj inter kampoj en `encik vidi` (ekz: --spaco 1).",
+    ),
+) -> None:
+    """Montri aŭ ŝanĝi encik montrado-agordon en ~/.config/autish/encik.toml."""
+    settings = _load_encik_montrado_settings()
+    if html is None and scienca_nombro is None and spaco is None:
+        _print_encik_montrado_settings(settings)
+        return
+    if html is not None:
+        try:
+            settings["html"] = _parse_semantika_bool(html, field="--html")
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+    if scienca_nombro is not None:
+        if scienca_nombro < 0:
+            typer.echo("--scienca-nombro devas esti >= 0.", err=True)
+            raise typer.Exit(code=1)
+        settings["scienca_nombro"] = scienca_nombro
+    if spaco is not None:
+        if spaco < 0:
+            typer.echo("--spaco devas esti >= 0.", err=True)
+            raise typer.Exit(code=1)
+        settings["spaco"] = spaco
+    _save_encik_montrado_settings(settings)
+    typer.echo("Konservis encik montrado-agordon.")
+    _print_encik_montrado_settings(settings)
+
+
 @app.command("aldoni")
 def aldoni(
     dosiero: str = typer.Argument(
         ...,
         help=(
             "Vojo al .enc dosiero.\n"
+            "Ekzemplo: encik aldoni ./fiziko/suno.enc\n"
             "\n"
             "Formato (ĉiu elemento sur nova linio):\n"
-            "  terminologio.xx = \"...\"\n"
-            "  difino.xx = \"...\"\n"
-            "  \"\"\"laŭvola libera teksto\"\"\"\n"
-            "  superklaso = [\"uuid1\", \"uuid2\"]\n"
-            "  ligilo = [\"uuid1\", [\"uuid2\", \"rdf:type\"],\n"
-            "            [\"uuid3\", \"owl:inverseOf\"]]\n"
-            "  fonto = [{titolo=\"...\", autoro=\"...\", jaro=2020, tipo=\"libroj\", "
-            "noto=\"...\", ligilo=\"https://...\", lingvo=\"eo,en\"}]\n"
-            "  citajo = [{teksto=\"...\", autoro=\"...\", verko=\"...\", "
-            "jaro=\"...\", lingvo=\"eo,fr\"}]\n"
-            "  datumo.<nomo> = \"\"\"{...json...}\"\"\"  # nomo devas esti unika\n"
+            '  terminologio.xx = "..."\n'
+            '  difino.xx = "..."\n'
+            '  """laŭvola libera teksto"""\n'
+            '  superklaso = ["uuid1", "uuid2"]\n'
+            '  ligilo = ["uuid1", ["uuid2", "rdf:type"],\n'
+            '            ["uuid3", "owl:inverseOf"]]\n'
+            '  fonto = [{titolo="...", autoro="...", jaro=2020, tipo="libroj", '
+            'noto="...", ligilo="https://...", lingvo="eo,en"}]\n'
+            '  citajo = [{teksto="...", autoro="...", verko="...", '
+            'jaro="...", lingvo="eo,fr"}]\n'
+            '  datumo.<nomo> = """{...json...}"""  # nomo devas esti unika\n'
+            '  semantika = """\n'
+            "  int wdt:P1082 890\n"
+            "  int wdt:P2046 1E6 #abcde\n"
+            "  float wdt:P1082 2,8E8\n"
+            "  str wdt:P5191 philosophia\n"
+            "  bool wdt:P31 true\n"
+            '  """\n'
             "\n"
             "Komentoj en .enc dosiero:\n"
             "  # tiu ĉi estas komento\n"
             "\n"
-            "JSON-datumo: datumo.<nomo> = \"\"\"{...}\"\"\".\n"
+            'JSON-datumo: datumo.<nomo> = """{...}""".\n'
             "Datumo-kampoj:\n"
             "  - metriko (laŭvola): ĉeno aŭ plurlingva objekto.\n"
             "  - meta (laŭvola): objekto kun identigaj metadatumoj; valoroj povas esti "
@@ -2787,12 +4259,20 @@ def aldoni(
             "  - datumo (deviga): listo de vicoj; "
             "unua vico povas esti kolumnetikedoj.\n"
             "  - etikedo (laŭvola): plurlingvaj kolumnaj etikedoj.\n"
+            "Semantika valoro: subtenas '.'/',' decimalajn apartigilojn "
+            "kaj E-notacion; "
+            "laŭvola #UUID unuo, defaŭlte SI.\n"
             "\n"
             "Semantikaj ligiloj (laŭvolaj en ligilo):\n"
             "  rdf:type         # estas tipo de\n"
             "  rdfs:subClassOf  # subklaso de\n"
             "  owl:disjointWith # malkongrua kun\n"
             "  owl:inverseOf    # inversa de\n"
+            "  wdt:P50          # aŭtoro / kreinto\n"
+            "  wdt:P361         # parto de\n"
+            "  wdt:P527         # havas parton\n"
+            "  ...\n"
+            "Plena listo: encik semantika\n"
             "\n"
             "Validaj fonto.tipo:\n"
             "  libroj, artikoloj, retejoj, filmoj, tezoj, raportoj, podkastoj, "
@@ -2801,8 +4281,23 @@ def aldoni(
             "  lib, art, ret, fil, tez, rap, pod, pre"
         ),
     ),
+    kopii_uuid: bool = typer.Option(
+        False,
+        "-k",
+        "--kopii",
+        help="Kopii #xxxxxxxx de la aldonita/modifita nodo al tondujo.",
+    ),
+    semantika_kopii: bool = typer.Option(
+        False,
+        "-sk",
+        "--semantika-kopii",
+        help="Kopii [titolo](#xxxxxxxx) de la aldonita/modifita nodo al tondujo.",
+    ),
 ) -> None:
     """Aldoni novan nodon el .enc dosiero."""
+    if kopii_uuid and semantika_kopii:
+        typer.echo("Uzu nur unu el --kopii aŭ --semantika-kopii.", err=True)
+        raise typer.Exit(code=1)
     path = Path(dosiero).expanduser().resolve()
     if not path.exists():
         typer.echo(f"Dosiero ne trovita: {path}", err=True)
@@ -2817,12 +4312,13 @@ def aldoni(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
     parsed = _merge_auto_ligilo_refs(parsed)
+    parsed = _canonicalize_class_alias_fields(parsed)
 
     # Duplicate title check
     existing = _find_by_title_exact(parsed["titolo"])
     if existing is not None:
         typer.echo(
-            f"Nodo kun titolo \"{existing['titolo']}\" jam ekzistas "
+            f'Nodo kun titolo "{existing["titolo"]}" jam ekzistas '
             f"(#{existing['uuid'][:8]})."
         )
         raw = typer.prompt("Ĉu anstataŭigi? (j/n)", default="n")
@@ -2840,10 +4336,14 @@ def aldoni(
             fonto=parsed["fonto"],
             citajo=parsed["citajo"],
             datumo=parsed["datumo"],
+            semantika=parsed["semantika"],
             modifita_je=_now_iso(),
         )
         _update_entry(existing)
-        typer.echo(f"Modifis #{existing['uuid'][:8]}  \"{existing['titolo']}\"")
+        _sync_bidirectional_relations_for_entry(existing)
+        typer.echo(f'Modifis #{existing["uuid"][:8]}  "{existing["titolo"]}"')
+        if kopii_uuid or semantika_kopii:
+            _copy_entry_reference(existing, semantika=semantika_kopii)
         return
 
     now = _now_iso()
@@ -2856,13 +4356,19 @@ def aldoni(
     _raise_if_semantic_conflicts(entry)
     _insert_entry(entry)
     _sync_bidirectional_relations_for_entry(entry)
-    typer.echo(f"Aldonis #{entry['uuid'][:8]}  \"{entry['titolo']}\"")
+    typer.echo(f'Aldonis #{entry["uuid"][:8]}  "{entry["titolo"]}"')
+    if kopii_uuid or semantika_kopii:
+        _copy_entry_reference(entry, semantika=semantika_kopii)
 
 
 @app.command("modifi")
 def modifi(
     ref: str | None = typer.Argument(
-        None, help="Terminologio (parta aŭ ekzakta) aŭ UUID de redaktota nodo."
+        None,
+        help=(
+            "Terminologio (parta aŭ ekzakta) aŭ UUID de redaktota nodo. "
+            'Ekzemplo: encik modifi "#e0a5d3b7"'
+        ),
     ),
     dosiero: Path | None = typer.Argument(
         None,
@@ -2870,38 +4376,73 @@ def modifi(
         file_okay=True,
         dir_okay=False,
         readable=True,
-        help="Nova .enc dosiero por rekta anstataŭigo (sen redaktilo).",
+        help=(
+            "Nova .enc dosiero por rekta anstataŭigo (sen redaktilo). "
+            "Ekzemplo: encik modifi Fiziko ./nova.enc"
+        ),
     ),
-    titolo: str | None = typer.Option(None, "--titolo", help="Nova ĉefa titolo."),
+    titolo: str | None = typer.Option(
+        None, "--titolo", help='Nova ĉefa titolo. Ekzemplo: --titolo "Nova nodo"'
+    ),
     difinio: str | None = typer.Option(
-        None, "--difinio", help="Nova ĉefa difino."
+        None,
+        "--difinio",
+        help='Nova ĉefa difino. Ekzemplo: --difinio "Mallonga priskribo."',
     ),
     termino: list[str] | None = typer.Option(
         None,
         "-t",
         "--terminologio",
-        help="Anstataŭigi/aldoni terminon laŭ lingvo: xx:teksto (ripetebla).",
+        help=(
+            "Anstataŭigi/aldoni terminon laŭ lingvo: xx:teksto (ripetebla). "
+            'Ekzemplo: -t eo:Suno -t en:Sun'
+        ),
     ),
     termino_difino: list[str] | None = typer.Option(
         None,
         "-d",
         "--difino",
-        help="Anstataŭigi/aldoni difinon laŭ lingvo: xx:teksto (ripetebla).",
+        help=(
+            "Anstataŭigi/aldoni difinon laŭ lingvo: xx:teksto (ripetebla). "
+            'Ekzemplo: -d eo:"Stelo..." -d en:"A star..."'
+        ),
     ),
-    enhavo: str | None = typer.Option(None, "--enhavo", help="Nova enhavo."),
+    enhavo: str | None = typer.Option(
+        None, "--enhavo", help='Nova enhavo. Ekzemplo: --enhavo "Plia teksto."'
+    ),
     superklaso: list[str] | None = typer.Option(
-        None, "--superklaso", help="Anstataŭigi superklaso-liston (ripetebla)."
+        None,
+        "--superklaso",
+        help=(
+            "Anstataŭigi superklaso-liston (ripetebla). "
+            "Ekzemplo: --superklaso #abcd1234"
+        ),
     ),
     ligilo: list[str] | None = typer.Option(
         None,
         "--ligilo",
         help=(
             "Anstataŭigi ligilo-liston (ripetebla). Formoj: UUID aŭ UUID:semantiko "
-            "(ekz. #abc:rdf:type)."
+            "(ekz. --ligilo #abc12345:rdf:type)."
         ),
+    ),
+    kopii_uuid: bool = typer.Option(
+        False,
+        "-k",
+        "--kopii",
+        help="Kopii #xxxxxxxx de la modifita nodo al tondujo.",
+    ),
+    semantika_kopii: bool = typer.Option(
+        False,
+        "-sk",
+        "--semantika-kopii",
+        help="Kopii [titolo](#xxxxxxxx) de la modifita nodo al tondujo.",
     ),
 ) -> None:
     """Modifi ekzistantan nodon per redaktilo, .enc dosiero, aŭ CLI-opcioj."""
+    if kopii_uuid and semantika_kopii:
+        typer.echo("Uzu nur unu el --kopii aŭ --semantika-kopii.", err=True)
+        raise typer.Exit(code=1)
     if not ref:
         typer.echo(
             "Mankas argumento REF. Se vi uzas UUID kun #, citu ĝin:\n"
@@ -2954,9 +4495,7 @@ def modifi(
         try:
             result = subprocess.run([editor, str(tmp_path)])
             if result.returncode != 0:
-                typer.echo(
-                    f"Redaktilo eliris kun kodo {result.returncode}.", err=True
-                )
+                typer.echo(f"Redaktilo eliris kun kodo {result.returncode}.", err=True)
                 raise typer.Exit(code=1)
 
             try:
@@ -2978,6 +4517,7 @@ def modifi(
 
     if parsed is not None:
         parsed = _merge_auto_ligilo_refs(parsed)
+        parsed = _canonicalize_class_alias_fields(parsed)
         entry.update(
             titolo=parsed["titolo"],
             difinio=parsed["difinio"],
@@ -2989,6 +4529,7 @@ def modifi(
             fonto=parsed["fonto"],
             citajo=parsed["citajo"],
             datumo=parsed["datumo"],
+            semantika=parsed["semantika"],
         )
 
     if termino:
@@ -3020,9 +4561,20 @@ def modifi(
     if enhavo is not None:
         entry["enhavo"] = enhavo
     if superklaso is not None:
-        entry["superklaso"] = _normalize_uuid_list(superklaso)
+        merged_from_super = _merge_superklaso_into_ligilo(
+            _normalize_uuid_list(superklaso),
+            _serialize_ligilo_items(_normalize_ligilo_items(entry.get("ligilo") or [])),
+        )
+        entry["ligilo"] = merged_from_super
+        entry["superklaso"] = []
     if ligilo is not None:
-        entry["ligilo"] = _parse_ligilo_cli_values(ligilo)
+        try:
+            entry["ligilo"] = _parse_ligilo_cli_values(ligilo)
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+
+    entry = _canonicalize_class_alias_fields(entry)
 
     terms = dict(entry.get("terminologio") or {})
     defs = {
@@ -3040,14 +4592,14 @@ def modifi(
     entry["difinoj"] = defs
     entry["titolo"] = next(iter(terms.values())).strip()
     primary_lang = next(iter(terms.keys()))
-    entry["difinio"] = defs.get(primary_lang, "").strip() or next(
-        iter(defs.values())
-    ).strip()
+    entry["difinio"] = (
+        defs.get(primary_lang, "").strip() or next(iter(defs.values())).strip()
+    )
 
     existing = _find_by_title_exact(entry["titolo"])
     if existing is not None and existing["uuid"] != entry["uuid"]:
         typer.echo(
-            f"Nodo kun titolo \"{entry['titolo']}\" jam ekzistas "
+            f'Nodo kun titolo "{entry["titolo"]}" jam ekzistas '
             f"(#{existing['uuid'][:8]}).",
             err=True,
         )
@@ -3058,20 +4610,25 @@ def modifi(
     _update_entry(entry)
     _sync_bidirectional_relations_for_entry(entry)
     invalid_path.unlink(missing_ok=True)
-    typer.echo(f"Modifis #{entry['uuid'][:8]}  \"{entry['titolo']}\"")
+    typer.echo(f'Modifis #{entry["uuid"][:8]}  "{entry["titolo"]}"')
+    if kopii_uuid or semantika_kopii:
+        _copy_entry_reference(entry, semantika=semantika_kopii)
 
 
 @app.command("vidi")
 def vidi(
     ref: str | None = typer.Argument(
         None,
-        help="UUID, #UUID, aŭ terminologio (aproksimativa serĉo subtenata).",
+        help=(
+            "UUID, #UUID, aŭ terminologio (aproksimativa serĉo subtenata). "
+            'Ekzemplo: encik vidi "#e0a5d3b7"'
+        ),
     ),
     lingvo: str | None = typer.Option(
         None,
         "-L",
         "--lingvo",
-        help="Montri en difinita lingvo (ekz. eo, en, id).",
+        help="Montri en difinita lingvo (ekz. eo, en, id). Ekzemplo: -L en",
     ),
     montri_cxion: bool = typer.Option(
         False,
@@ -3085,8 +4642,26 @@ def vidi(
         "--html",
         help="Montri la nodon kiel bildigita HTML-tabelo en la defaŭlta retumilo.",
     ),
+    kopii_uuid: bool = typer.Option(
+        False,
+        "-k",
+        "--kopii",
+        help="Kopii #xxxxxxxx de la montrita nodo al tondujo.",
+    ),
+    semantika_kopii: bool = typer.Option(
+        False,
+        "-sk",
+        "--semantika-kopii",
+        help="Kopii [titolo](#xxxxxxxx) de la montrita nodo al tondujo.",
+    ),
 ) -> None:
     """Montri unu nodon laŭ UUID aŭ terminologio."""
+    if kopii_uuid and semantika_kopii:
+        typer.echo("Uzu nur unu el --kopii aŭ --semantika-kopii.", err=True)
+        raise typer.Exit(code=1)
+    if (kopii_uuid or semantika_kopii) and html:
+        typer.echo("--kopii/--semantika-kopii ne kongruas kun --html.", err=True)
+        raise typer.Exit(code=1)
     if not ref:
         typer.echo(
             "Mankas argumento REF. Se vi uzas UUID kun #, citu ĝin:\n"
@@ -3098,12 +4673,503 @@ def vidi(
     if entry is None:
         typer.echo(f"Nodo ne trovita: {ref!r}", err=True)
         raise typer.Exit(code=1)
+    montrado_settings = _load_encik_montrado_settings()
+    if not html and bool(montrado_settings.get("html")):
+        html = True
     if html:
         html_doc = _render_entry_html(entry, lingvo=lingvo, montri_cxion=montri_cxion)
         out_path = _open_html_document(html_doc)
         typer.echo(f"Malfermas en retumilo: {out_path}")
         return
+    if kopii_uuid or semantika_kopii:
+        _copy_entry_reference(entry, semantika=semantika_kopii)
     _display_entry(entry, lingvo=lingvo, montri_cxion=montri_cxion)
+
+
+def _semantika_serci_languages(lingvo: str | None) -> list[str]:
+    if lingvo:
+        parsed = _normalize_lingvo_codes(lingvo, field="--lingvo")
+        if parsed:
+            return parsed
+        raise ValueError("Nevalida --lingvo. Uzu 2-litera(j)n kodojn (ekz: eo,en).")
+    preferred, _ = _load_user_language_preferences()
+    if preferred:
+        return preferred
+    env_lang = (os.environ.get("LC_ALL") or os.environ.get("LANG") or "").split(".")[0]
+    env_code = env_lang.split("_")[0].strip().lower()
+    if re.fullmatch(r"[a-z]{2}", env_code):
+        return [env_code]
+    return ["eo", "en"]
+
+
+def _wikidata_api_get(params: dict[str, str], *, timeout: float = 5.0) -> dict:
+    query = urllib.parse.urlencode(params)
+    url = f"https://www.wikidata.org/w/api.php?{query}"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "autish-encik/0.0.1 (Wikidata semantika integration)"
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            charset = response.headers.get_content_charset() or "utf-8"
+            payload = response.read().decode(charset, errors="replace")
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise RuntimeError("Wikidata API neatingebla") from exc
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Wikidata API respondo nevalida") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("Wikidata API respondo nevalida")
+    return data
+
+
+def _wikidata_search_properties(
+    query: str, languages: list[str]
+) -> list[dict[str, object]]:
+    dedup: dict[str, dict[str, object]] = {}
+    for lang in languages:
+        data = _wikidata_api_get(
+            {
+                "action": "wbsearchentities",
+                "format": "json",
+                "language": lang,
+                "uselang": lang,
+                "type": "property",
+                "limit": "15",
+                "search": query,
+            }
+        )
+        results = data.get("search")
+        if not isinstance(results, list):
+            continue
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            prop_id = str(item.get("id") or "").strip()
+            if not re.fullmatch(r"P\d+", prop_id):
+                continue
+            ligilo = f"wdt:{prop_id}"
+            label = str(item.get("label") or "").strip()
+            description = str(item.get("description") or "").strip()
+            aliases: list[str] = []
+            match_obj = item.get("match")
+            if isinstance(match_obj, dict):
+                text = str(match_obj.get("text") or "").strip()
+                if text and text.lower() != label.lower():
+                    aliases.append(text)
+            if prop_id.lower() not in {alias.lower() for alias in aliases}:
+                aliases.append(prop_id.lower())
+            existing = dedup.get(ligilo)
+            if existing is None:
+                dedup[ligilo] = {
+                    "ligilo": ligilo,
+                    "priskribo": description,
+                    "aliasoj": aliases,
+                    "etikedo": label,
+                    "fonto": "wikidata",
+                }
+                continue
+            if not str(existing.get("priskribo") or "") and description:
+                existing["priskribo"] = description
+            combined_aliases = [str(a) for a in existing.get("aliasoj") or []]
+            for alias in aliases:
+                if alias.lower() not in {a.lower() for a in combined_aliases}:
+                    combined_aliases.append(alias)
+            existing["aliasoj"] = combined_aliases
+    return list(dedup.values())
+
+
+def _wikidata_property_metadata(
+    prop_id: str, languages: list[str]
+) -> dict[str, object]:
+    lang_list = [lang.strip().lower() for lang in languages if lang.strip()]
+    if "en" not in lang_list:
+        lang_list.append("en")
+    if "eo" not in lang_list:
+        lang_list.append("eo")
+    data = _wikidata_api_get(
+        {
+            "action": "wbgetentities",
+            "format": "json",
+            "ids": prop_id,
+            "props": "labels|descriptions|aliases",
+            "languages": "|".join(lang_list),
+        }
+    )
+    entities = data.get("entities")
+    if not isinstance(entities, dict):
+        raise RuntimeError("Wikidata API respondo ne enhavas 'entities'")
+    entity = entities.get(prop_id)
+    if not isinstance(entity, dict):
+        raise RuntimeError("Wikidata API respondo ne enhavas la petitan ID")
+    labels = entity.get("labels")
+    descriptions = entity.get("descriptions")
+    aliases_obj = entity.get("aliases")
+    label = ""
+    description = ""
+    if isinstance(labels, dict):
+        for lang in lang_list:
+            payload = labels.get(lang)
+            if isinstance(payload, dict) and str(payload.get("value") or "").strip():
+                label = str(payload.get("value") or "").strip()
+                break
+    if isinstance(descriptions, dict):
+        for lang in lang_list:
+            payload = descriptions.get(lang)
+            if isinstance(payload, dict) and str(payload.get("value") or "").strip():
+                description = str(payload.get("value") or "").strip()
+                break
+    alias_values: list[str] = []
+    if isinstance(aliases_obj, dict):
+        for lang in lang_list:
+            payload = aliases_obj.get(lang)
+            if not isinstance(payload, list):
+                continue
+            for alias_entry in payload:
+                if not isinstance(alias_entry, dict):
+                    continue
+                value = str(alias_entry.get("value") or "").strip()
+                if value and value.lower() not in {a.lower() for a in alias_values}:
+                    alias_values.append(value)
+    if prop_id.lower() not in {alias.lower() for alias in alias_values}:
+        alias_values.append(prop_id.lower())
+    return {
+        "etikedo": label,
+        "priskribo": description,
+        "aliasoj": alias_values,
+    }
+
+
+semantika_app = typer.Typer(
+    help=_SEMANTIKA_HELPO_TEKSTO,
+    no_args_is_help=False,
+    invoke_without_command=True,
+    context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
+)
+
+
+@semantika_app.callback(invoke_without_command=True)
+def _semantika_root(ctx: typer.Context) -> None:
+    _register_semantika_group_commands()
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
+
+
+def _print_semantika_kategorio(kategorio: str) -> None:
+    groups = _load_semantika_groups()
+    rows = groups.get(kategorio)
+    if not rows:
+        typer.echo(f"Nekonata semantika grupo: {kategorio!r}", err=True)
+        raise typer.Exit(code=1)
+    table = Table(
+        title=f"Semantikaj ligiloj — {kategorio}",
+        show_header=True,
+        header_style="bold",
+        expand=False,
+    )
+    table.add_column("LIGILO", style="cyan", no_wrap=True)
+    table.add_column("PRISKRIBO", style="white")
+    table.add_column("ALIAZOJ", style="dim")
+    for row in rows:
+        canonical = str(row.get("ligilo") or "")
+        description = str(row.get("priskribo") or "")
+        aliases = [str(alias) for alias in (row.get("aliasoj") or []) if str(alias)]
+        alias_text = ", ".join(aliases[:5]) if aliases else ""
+        if len(aliases) > 5:
+            alias_text += ", ..."
+        table.add_row(canonical, description or "-", alias_text or "-")
+    console.print(table)
+    typer.echo(
+        "Uzo: en `ligilo` uzu UUID:semantiko (ekz: "
+        "1234abcd:rdf:type aŭ 1234abcd:wdt:P50)."
+    )
+
+
+def _register_semantika_group_commands() -> None:
+    names = set(_SEMANTIKA_KATEGORIOJ.keys())
+    if _SEMANTIKA_CONFIG_DIR.exists():
+        names.update(
+            path.stem.strip().lower() for path in _SEMANTIKA_CONFIG_DIR.glob("*.csv")
+        )
+    for group_name in sorted(name for name in names if name):
+        if (
+            group_name in _SEMANTIKA_RESERVED_SUBCOMMANDS
+            or group_name in _REGISTERED_SEMANTIKA_GROUP_COMMANDS
+        ):
+            continue
+        help_text = f"Montri semantikajn ligilojn de grupo '{group_name}'."
+
+        def _group_command(group: str = group_name) -> None:
+            _print_semantika_kategorio(group)
+
+        semantika_app.command(group_name, help=help_text)(_group_command)
+        _REGISTERED_SEMANTIKA_GROUP_COMMANDS.add(group_name)
+
+
+@semantika_app.command(
+    "serci",
+    help=(
+        "Serĉi semantikajn arkojn per Wikidata API kun loka fallback "
+        "(~/.config/autish/semantika/*.csv)."
+    ),
+)
+def semantika_ligilo_serci(
+    demando: str = typer.Argument(
+        ...,
+        help='Serĉdemando por LIGILO/PRISKRIBO/ALIAZOJ (ekz: "P1082" aŭ "population").',
+    ),
+    lingvo: str | None = typer.Option(
+        None,
+        "-l",
+        "--lingvo",
+        help="Lingvo-kodo(j) por Wikidata serĉo (ekz: -l eo aŭ -l eo,en).",
+    ),
+) -> None:
+    needle = demando.strip().lower()
+    if not needle:
+        typer.echo("Mankas serĉdemando.", err=True)
+        raise typer.Exit(code=1)
+    try:
+        languages = _semantika_serci_languages(lingvo)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    local_matches: list[dict[str, object]] = []
+    for group_name, rows in _load_semantika_groups().items():
+        for row in rows:
+            ligilo = str(row.get("ligilo") or "")
+            priskribo = str(row.get("priskribo") or "")
+            aliases = [str(alias) for alias in (row.get("aliasoj") or [])]
+            haystack = [ligilo, priskribo, *aliases]
+            if any(needle in value.lower() for value in haystack if value):
+                local_matches.append(
+                    {
+                        "fonto": "loka",
+                        "grupo": group_name,
+                        "ligilo": ligilo,
+                        "priskribo": priskribo,
+                        "aliasoj": aliases,
+                    }
+                )
+
+    wikidata_matches: list[dict[str, object]] = []
+    wikidata_warning = ""
+    try:
+        wikidata_matches = _wikidata_search_properties(demando, languages)
+    except RuntimeError as exc:
+        wikidata_warning = (
+            f"Averto: {exc}. Uzas lokan fallback-serĉon en semantika CSV."
+        )
+    if wikidata_warning:
+        typer.echo(wikidata_warning, err=True)
+
+    combined: list[dict[str, object]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in wikidata_matches + local_matches:
+        key = (str(row.get("fonto") or ""), str(row.get("ligilo") or "").lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        combined.append(row)
+    if not combined:
+        typer.echo("Neniu semantika arko trovita (Wikidata nek loka).")
+        return
+
+    table = Table(show_header=True, header_style="bold", expand=False)
+    table.add_column("FONTO", style="dim", no_wrap=True)
+    table.add_column("GRUPO", style="dim", no_wrap=True)
+    table.add_column("LIGILO", style="cyan", no_wrap=True)
+    table.add_column("PRISKRIBO")
+    table.add_column("ALIAZOJ", style="dim")
+    for row in combined:
+        aliases = [str(alias) for alias in (row.get("aliasoj") or []) if str(alias)]
+        table.add_row(
+            str(row.get("fonto") or "-"),
+            str(row.get("grupo") or "-"),
+            str(row.get("ligilo") or ""),
+            str(row.get("priskribo") or "-"),
+            ", ".join(aliases) if aliases else "-",
+        )
+    console.print(table)
+
+
+def _normalize_semantika_add_id(raw_id: str) -> tuple[str, str | None]:
+    token = str(raw_id or "").strip()
+    if not token:
+        raise ValueError("Mankas semantika ID.")
+    prop_match = re.fullmatch(r"[Pp](\d+)", token)
+    if prop_match:
+        prop_id = f"P{prop_match.group(1)}"
+        return f"wdt:{prop_id}", prop_id
+    wdt_match = re.fullmatch(r"wdt:[Pp](\d+)", token, flags=re.IGNORECASE)
+    if wdt_match:
+        prop_id = f"P{wdt_match.group(1)}"
+        return f"wdt:{prop_id}", prop_id
+    normalized = _normalize_semantika_ligilo(token) or token
+    return normalized, None
+
+
+@semantika_app.command(
+    "aldoni",
+    help=(
+        "Aldoni semantikan arkon al grupo en ~/.config/autish/semantika. "
+        "Normale validigas per Wikidata API; se neatingebla, loka fallback."
+    ),
+)
+def semantika_ligilo_aldoni(
+    identigilo: str = typer.Argument(
+        ...,
+        help='Arko aŭ Wikidata ID (ekz: P1082 aŭ wdt:P1082).',
+    ),
+    grupo: str = typer.Argument(
+        ...,
+        help='Cel-grupo (CSV dosiero). Ekzemplo: "geografio".',
+    ),
+    priskribo: str | None = typer.Option(
+        None,
+        "-p",
+        "--priskribo",
+        help="Mana PRISKRIBO por offline fallback (ekz: -p \"Loĝantaro\").",
+    ),
+    aliazoj: str | None = typer.Option(
+        None,
+        "-a",
+        "--aliazoj",
+        help="Manaj ALIAZOJ (CSV) por offline fallback (ekz: -a p1082,population).",
+    ),
+    lingvo: str | None = typer.Option(
+        None,
+        "-l",
+        "--lingvo",
+        help="Lingvo-kodo(j) por Wikidata metadatumoj (ekz: -l eo,en).",
+    ),
+) -> None:
+    try:
+        group_name = _normalize_semantika_group_name(grupo)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    ligilo, prop_id = _normalize_semantika_add_id(identigilo)
+    groups = _load_semantika_groups()
+    if group_name not in groups:
+        answer = typer.prompt(
+            f"Grupo '{group_name}' ne ekzistas. Ĉu krei ĝin? (j/N)",
+            default="n",
+        )
+        if answer.strip().lower() not in {"j", "jes", "y", "yes"}:
+            typer.echo("Nuligita.")
+            return
+        groups[group_name] = []
+
+    rows = [dict(row) for row in groups.get(group_name, [])]
+    existing = next(
+        (
+            row
+            for row in rows
+            if str(row.get("ligilo") or "").strip().lower() == ligilo.lower()
+        ),
+        None,
+    )
+    if existing is not None:
+        typer.echo(f"{ligilo} jam ekzistas en grupo '{group_name}'.")
+        return
+
+    default_desc, default_aliases = _SEMANTIKA_DEFINOJ_MAP.get(ligilo, ("", ()))
+    resolved_desc = default_desc
+    resolved_aliases = list(default_aliases)
+    if prop_id:
+        try:
+            languages = _semantika_serci_languages(lingvo)
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+        try:
+            meta = _wikidata_property_metadata(prop_id, languages)
+            if str(meta.get("priskribo") or "").strip():
+                resolved_desc = str(meta.get("priskribo") or "").strip()
+            meta_aliases = [str(v) for v in (meta.get("aliasoj") or []) if str(v)]
+            for alias in meta_aliases:
+                if alias.lower() not in {a.lower() for a in resolved_aliases}:
+                    resolved_aliases.append(alias)
+        except RuntimeError as exc:
+            typer.echo(
+                f"Averto: {exc}. Aldono ne validigita kontraŭ Wikidata.",
+                err=True,
+            )
+            if not priskribo:
+                typer.echo(
+                    "Offline fallback: uzu almenaŭ --priskribo por "
+                    "konservi CSV-eniron.",
+                    err=True,
+                )
+                raise typer.Exit(code=1) from exc
+            resolved_desc = priskribo
+            resolved_aliases = _parse_alias_list(aliazoj or "")
+    if priskribo:
+        resolved_desc = priskribo
+    if aliazoj is not None:
+        resolved_aliases = _parse_alias_list(aliazoj)
+    if prop_id and prop_id.lower() not in {a.lower() for a in resolved_aliases}:
+        resolved_aliases.append(prop_id.lower())
+    rows.append(
+        {
+            "ligilo": ligilo,
+            "priskribo": resolved_desc,
+            "aliasoj": resolved_aliases,
+        }
+    )
+    _write_semantika_group_rows(group_name, rows)
+    _invalidate_semantika_config_cache()
+    _register_semantika_group_commands()
+    typer.echo(
+        f"Aldonis {ligilo} al grupo '{group_name}'. "
+        f"Dosiero: {_semantika_group_file(group_name)}"
+    )
+
+
+app.add_typer(semantika_app, name="semantika")
+_register_semantika_group_commands()
+
+
+@app.command("semantika-serci")
+def semantika_serci(
+    ctx: typer.Context,
+    esprimo: str | None = typer.Argument(
+        None,
+        help=(
+            "Kondiĉoj apartigitaj per ';'.\n"
+            "Ekzemploj:\n"
+            '  encik semantika-serci "wdt:P5191 *philosophia*"\n'
+            '  encik semantika-serci "wdt:P1082 (0,1000); wdt:P31 true"'
+        ),
+    ),
+) -> None:
+    """Serĉi nodojn laŭ semantikaj datum-valoroj (AND inter kondiĉoj)."""
+    if esprimo is None:
+        typer.echo(ctx.get_help())
+        return
+    try:
+        conditions = _parse_semantika_serci_conditions(esprimo)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    matches = [
+        entry
+        for entry in _load_all()
+        if _entry_matches_semantika_conditions(entry, conditions)
+    ]
+    if not matches:
+        typer.echo("Neniu nodo trovita por semantika-serĉo.")
+        return
+    if len(matches) == 1:
+        _display_entry(matches[0])
+        return
+    typer.echo(f"{len(matches)} nodo(j) trovitaj.")
+    _print_candidates(matches)
 
 
 @app.command("serci")
@@ -3118,6 +5184,18 @@ def serci(
         "-t",
         "--teksto",
         help="Serĉi tra plena enhavo de nodoj (ne nur titolo).",
+    ),
+    html: bool = typer.Option(
+        False,
+        "-H",
+        "--html",
+        help="Montri serĉrezultojn kiel semantikan retan diagramon en retumilo.",
+    ),
+    preciza: bool = typer.Option(
+        False,
+        "-p",
+        "--preciza",
+        help="Malŝalti malklaran rezervan kongruigon.",
     ),
     nova_unue: bool = typer.Option(
         False,
@@ -3162,7 +5240,7 @@ def serci(
         "--semantiko",
         help=(
             "Filtri laŭ semantika ligilo (ekz: rdf:type, rdfs:subClassOf, "
-            "owl:disjointWith, owl:inverseOf)."
+            "owl:disjointWith, wdt:P50). Plena listo: encik semantika."
         ),
     ),
     al_ref: str | None = typer.Option(
@@ -3172,7 +5250,7 @@ def serci(
     ),
     paralela: bool = typer.Option(
         False,
-        "-p",
+        "-P",
         "--paralela",
         help="Serĉi paralelajn klasojn (nodoj kun sama superklaso).",
     ),
@@ -3181,8 +5259,7 @@ def serci(
         "-L",
         "--limo",
         help=(
-            "Por -s/-S: maksimuma profundo (0 = senlima). "
-            "Por -p: maksimumaj rezultoj."
+            "Por -s/-S: maksimuma profundo (0 = senlima). Por -p: maksimumaj rezultoj."
         ),
     ),
     paralela_limo: int = typer.Option(
@@ -3191,12 +5268,34 @@ def serci(
         hidden=True,
         help="Maksimumaj rezultoj por --paralela (defaŭlte 100).",
     ),
+    kopii_uuid: bool = typer.Option(
+        False,
+        "-k",
+        "--kopii",
+        help=(
+            "Kopii mallongan UUID-referencon (#xxxxxxxx) de la trovita nodo al tondujo "
+            "(ĉe pluraj rezultoj: la interage elektita)."
+        ),
+    ),
+    semantika_kopii: bool = typer.Option(
+        False,
+        "-sk",
+        "--semantika-kopii",
+        help=(
+            "Kopii semantikan referencon en formo [titolo](#xxxxxxxx) al tondujo "
+            "(ĉe pluraj rezultoj: la interage elektita)."
+        ),
+    ),
 ) -> None:
-    """Serĉi nodojn."""
-    relation_mode = any(
-        value is not None for value in (subklasoj, superklasoj, ligilo_ref, semantiko)
-    ) or paralela
-    if not relation_mode and not demando:
+    """Serĉi nodojn. Por semantikaj ligiloj, vidu ankaŭ: encik semantika."""
+    relation_mode = (
+        any(
+            value is not None
+            for value in (subklasoj, superklasoj, ligilo_ref, semantiko)
+        )
+        or paralela
+    )
+    if not relation_mode and not demando and not (kopii_uuid or semantika_kopii):
         typer.echo(ctx.get_help())
         return
 
@@ -3206,21 +5305,31 @@ def serci(
     if alta_unue and malalta_unue:
         typer.echo("Uzu nur unu el --alta-unue aŭ --malalta-unue.", err=True)
         raise typer.Exit(code=1)
+    if kopii_uuid and semantika_kopii:
+        typer.echo("Uzu nur unu el --kopii aŭ --semantika-kopii.", err=True)
+        raise typer.Exit(code=1)
     if semantiko and ligilo_ref is not None:
         typer.echo("Uzu aŭ --ligilo aŭ --semantiko, ne ambaŭ samtempe.", err=True)
         raise typer.Exit(code=1)
     if al_ref and not semantiko:
         typer.echo("--al postulas --semantiko.", err=True)
         raise typer.Exit(code=1)
+    if (kopii_uuid or semantika_kopii) and demando is None:
+        typer.echo("--kopii/--semantika-kopii postulas serĉan demandon.", err=True)
+        raise typer.Exit(code=1)
+    if (kopii_uuid or semantika_kopii) and html:
+        typer.echo("--kopii/--semantika-kopii ne kongruas kun --html.", err=True)
+        raise typer.Exit(code=1)
 
     if semantiko:
         rel = _normalize_semantika_ligilo(semantiko)
-        if not rel:
+        if not rel or not _is_known_semantika_ligilo(rel):
             typer.echo("Nevalida --semantiko valoro.", err=True)
+            typer.echo(_semantika_help_hint(), err=True)
             raise typer.Exit(code=1)
         target_uuid: str | None = None
         if al_ref:
-            target = _resolve_entry(al_ref, interactive=False)
+            target = _resolve_entry(al_ref, interactive=False, precise=preciza)
             if target is None:
                 typer.echo(f"Cela nodo ne trovita por --al: {al_ref!r}", err=True)
                 raise typer.Exit(code=1)
@@ -3240,6 +5349,14 @@ def serci(
                 matches.append((entry, resolved_uuid))
         if not matches:
             typer.echo("Neniu semantika ligilo trovita.")
+            return
+        if html:
+            root, graph_nodes, graph_edges = _render_semantika_matches_html(
+                rel, matches
+            )
+            html_doc = _render_linked_graph_html(root, graph_nodes, graph_edges)
+            out_path = _open_html_document(html_doc)
+            typer.echo(f"Malfermas semantikan mapon en retumilo: {out_path}")
             return
         typer.echo(f"Semantikaj ligiloj ({rel}):")
         for source, to_uuid in matches:
@@ -3261,11 +5378,20 @@ def serci(
         raise typer.Exit(code=1)
 
     if root_ref is not None:
-        root = _resolve_entry(root_ref)
+        root = _resolve_entry(root_ref, precise=preciza)
         if root is None:
             typer.echo(f"Nodo ne trovita: {root_ref!r}", err=True)
             raise typer.Exit(code=1)
         depth = abs(limo)
+        if html:
+            graph_nodes, graph_edges = _linked_graph_of(root["uuid"], max_depth=depth)
+            if not graph_nodes:
+                typer.echo(f"Neniu rilata nodo trovita por '{root['titolo']}'.")
+                return
+            html_doc = _render_linked_graph_html(root, graph_nodes, graph_edges)
+            out_path = _open_html_document(html_doc)
+            typer.echo(f"Malfermas rilatan mapon en retumilo: {out_path}")
+            return
 
         # ── -s / --subklasoj ───────────────────────────────────────────────
         if subklasoj is not None and not paralela:
@@ -3315,28 +5441,69 @@ def serci(
 
     # ── serĉo laŭ demando (defaŭlte titolo, kun -t plena teksto) ──────────
     if demando is not None:
-        candidates = _search_entries(
-            demando,
-            full_text=teksto,
-            max_results=abs(limo),
-            prefer_newest=not malnova_unue,
-            prefer_high_level=not malalta_unue,
-        )
+        def _copy_selected_entry(entry: dict) -> None:
+            if not kopii_uuid and not semantika_kopii:
+                return
+            entry_uuid = str(entry.get("uuid") or "")
+            if not entry_uuid:
+                typer.echo("Nevalida nodo: mankas UUID por kopii.", err=True)
+                raise typer.Exit(code=1)
+            short_ref = f"#{entry_uuid[:8]}"
+            if semantika_kopii:
+                display_title = _entry_user_locale_title(entry)
+                payload = f"[{display_title}]({short_ref})"
+                _copy_to_clipboard(payload, "Kopiis semantikan referencon al tondujo.")
+                return
+            _copy_to_clipboard(short_ref, f"Kopiis UUID al tondujo: {short_ref}")
+
+        if preciza:
+            needle = demando.strip().lower()
+            candidates = [
+                e
+                for e in _load_all()
+                if needle
+                and (
+                    str(e.get("titolo") or "").strip().lower() == needle
+                    or needle
+                    in {
+                        str(v).strip().lower()
+                        for v in (e.get("terminologio") or {}).values()
+                        if str(v).strip()
+                    }
+                    or str(e.get("uuid") or "").startswith(needle.lstrip("#"))
+                )
+            ][: abs(limo)]
+        else:
+            candidates = _search_entries(
+                demando,
+                full_text=teksto,
+                max_results=abs(limo),
+                prefer_newest=not malnova_unue,
+                prefer_high_level=not malalta_unue,
+            )
+        if html and candidates:
+            root, graph_nodes, graph_edges = _search_graph_of(candidates, max_depth=1)
+            html_doc = _render_linked_graph_html(root, graph_nodes, graph_edges)
+            out_path = _open_html_document(html_doc)
+            typer.echo(f"Malfermas serĉan mapon en retumilo: {out_path}")
+            return
         if not candidates:
             typer.echo(f"Neniu nodo trovita por '{demando}'.")
             return
         if len(candidates) == 1:
+            _copy_selected_entry(candidates[0])
             _display_entry(candidates[0])
             return
         _print_candidates(candidates)
         raw = typer.prompt(
-            "Elektu numeron por vidi detalojn (aŭ Enter por preteriri)",
+            "Elektu numeron por vidi detalojn/kopii (aŭ Enter por preteriri)",
             default="",
         )
         if raw.strip():
             try:
                 idx = int(raw.strip()) - 1
                 if 0 <= idx < len(candidates):
+                    _copy_selected_entry(candidates[idx])
                     _display_entry(candidates[idx])
             except ValueError:
                 pass
@@ -3357,28 +5524,25 @@ def ls(
     ),
 ) -> None:
     """List encik entries with pagination.
-    
+
     By default, shows the newest 10 entries. Use -p to paginate and -i to reverse order.
     """
     conn = _get_conn()
     try:
         # Get total count
         total = conn.execute("SELECT COUNT(*) FROM encik").fetchone()[0]
-        
+
         if total == 0:
             typer.echo("Neniu eniro en la datumbazo.")
             raise typer.Exit(code=0)
-        
+
         # Calculate pagination
         offset = (pagho - 1) * per_pagho
         if offset >= total:
             max_pages = (total + per_pagho - 1) // per_pagho
-            typer.echo(
-                f"Paĝo {pagho} ne ekzistas (nur {max_pages} paĝo(j)).",
-                err=True
-            )
+            typer.echo(f"Paĝo {pagho} ne ekzistas (nur {max_pages} paĝo(j)).", err=True)
             raise typer.Exit(code=1)
-        
+
         # Fetch entries with sorting
         order = "ASC" if inversa else "DESC"
         rows = conn.execute(
@@ -3388,7 +5552,7 @@ def ls(
                 LIMIT ? OFFSET ?""",
             (per_pagho, offset),
         ).fetchall()
-        
+
         # Display as table
         table = Table(
             show_header=True,
@@ -3400,19 +5564,19 @@ def ls(
         table.add_column("Titolo", min_width=30)
         table.add_column("Kreita", width=12)
         table.add_column("Modifita", width=12)
-        
+
         for row in rows:
             uid_short = row[0][:8]
             titolo = row[1]
             kreita = row[2][:10] if row[2] else ""
             modifita = row[3][:10] if row[3] else ""
             table.add_row(uid_short, titolo, kreita, modifita)
-        
+
         # Display summary and table
         start_idx = offset + 1
         end_idx = min(offset + per_pagho, total)
         total_pages = (total + per_pagho - 1) // per_pagho
-        
+
         console.print(
             f"[dim]Montras {start_idx}-{end_idx} el {total} eniro(j) | "
             f"Paĝo {pagho}/{total_pages}[/dim]"
@@ -3438,8 +5602,7 @@ def forigi(
     """Delete one or more encik entries by UUID."""
     if not uuids:
         typer.echo(
-            "Mankas UUID. Se vi uzas UUID kun #, citu ĝin:\n"
-            '  encik forigi "#e0a5d3b7"',
+            'Mankas UUID. Se vi uzas UUID kun #, citu ĝin:\n  encik forigi "#e0a5d3b7"',
             err=True,
         )
         raise typer.Exit(code=2)
@@ -3453,28 +5616,27 @@ def forigi(
             row = conn.execute(
                 "SELECT uuid, titolo FROM encik WHERE uuid = ?", (uuid_input,)
             ).fetchone()
-            
+
             if not row:
                 # Try prefix match (8-char)
                 rows = conn.execute(
                     "SELECT uuid, titolo FROM encik WHERE uuid LIKE ?",
                     (uuid_input + "%",),
                 ).fetchall()
-                
+
                 if not rows:
                     typer.echo(f"UUID ne trovita: {uuid_input}", err=True)
                     raise typer.Exit(code=1)
                 elif len(rows) > 1:
                     typer.echo(
-                        f"Pluredaj trovoj por {uuid_input}. "
-                        "Uzu pli longan UUID-on.",
+                        f"Pluredaj trovoj por {uuid_input}. Uzu pli longan UUID-on.",
                         err=True,
                     )
                     raise typer.Exit(code=1)
                 row = rows[0]
-            
+
             to_delete.append({"uuid": row["uuid"], "titolo": row["titolo"]})
-        
+
         # Confirmation
         all_entries = _load_all()
         refs = _collect_encik_incoming_refs(
@@ -3492,14 +5654,14 @@ def forigi(
             if confirm.strip().lower() not in ("j", "jes", "y", "yes"):
                 typer.echo("Nuligita.")
                 return
-        
+
         # Delete
         for entry in to_delete:
             conn.execute("DELETE FROM encik WHERE uuid = ?", (entry["uuid"],))
-        
+
         conn.commit()
         typer.echo(f"[✓] Forigis {len(to_delete)} eniro(j).")
-    
+
     except Exception as exc:
         conn.rollback()
         raise exc

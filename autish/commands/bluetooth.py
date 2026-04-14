@@ -18,7 +18,7 @@ import typer
 from autish.utils import echo_padded
 
 app = typer.Typer(
-    help="Bluetooth device management commands.",
+    help="Komandoj por administri Bluetooth-aparatojn.",
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
@@ -39,6 +39,13 @@ def _bluetooth_powered() -> tuple[bool, str]:
         if "Powered:" in line:
             return ("yes" in line.lower(), output.strip())
     return (False, output.strip())
+
+
+def _try_unblock_bluetooth() -> None:
+    """Best-effort unblock for adapters disabled by rfkill/system settings."""
+    unblock = _run(["rfkill", "unblock", "bluetooth"])
+    if unblock.returncode != 0:
+        return
 
 
 @app.command("ls")
@@ -102,12 +109,15 @@ def konekti(
     if not powered:
         power_result = _bluetoothctl("power", "on")
         if power_result.returncode != 0:
-            typer.echo(
-                power_result.stderr.strip()
-                or "Ne povis ŝalti Bluetooth antaŭ konekti.",
-                err=True,
-            )
-            raise typer.Exit(code=power_result.returncode)
+            _try_unblock_bluetooth()
+            power_result = _bluetoothctl("power", "on")
+            if power_result.returncode != 0:
+                typer.echo(
+                    power_result.stderr.strip()
+                    or "Ne povis ŝalti Bluetooth antaŭ konekti.",
+                    err=True,
+                )
+                raise typer.Exit(code=power_result.returncode)
         powered_after, raw_after = _bluetooth_powered()
         if not powered_after:
             detail = raw_after or raw_status or power_result.stdout.strip()

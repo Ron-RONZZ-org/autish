@@ -8,6 +8,7 @@ Usage:
 
 from __future__ import annotations
 
+import re
 import subprocess
 import tempfile
 import webbrowser
@@ -24,7 +25,7 @@ from rich.console import Console
 
 app = typer.Typer(
     name="md",
-    help="Markdown utilities: view in browser, export, and import.",
+    help="Markdown-iloj: vidi en retumilo, eksporti kaj importi.",
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
@@ -49,8 +50,16 @@ _PANDOC_FORMAT: dict[str, str] = {
     "tex": "latex",
 }
 
+# Destination extension → export format map
+_EXPORT_FORMAT_FROM_SUFFIX: dict[str, str] = {
+    ".html": "html",
+    ".htm": "html",
+    ".pdf": "pdf",
+}
+
 # KaTeX CDN version — pinned for reproducibility
 _KATEX_VERSION = "0.16.11"
+_MATH_TOKEN_PREFIX = "AUTISHMATHSEGMENT"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # HTML template
@@ -76,7 +85,9 @@ _HTML_TEMPLATE = """\
       {{left: '$', right: '$', display: false}},
       {{left: '\\\\[', right: '\\\\]', display: true}},
       {{left: '\\\\(', right: '\\\\)', display: false}}
-    ]
+    ],
+    throwOnError: false,
+    strict: 'ignore'
   }});">
 </script>
 <style>
@@ -211,8 +222,36 @@ def _markdown_to_html_body(md_text: str) -> str:
         )
         raise typer.Exit(code=1) from None
 
+    safe_text, math_chunks = _protect_math_segments(md_text)
     extensions = ["extra", "toc", "tables", "fenced_code", "codehilite"]
-    return markdown.markdown(md_text, extensions=extensions)
+    html = markdown.markdown(safe_text, extensions=extensions)
+    return _restore_math_segments(html, math_chunks)
+
+
+def _protect_math_segments(text: str) -> tuple[str, list[str]]:
+    """Protect math delimiters from Markdown emphasis parsing."""
+    chunks: list[str] = []
+
+    def _reserve(match: re.Match[str]) -> str:
+        chunks.append(match.group(0))
+        return f"{_MATH_TOKEN_PREFIX}{len(chunks)-1}END"
+
+    protected = text
+    for pattern in (
+        re.compile(r"\$\$.*?\$\$", re.DOTALL),
+        re.compile(r"\\\\\[.*?\\\\\]", re.DOTALL),
+        re.compile(r"\\\\\(.*?\\\\\)", re.DOTALL),
+        re.compile(r"(?<!\\)\$(?!\$)[^\n$]*(?<!\\)\$", re.DOTALL),
+    ):
+        protected = pattern.sub(_reserve, protected)
+    return protected, chunks
+
+
+def _restore_math_segments(html: str, chunks: list[str]) -> str:
+    restored = html
+    for idx, raw in enumerate(chunks):
+        restored = restored.replace(f"{_MATH_TOKEN_PREFIX}{idx}END", raw)
+    return restored
 
 
 def _build_html(
@@ -301,14 +340,25 @@ def eksporti(
     source: str = typer.Argument(..., help="Path or URL to the source Markdown file."),
     destination: str = typer.Argument(..., help="Destination file path."),
     formato: str = typer.Option(
-        "html",
+        "",
         "-f",
         "--formato",
-        help="Output format: html (default) or pdf.",
+        help="Output format: html or pdf. Se preterlasita, konkludas laŭ dosierfino.",
     ),
 ) -> None:
     """Export a Markdown file as HTML or PDF."""
     fmt = formato.lower().strip()
+    dest = Path(destination)
+    if not fmt:
+        inferred = _EXPORT_FORMAT_FROM_SUFFIX.get(dest.suffix.lower())
+        if inferred is None:
+            typer.echo(
+                "Eraro: ne povas konkludi formaton el dosierfino. "
+                "Uzu --formato html aŭ --formato pdf.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        fmt = inferred
     if fmt not in ("html", "pdf"):
         typer.echo(
             f"Eraro: nesubtenata formato '{formato}'. Uzu 'html' aŭ 'pdf'.",
@@ -320,7 +370,6 @@ def eksporti(
     title = _source_title(source)
     html = _build_html(md_text, title=title, fold_level=0)
 
-    dest = Path(destination)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     if fmt == "html":

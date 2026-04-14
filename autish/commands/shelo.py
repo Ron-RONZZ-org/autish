@@ -18,7 +18,7 @@ from pathlib import Path
 import typer
 
 app = typer.Typer(
-    help="Start an interactive autish shell (no need to type 'autish' each time).",
+    help="Startigi interagan autish-ŝelon (ne necesas tajpi 'autish' ĉiufoje).",
     invoke_without_command=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )

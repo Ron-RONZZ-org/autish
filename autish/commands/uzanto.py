@@ -27,14 +27,14 @@ from rich.table import Table
 
 app = typer.Typer(
     name="uzanto",
-    help="Uzanto — user profile and master-password management.",
+    help="Uzanto — administri uzantprofilon kaj ĉefpasvorton.",
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
 
 profilo_app = typer.Typer(
     name="profilo",
-    help="Manage user profile (profilo).",
+    help="Administri uzantprofilon (profilo).",
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )

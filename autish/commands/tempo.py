@@ -16,7 +16,7 @@ import typer
 from autish.utils import echo_padded
 
 app = typer.Typer(
-    help="Print current local time and day of week.",
+    help="Montri nunan lokan horon kaj semajnotagon.",
     invoke_without_command=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )

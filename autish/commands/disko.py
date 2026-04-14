@@ -26,7 +26,7 @@ from rich.table import Table
 
 app = typer.Typer(
     name="disko",
-    help="Disko — storage device management.",
+    help="Disko — administri stokajn aparatojn.",
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )

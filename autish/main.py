@@ -7,6 +7,7 @@ from autish.commands import (
     disko,
     encik,
     filmeto,
+    kalendaro,
     kontakto,
     kp,
     md,
@@ -20,10 +21,18 @@ from autish.commands import (
     vorto,
     wifi,
 )
+from autish.i18n import apply_cli_i18n, tr
+
+apply_cli_i18n()
 
 app = typer.Typer(
     name="autish",
-    help="Cross-platform CLI for essential tasks with minimum stimulation.",
+    help=tr(
+        "Transplatforma CLI por esencaj taskoj kun minimuma stimulo.",
+        "Cross-platform CLI for essential tasks with minimum stimulation.",
+        "CLI multiplateforme pour les tâches essentielles avec une stimulation "
+        "minimale.",
+    ),
     no_args_is_help=True,
     add_completion=True,
     context_settings={"help_option_names": ["-h", "--help"]},
@@ -42,6 +51,7 @@ app.add_typer(sekurkopio.app, name="sekurkopio")
 app.add_typer(uzanto.app, name="uzanto")
 app.add_typer(md.app, name="md")
 app.add_typer(encik.app, name="encik")
+app.add_typer(kalendaro.app, name="kalendaro")
 app.add_typer(disko.app, name="disko")
 app.add_typer(usb.app, name="usb")
 app.add_typer(filmeto.app, name="filmeto")
@@ -49,7 +59,7 @@ app.add_typer(filmeto.app, name="filmeto")
 
 @app.command("help")
 def help_cmd(ctx: typer.Context) -> None:
-    """Show help (equivalent to autish -h)."""
+    """Montri helpon (ekvivalenta al autish -h)."""
     root = ctx
     while root.parent:
         root = root.parent

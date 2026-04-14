@@ -26,7 +26,7 @@ import pyperclip
 import typer
 
 app = typer.Typer(
-    help="Execute a command and copy its output to clipboard.",
+    help="Ruli komandon kaj kopii ĝian eligon al tondujo.",
     invoke_without_command=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )

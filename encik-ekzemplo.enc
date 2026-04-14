@@ -1,0 +1,41 @@
+terminologio.eo="Grekio, Helena Respubliko"
+terminologio.fr="la Grèce; République hellénique"
+terminologio.en="Greece; Hellenic Republic"
+terminologio.el="Ελληνική Δημοκρατία; Ellinikí Dimokratía"
+difino.eo="""
+- lando en sudorienta [Eŭropo](#39d71f29)
+- ofte konsiderata la lulilo de la eŭropa civilizo"""
+
+semantika="""
+int wdt:P2046 1 000 000
+int wdt:P1082 890"""
+
+datumo.{var-name}="""
+  {
+    "metriko": {
+      "en": "Unemployment rate",
+      "fr": "Taux de chômage"
+    }
+  },
+  "meta": {
+    "landoj": "France",
+    },
+  "datumo": [
+    {"jaro", "valoro"},
+    {2010, 9.3},
+    {2011, 9.2}
+  ]
+  "etikedo": {
+  "jaro": {
+  "en": "year",
+  "eo": "jaro",
+  "fr": "année"
+  },
+  "valoro": {
+  "en": "value",
+  "eo": "valoro",
+  "fr": "valeur"
+  }
+  }
+}"""
+

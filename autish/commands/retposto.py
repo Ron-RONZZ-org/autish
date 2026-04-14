@@ -31,6 +31,7 @@ import smtplib
 import socket
 import sqlite3
 import ssl
+import unicodedata
 import urllib.request
 import uuid as _uuid_mod
 import webbrowser
@@ -58,7 +59,7 @@ from rich.table import Table
 app = typer.Typer(
     name="retposto",
     help=(
-        "Retpoŝto — TUI email microapp.\n\n"
+        "Retpoŝto — TUI retpoŝta mikroapo.\n\n"
         "Altnivela CLI-agordo:\n"
         "  - subskribo  (retposto subskribo ...)\n"
         "  - filtro     (retposto filtro agordi/montri ...)"
@@ -70,7 +71,7 @@ app = typer.Typer(
 
 kontakto_app = typer.Typer(
     name="kontakto",
-    help="Manage contacts (koresponda listo).",
+    help="Administri kontaktojn (koresponda listo).",
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
@@ -78,7 +79,7 @@ app.add_typer(kontakto_app, name="kontakto")
 
 filtro_app = typer.Typer(
     name="filtro",
-    help="Manage Sieve-style message filters.",
+    help="Administri Sieve-stilajn mesaĝ-filtrilojn.",
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
@@ -1016,6 +1017,9 @@ def _load_known_uids(
 
 
 def _save_message(msg: dict) -> int:
+    subjekto = _sanitize_ascii_text(msg.get("subjekto"))
+    korpo = _sanitize_ascii_text(msg.get("korpo"))
+    html_korpo = _sanitize_ascii_text(msg.get("html_korpo"))
     with _get_db() as con:
         # Check for duplicate by message_id
         if msg.get("message_id"):
@@ -1044,9 +1048,9 @@ def _save_message(msg: dict) -> int:
                 json.dumps(msg.get("al") or [], ensure_ascii=False),
                 json.dumps(msg.get("cc") or [], ensure_ascii=False),
                 json.dumps(msg.get("bcc") or [], ensure_ascii=False),
-                msg.get("subjekto"),
-                msg.get("korpo"),
-                msg.get("html_korpo"),
+                subjekto,
+                korpo,
+                html_korpo,
                 msg.get("prioritato", 5),
                 int(msg.get("legita", False)),
                 int(msg.get("stelo", False)),
@@ -1899,7 +1903,58 @@ def _decode_header(value: str | None) -> str:
                 decoded.append(bpart.decode("utf-8", errors="replace"))
         else:
             decoded.append(bpart)
-    return "".join(decoded)
+    return _sanitize_ascii_text("".join(decoded))
+
+
+def _sanitize_ascii_text(value: str | None) -> str:
+    """Normalize text to ASCII-friendly content."""
+    if not value:
+        return ""
+    substitutions = {
+        "\u00a0": " ",
+        "\u2000": " ",
+        "\u2001": " ",
+        "\u2002": " ",
+        "\u2003": " ",
+        "\u2004": " ",
+        "\u2005": " ",
+        "\u2006": " ",
+        "\u2007": " ",
+        "\u2008": " ",
+        "\u2009": " ",
+        "\u200a": " ",
+        "\u202f": " ",
+        "\u205f": " ",
+        "\u3000": " ",
+        "\u200b": "",
+        "\u200c": "",
+        "\u200d": "",
+        "\ufeff": "",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2212": "-",
+        "\u2026": "...",
+    }
+    normalized_parts: list[str] = []
+    for ch in value:
+        if ch in substitutions:
+            normalized_parts.append(substitutions[ch])
+            continue
+        category = unicodedata.category(ch)
+        if category.startswith("Z"):
+            normalized_parts.append(" ")
+            continue
+        if category == "Cf":
+            normalized_parts.append("")
+            continue
+        normalized_parts.append(ch)
+    normalized = "".join(normalized_parts)
+    normalized = unicodedata.normalize("NFKD", normalized)
+    return normalized.encode("ascii", errors="ignore").decode("ascii")
 
 
 def _extract_address(raw: str | None) -> str:
@@ -2048,17 +2103,21 @@ def _parse_imap_message(
                 payload = part.get_payload(decode=True)
                 if isinstance(payload, bytes):
                     charset = part.get_content_charset() or "utf-8"
-                    korpo = payload.decode(charset, errors="replace")
+                    korpo = _sanitize_ascii_text(
+                        payload.decode(charset, errors="replace")
+                    )
             elif ct == "text/html" and html_korpo is None:
                 payload = part.get_payload(decode=True)
                 if isinstance(payload, bytes):
                     charset = part.get_content_charset() or "utf-8"
-                    html_korpo = payload.decode(charset, errors="replace")
+                    html_korpo = _sanitize_ascii_text(
+                        payload.decode(charset, errors="replace")
+                    )
     else:
         payload = msg.get_payload(decode=True)
         if isinstance(payload, bytes):
             charset = msg.get_content_charset() or "utf-8"
-            korpo = payload.decode(charset, errors="replace")
+            korpo = _sanitize_ascii_text(payload.decode(charset, errors="replace"))
 
     mesago_dict = {
         "uuid": _make_uuid(),

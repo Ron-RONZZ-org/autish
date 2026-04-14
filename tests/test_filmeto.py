@@ -51,6 +51,15 @@ class _FakeYDL:
             }
         return {"id": "vid1", "title": "Test one", "filesize_approx": 1024}
 
+    def prepare_filename(self, item):
+        title = str(item.get("title") or "video")
+        ext = str(item.get("ext") or "mp4")
+        vid = str(item.get("id") or "vid")
+        outtmpl = str(self.opts.get("outtmpl") or "%(title)s [%(id)s].%(ext)s")
+        rendered = outtmpl.replace("%(title).80s", title).replace("%(title)s", title)
+        rendered = rendered.replace("%(id)s", vid).replace("%(ext)s", ext)
+        return rendered
+
 
 def test_serci_outputs_table_and_saves_cache(tmp_path, monkeypatch):
     import autish.commands.filmeto as mod
@@ -202,8 +211,16 @@ def test_elsuti_warns_for_large_download_and_can_cancel(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         mod,
-        "_estimate_downloads",
-        lambda *_a, **_k: (2, 600 * 1024 * 1024),
+        "_collect_download_plan",
+        lambda *_a, **_k: [
+            {
+                "title": "Video 1",
+                "duration": "10:00",
+                "author": "Kanalo",
+                "size_bytes": 600 * 1024 * 1024,
+                "raw": {"title": "Video 1", "id": "vid1", "ext": "mp4"},
+            }
+        ],
     )
     result = runner.invoke(app, ["filmeto", "elsuti", uid], input="n\n")
     assert result.exit_code == 0
@@ -283,12 +300,24 @@ def test_elsuti_supports_target_folder_option(tmp_path, monkeypatch):
         called["dir"] = str(output_dir)
         return []
 
-    monkeypatch.setattr(mod, "_estimate_downloads", lambda *_a, **_k: (1, 1024))
+    monkeypatch.setattr(
+        mod,
+        "_collect_download_plan",
+        lambda *_a, **_k: [
+            {
+                "title": "Video 1",
+                "duration": "01:00",
+                "author": "Kanalo",
+                "size_bytes": 1024,
+                "raw": {"title": "Video 1", "id": "vid1", "ext": "mp4"},
+            }
+        ],
+    )
     monkeypatch.setattr(mod, "_run_download", _fake_run_download)
     result = runner.invoke(
         app,
         ["filmeto", "elsuti", uid, "--vojo", str(out_dir)],
-        input="j\n",
+        input="j\nj\n",
     )
     assert result.exit_code == 0, result.output
     assert called["dir"] == str(out_dir.resolve())
@@ -306,7 +335,19 @@ def test_elsuti_full_output_path_strips_extension(tmp_path, monkeypatch):
     )
     target_file = tmp_path / "movie.mp4"
     captured: dict[str, str] = {}
-    monkeypatch.setattr(mod, "_estimate_downloads", lambda *_a, **_k: (1, 1024))
+    monkeypatch.setattr(
+        mod,
+        "_collect_download_plan",
+        lambda *_a, **_k: [
+            {
+                "title": "Video 1",
+                "duration": "01:00",
+                "author": "Kanalo",
+                "size_bytes": 1024,
+                "raw": {"title": "Video 1", "id": "vid1", "ext": "mp4"},
+            }
+        ],
+    )
 
     def _fake_run_download(_targets, output_dir, _fmt, **kwargs):
         captured["dir"] = str(output_dir)
@@ -314,7 +355,9 @@ def test_elsuti_full_output_path_strips_extension(tmp_path, monkeypatch):
         return []
 
     monkeypatch.setattr(mod, "_run_download", _fake_run_download)
-    result = runner.invoke(app, ["filmeto", "elsuti", uid, "--vojo", str(target_file)])
+    result = runner.invoke(
+        app, ["filmeto", "elsuti", uid, "--vojo", str(target_file)], input="j\n"
+    )
     assert result.exit_code == 0, result.output
     assert captured["dir"] == str(tmp_path.resolve())
     assert captured["tmpl"].startswith("movie.")
@@ -332,7 +375,19 @@ def test_elsuti_passes_subtitles_options(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     captured: dict[str, str] = {}
-    monkeypatch.setattr(mod, "_estimate_downloads", lambda *_a, **_k: (1, 1024))
+    monkeypatch.setattr(
+        mod,
+        "_collect_download_plan",
+        lambda *_a, **_k: [
+            {
+                "title": "Video 1",
+                "duration": "01:00",
+                "author": "Kanalo",
+                "size_bytes": 1024,
+                "raw": {"title": "Video 1", "id": "vid1", "ext": "mp4"},
+            }
+        ],
+    )
 
     def _fake_run_download(_targets, _output_dir, _fmt, **kwargs):
         captured["subs"] = str(kwargs.get("subtitles"))
@@ -342,12 +397,13 @@ def test_elsuti_passes_subtitles_options(tmp_path, monkeypatch):
     result = runner.invoke(
         app,
         ["filmeto", "elsuti", uid, "--subtitoloj", "eo,en"],
+        input="j\n",
     )
     assert result.exit_code == 0, result.output
     assert captured["subs"] == "eo,en"
 
 
-def test_filmeto_agordo_sets_default_folder(tmp_path, monkeypatch):
+def test_filmeto_agordi_sets_default_folder(tmp_path, monkeypatch):
     import autish.commands.filmeto as mod
 
     monkeypatch.setattr(mod, "_DATA_DIR", tmp_path)
@@ -355,7 +411,7 @@ def test_filmeto_agordo_sets_default_folder(tmp_path, monkeypatch):
     target = tmp_path / "myvideos"
     result = runner.invoke(
         app,
-        ["filmeto", "agordo", "--vojo", str(target)],
+        ["filmeto", "agordi", "--vojo", str(target)],
         input="j\n",
     )
     assert result.exit_code == 0, result.output
@@ -364,7 +420,7 @@ def test_filmeto_agordo_sets_default_folder(tmp_path, monkeypatch):
     assert cfg["defauxlta_vojo"] == str(target.resolve())
 
 
-def test_filmeto_agordo_defaults_to_downloads_when_not_set(tmp_path, monkeypatch):
+def test_filmeto_agordi_defaults_to_downloads_when_not_set(tmp_path, monkeypatch):
     import autish.commands.filmeto as mod
 
     fake_home = tmp_path / "home"
@@ -372,9 +428,9 @@ def test_filmeto_agordo_defaults_to_downloads_when_not_set(tmp_path, monkeypatch
     monkeypatch.setattr(mod.Path, "home", lambda: fake_home)
     monkeypatch.setattr(mod, "_DATA_DIR", tmp_path)
     monkeypatch.setattr(mod, "_CONFIG_FILE", tmp_path / "filmeto_agordo.json")
-    result = runner.invoke(app, ["filmeto", "agordo"])
+    result = runner.invoke(app, ["filmeto", "agordi"])
     assert result.exit_code == 0, result.output
-    assert str(fake_home / "Downloads") in result.output
+    assert "Downloads" in result.output
 
 
 def test_elsuti_uses_default_folder_from_agordo(tmp_path, monkeypatch):
@@ -395,15 +451,71 @@ def test_elsuti_uses_default_folder_from_agordo(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     called: dict[str, str] = {}
-    monkeypatch.setattr(mod, "_estimate_downloads", lambda *_a, **_k: (1, 1024))
+    monkeypatch.setattr(
+        mod,
+        "_collect_download_plan",
+        lambda *_a, **_k: [
+            {
+                "title": "Video 1",
+                "duration": "01:00",
+                "author": "Kanalo",
+                "size_bytes": 1024,
+                "raw": {"title": "Video 1", "id": "vid1", "ext": "mp4"},
+            }
+        ],
+    )
     def _fake_download(_targets, output_dir, *_a, **_k):
         called["dir"] = str(output_dir)
         return []
 
     monkeypatch.setattr(mod, "_run_download", _fake_download)
-    result = runner.invoke(app, ["filmeto", "elsuti", uid])
+    result = runner.invoke(app, ["filmeto", "elsuti", uid], input="j\n")
     assert result.exit_code == 0, result.output
     assert called["dir"] == str(default_dir.resolve())
+
+
+def test_elsuti_relative_vojo_uses_agordi_default_base(tmp_path, monkeypatch):
+    import autish.commands.filmeto as mod
+
+    monkeypatch.setattr(mod, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(mod, "_CACHE_FILE", tmp_path / "filmeto_cache.json")
+    monkeypatch.setattr(mod, "_CONFIG_FILE", tmp_path / "filmeto_agordo.json")
+    default_dir = tmp_path / "stored"
+    default_dir.mkdir()
+    (tmp_path / "filmeto_agordo.json").write_text(
+        json.dumps({"defauxlta_vojo": str(default_dir)}),
+        encoding="utf-8",
+    )
+    uid = "abc12345"
+    (tmp_path / "filmeto_cache.json").write_text(
+        json.dumps({uid: "https://www.youtube.com/watch?v=vid1"}),
+        encoding="utf-8",
+    )
+    called: dict[str, str] = {}
+    monkeypatch.setattr(
+        mod,
+        "_collect_download_plan",
+        lambda *_a, **_k: [
+            {
+                "title": "Video 1",
+                "duration": "01:00",
+                "author": "Kanalo",
+                "size_bytes": 1024,
+                "raw": {"title": "Video 1", "id": "vid1", "ext": "mp4"},
+            }
+        ],
+    )
+
+    def _fake_download(_targets, output_dir, *_a, **_k):
+        called["dir"] = str(output_dir)
+        return []
+
+    monkeypatch.setattr(mod, "_run_download", _fake_download)
+    result = runner.invoke(
+        app, ["filmeto", "elsuti", uid, "--vojo", "sub"], input="j\nj\n"
+    )
+    assert result.exit_code == 0, result.output
+    assert called["dir"] == str((default_dir / "sub").resolve())
 
 
 def test_auto_js_runtimes_detects_node(monkeypatch):
@@ -458,13 +570,21 @@ def test_elsuti_passes_playlist_limo(tmp_path, monkeypatch):
     )
     called: dict[str, int] = {}
 
-    def _fake_estimate(_targets, _fmt, **kwargs):
+    def _fake_plan(_targets, _fmt, **kwargs):
         called["limo"] = int(kwargs.get("playlist_limo") or 0)
-        return 2, 1024
+        return [
+            {
+                "title": "Video 1",
+                "duration": "01:00",
+                "author": "Kanalo",
+                "size_bytes": 1024,
+                "raw": {"title": "Video 1", "id": "vid1", "ext": "mp4"},
+            }
+        ]
 
-    monkeypatch.setattr(mod, "_estimate_downloads", _fake_estimate)
+    monkeypatch.setattr(mod, "_collect_download_plan", _fake_plan)
     monkeypatch.setattr(mod, "_run_download", lambda *_a, **_k: [])
-    result = runner.invoke(app, ["filmeto", "elsuti", uid, "-l", "2"])
+    result = runner.invoke(app, ["filmeto", "elsuti", uid, "-l", "2"], input="j\n")
     assert result.exit_code == 0, result.output
     assert called["limo"] == 2
 

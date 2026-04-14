@@ -10,6 +10,9 @@
 
 - **CLI command names and long option names must be in Esperanto.**
   Examples: `tempo`, `wifi`, `konekti`, `malkonekti`, `forigi`, `horzono`, `sistemo`, `bluhdento`.
+- **Prefer base-form verbs for command names whenever possible.**
+  Use imperative/base forms like `agordi` instead of noun forms like `agordo`, unless
+  a non-verb name is unavoidable for backward compatibility or domain meaning.
 - **Python source code (variables, functions, modules) uses English `snake_case`.**
 - Short single-letter CLI flags may be any intuitive letter (e.g. `-p` for password).
 - **Esperanto locale consistency is mandatory.**
@@ -86,12 +89,19 @@ autish/
 4. **Errors go to stderr** — use `typer.echo(..., err=True)` or `typer.BadParameter`.
 5. **Inline help on incomplete commands** — call `ctx.get_help()` and exit with code 0 when required arguments are missing.
 6. **Subprocess calls** — wrap `subprocess.run()` calls; capture `CalledProcessError` and surface a clean error message.
-7. **No internet dependency** — all v0.0.1 commands must work offline. Do not add network calls.
+7. **Maximum offline capability by default** — features should work offline whenever possible, but internet-backed enhancements are allowed when valuable. Always keep a clear offline fallback path.
 8. **Test coverage** — every command module should have a corresponding test file under `tests/`.
 9. **Microapp data storage** — use SQLite (stdlib `sqlite3`) for any microapp that needs to persist structured data. Scalability and efficiency matter: prefer granular `INSERT`/`UPDATE`/`DELETE` over full-table rewrites; use `WAL` journal mode; store JSON arrays/objects in `TEXT` columns when normalisation would be overkill for the data size. Never use plain JSON files for databases.
 10. **Action notifications must auto-expire** — transient success/info/error status messages should clear after ~3 seconds to reduce sensory load. Keep persistent status only when explicit user action is required (prompts, confirmations, modal choices, blocking errors).
 11. **Prevent key conflicts proactively** — before assigning or changing `retposto` shortcuts, verify they do not conflict with existing global/list/compose/read-view keys and update inline hints/help text in the same change.
 12. **Default duplicate-safe add flow for DB entries** — for database-backed `aldoni` commands, if a potential duplicate is detected by primary identity fields, prompt user to choose updating the existing entry or creating a new one.
+13. **retposto read-view links must preserve full target for actions** — if a URL is visually truncated/wrapped for readability, copy/open actions must still use the full URL value (never the visible fragment only).
+14. **Any truncated link in CLI output must keep full action target** — if URLs are shortened in tables/panels (e.g., `kalendaro ls-kalendaro`), Ctrl+click/copy/open must always use the full original URL, and UI should warn that display text is truncated.
+15. **Do not manually shorten URLs when action fidelity matters** — prefer rendering full URLs with link metadata and let terminal layout handle visual clipping; always warn that any visual truncation is display-only and actions still target the full URL.
+16. **Help text must include concrete value examples** — for every command option that requires a value (paths, UUIDs, language codes, filters, etc.), include at least one usage example directly in the help string.
+17. **Semantic-link help should be category-first and relevance-ranked** — for `encik semantika`, prefer subcommands by domain (e.g., `generala`, `persono`, `geografio`, `abstrakta`), list rdf/rdfs links first, then add the most relevant Wikidata properties as fallback.
+18. **`agordi` commands should persist to TOML under `~/.config/autish/`** — each command-level settings surface should map to a dedicated editable TOML file (e.g., `~/.config/autish/encik.toml`, `~/.config/autish/filmeto.toml`) so users can configure via CLI or direct file edits.
+19. **Encik semantic groups are user-editable CSV files** — store `encik semantika` groups in `~/.config/autish/semantika/*.csv` with columns `LIGILO,PRISKRIBO,ALIAZOJ`; each file corresponds to one semantic group/subcommand.
 
 ---
 

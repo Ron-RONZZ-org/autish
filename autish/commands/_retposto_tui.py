@@ -31,6 +31,7 @@ import sys
 import termios
 import textwrap
 import time
+import unicodedata
 import webbrowser
 from collections.abc import Callable
 from datetime import datetime
@@ -45,10 +46,10 @@ from typing import Any
 _ESC = 27
 _ENTER = ord("\n")
 _CR = ord("\r")
-_CTRL_B = 2   # page-up   (like vim)
+_CTRL_B = 2  # page-up   (like vim)
 _CTRL_C = 3
 _CTRL_D = 4
-_CTRL_F = 6   # page-down (like vim)
+_CTRL_F = 6  # page-down (like vim)
 _CTRL_H = 8
 _CTRL_K = 11  # kill line forward
 _CTRL_R = 18
@@ -83,6 +84,58 @@ def _safe_addstr(win: Any, row: int, col: int, text: str, attr: int = 0) -> None
             win.addstr(row, col, safe, attr)
         except curses.error:
             pass
+
+
+def _ascii_safe_text(value: str) -> str:
+    """Normalize clipboard/export text to ASCII-friendly form."""
+    if not value:
+        return ""
+    substitutions = {
+        "\u00a0": " ",
+        "\u2000": " ",
+        "\u2001": " ",
+        "\u2002": " ",
+        "\u2003": " ",
+        "\u2004": " ",
+        "\u2005": " ",
+        "\u2006": " ",
+        "\u2007": " ",
+        "\u2008": " ",
+        "\u2009": " ",
+        "\u200a": " ",
+        "\u202f": " ",
+        "\u205f": " ",
+        "\u3000": " ",
+        "\u200b": "",
+        "\u200c": "",
+        "\u200d": "",
+        "\ufeff": "",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2212": "-",
+        "\u2026": "...",
+    }
+    normalized_parts: list[str] = []
+    for ch in value:
+        if ch in substitutions:
+            normalized_parts.append(substitutions[ch])
+            continue
+        category = unicodedata.category(ch)
+        if category.startswith("Z"):
+            normalized_parts.append(" ")
+            continue
+        if category == "Cf":
+            normalized_parts.append("")
+            continue
+        normalized_parts.append(ch)
+    normalized = "".join(normalized_parts)
+    normalized = unicodedata.normalize("NFKD", normalized)
+    ascii_value = normalized.encode("ascii", errors="ignore").decode("ascii")
+    return ascii_value
 
 
 def _getch_unicode(win: Any) -> int:
@@ -295,7 +348,7 @@ class LineEditor:
         if self.pos >= self._view_start + width:
             self._view_start = self.pos - width + 1
 
-        visible = "".join(self.chars)[self._view_start: self._view_start + width]
+        visible = "".join(self.chars)[self._view_start : self._view_start + width]
         if focused:
             if self.mode == "INSERT":
                 attr = curses.A_UNDERLINE
@@ -354,20 +407,20 @@ class LineEditor:
                     del self.chars[self.pos - 1]
                     self.pos -= 1
             elif key == _CTRL_U:  # kill line backward
-                killed = self.chars[:self.pos]
+                killed = self.chars[: self.pos]
                 LineEditor._kill_register = "".join(killed)
-                del self.chars[:self.pos]
+                del self.chars[: self.pos]
                 self.pos = 0
             elif key == _CTRL_W:  # kill word backward
                 start_pos = _word_left(self.value, self.pos)
-                killed = self.chars[start_pos:self.pos]
+                killed = self.chars[start_pos : self.pos]
                 LineEditor._kill_register = "".join(killed)
-                del self.chars[start_pos:self.pos]
+                del self.chars[start_pos : self.pos]
                 self.pos = start_pos
             elif key == _CTRL_K:  # kill line forward
-                killed = self.chars[self.pos:]
+                killed = self.chars[self.pos :]
                 LineEditor._kill_register = "".join(killed)
-                del self.chars[self.pos:]
+                del self.chars[self.pos :]
             elif key == _CTRL_Y:  # yank (paste)
                 for c in LineEditor._kill_register:
                     self.chars.insert(self.pos, c)
@@ -410,7 +463,7 @@ class LineEditor:
                 start = min(self._visual_anchor, self.pos)
                 end = max(self._visual_anchor, self.pos)
                 if self.mode == "VISUAL_CHAR":
-                    del self.chars[start:end + 1]
+                    del self.chars[start : end + 1]
                     self.pos = min(start, len(self.chars))
                 else:
                     self.chars = []
@@ -603,7 +656,7 @@ class ComposePanel:
             f" ✉  Komponi{md_flag}{att_flag} — "
             "Ctrl+S:sendi  m:markdown  Ctrl+A:aldonajxo  :w skizo  :q nuligi "
         )
-        _safe_addstr(self.stdscr, 0, 0, header[:w - 1].ljust(w - 1), curses.A_REVERSE)
+        _safe_addstr(self.stdscr, 0, 0, header[: w - 1].ljust(w - 1), curses.A_REVERSE)
 
         label_w = 10
         sep = " │ "
@@ -620,8 +673,7 @@ class ComposePanel:
             focused = i == self._current_field
             label_attr = curses.A_BOLD if focused else curses.A_DIM
             _safe_addstr(
-                self.stdscr, scr_row, 0,
-                fhint[:label_w].ljust(label_w), label_attr
+                self.stdscr, scr_row, 0, fhint[:label_w].ljust(label_w), label_attr
             )
             _safe_addstr(self.stdscr, scr_row, label_w, sep, curses.A_DIM)
             cursor = self._editors[fname].render(
@@ -634,8 +686,7 @@ class ComposePanel:
         sep_row = row_offset + len(_COMPOSE_FIELDS) - 1
         if sep_row < h - 4:
             _safe_addstr(
-                self.stdscr, sep_row, 0,
-                ("─" * (w - 1))[:w - 1], curses.A_DIM
+                self.stdscr, sep_row, 0, ("─" * (w - 1))[: w - 1], curses.A_DIM
             )
 
         # Body area
@@ -674,38 +725,36 @@ class ComposePanel:
         if self._complete_list:
             hint = "  ".join(self._complete_list[:5])
             _safe_addstr(
-                self.stdscr, h - 2, 0,
-                hint[:w - 1].ljust(w - 1), curses.A_DIM
+                self.stdscr, h - 2, 0, hint[: w - 1].ljust(w - 1), curses.A_DIM
             )
             if self._autocomplete_pick_mode:
                 hint2 = f"Numer-elekto: {self._autocomplete_pick_buf} (1-9/Esc)"
             else:
                 hint2 = "↑/↓:elekti proponon  Ctrl+Tab:fokusi  1-9:elekti"
             _safe_addstr(
-                self.stdscr, h - 2, max(0, w - len(hint2) - 1),
-                hint2[:w - 1], curses.A_DIM
+                self.stdscr,
+                h - 2,
+                max(0, w - len(hint2) - 1),
+                hint2[: w - 1],
+                curses.A_DIM,
             )
         elif field_name == "prioritato":
             hint = (
-                "Prioritato: h/k=malpli  l/j=pli  "
-                "(aŭ tajpu 1..9/alta/normala/malalta)"
+                "Prioritato: h/k=malpli  l/j=pli  (aŭ tajpu 1..9/alta/normala/malalta)"
             )
             _safe_addstr(
-                self.stdscr, h - 2, 0,
-                hint[:w - 1].ljust(w - 1), curses.A_DIM
+                self.stdscr, h - 2, 0, hint[: w - 1].ljust(w - 1), curses.A_DIM
             )
         elif field_name == "legokonfirmo":
             hint = "Legokonfirmo: Space/j=jes  n=ne"
             _safe_addstr(
-                self.stdscr, h - 2, 0,
-                hint[:w - 1].ljust(w - 1), curses.A_DIM
+                self.stdscr, h - 2, 0, hint[: w - 1].ljust(w - 1), curses.A_DIM
             )
         elif self._attachments:
             short = [Path(p).name for p in self._attachments]
             hint = "Aldonaĵoj: " + ", ".join(short)
             _safe_addstr(
-                self.stdscr, h - 2, 0,
-                hint[:w - 1].ljust(w - 1), curses.A_DIM
+                self.stdscr, h - 2, 0, hint[: w - 1].ljust(w - 1), curses.A_DIM
             )
 
         # Status bar — show command line or current editor mode
@@ -724,11 +773,8 @@ class ComposePanel:
             else:
                 mode_pfx = ""
             status_line = mode_pfx + self._current_status()
-        status_line = status_line[:w - 1].ljust(w - 1)
-        _safe_addstr(
-            self.stdscr, h - 1, 0,
-            status_line, curses.A_REVERSE
-        )
+        status_line = status_line[: w - 1].ljust(w - 1)
+        _safe_addstr(self.stdscr, h - 1, 0, status_line, curses.A_REVERSE)
 
         if focused_cursor:
             try:
@@ -761,7 +807,7 @@ class ComposePanel:
         ed = self._body_lines[line_index]
         text = ed.value
         view_start = ed._view_start  # internal render state used for clipping
-        visible = text[view_start: view_start + width].ljust(width)[:width]
+        visible = text[view_start : view_start + width].ljust(width)[:width]
 
         if self._body_visual_mode == "line":
             start_idx, end_idx = 0, width - 1
@@ -802,9 +848,7 @@ class ComposePanel:
         self._body_visual_anchor_row = None
         self._body_visual_anchor_col = None
 
-    def _body_visual_bounds_for_row(
-        self, row: int, line_len: int
-    ) -> tuple[int, int]:
+    def _body_visual_bounds_for_row(self, row: int, line_len: int) -> tuple[int, int]:
         """Return inclusive [start, end] bounds for one row in VISUAL-CHAR mode."""
         anchor_row = self._body_visual_anchor_row
         anchor_col = self._body_visual_anchor_col
@@ -849,7 +893,7 @@ class ComposePanel:
                 continue
             start_col, end_col = self._body_visual_bounds_for_row(row, len(text))
             if start_col <= end_col:
-                out.append(text[start_col:end_col + 1])
+                out.append(text[start_col : end_col + 1])
         return "\n".join(out)
 
     def _delete_body_visual_selection(self) -> None:
@@ -861,7 +905,7 @@ class ComposePanel:
         bottom = max(anchor_row, cur_row)
 
         if self._body_visual_mode == "line":
-            del self._body_lines[top:bottom + 1]
+            del self._body_lines[top : bottom + 1]
             if not self._body_lines:
                 self._body_lines = [LineEditor("")]
             self._body_row = min(top, len(self._body_lines) - 1)
@@ -895,7 +939,7 @@ class ComposePanel:
             text = self._body_lines[start_row].value
             if text and end_col >= start_col:
                 self._body_lines[start_row].value = (
-                    text[:start_col] + text[end_col + 1:]
+                    text[:start_col] + text[end_col + 1 :]
                 )
                 self._body_lines[start_row].pos = min(
                     start_col, len(self._body_lines[start_row].chars)
@@ -903,10 +947,10 @@ class ComposePanel:
             return
 
         prefix = self._body_lines[start_row].value[:start_col]
-        suffix = end_text[end_col + 1:] if end_col >= 0 else end_text
+        suffix = end_text[end_col + 1 :] if end_col >= 0 else end_text
         merged = LineEditor(prefix + suffix, insert_mode=False)
         merged.pos = len(prefix)
-        self._body_lines[start_row:end_row + 1] = [merged]
+        self._body_lines[start_row : end_row + 1] = [merged]
         self._body_row = start_row
 
     def _get_paste_text(self) -> str:
@@ -941,7 +985,7 @@ class ComposePanel:
             item.mode = "INSERT"
         last.mode = "INSERT"
         insert_rows = [first, *middle, last]
-        self._body_lines[self._body_row:self._body_row + 1] = insert_rows
+        self._body_lines[self._body_row : self._body_row + 1] = insert_rows
         self._body_row += len(insert_rows) - 1
         self._body_lines[self._body_row].pos = len(chunks[-1])
 
@@ -1139,9 +1183,7 @@ class ComposePanel:
             active_completer = self._completer
         if active_completer:
             if key == curses.KEY_UP and self._complete_list:
-                self._complete_idx = (self._complete_idx - 1) % len(
-                    self._complete_list
-                )
+                self._complete_idx = (self._complete_idx - 1) % len(self._complete_list)
                 chosen = self._complete_list[self._complete_idx]
                 if field_name in ("al", "cc", "bcc"):
                     parts = ed.value.split(",")
@@ -1151,9 +1193,7 @@ class ComposePanel:
                     ed.value = chosen
                 return None
             if key == curses.KEY_DOWN and self._complete_list:
-                self._complete_idx = (self._complete_idx + 1) % len(
-                    self._complete_list
-                )
+                self._complete_idx = (self._complete_idx + 1) % len(self._complete_list)
                 chosen = self._complete_list[self._complete_idx]
                 if field_name in ("al", "cc", "bcc"):
                     parts = ed.value.split(",")
@@ -1290,9 +1330,7 @@ class ComposePanel:
             self._dd_pending = False
             self._body_row = min(self._body_row + body_page_h, n_lines - 1)
             return None
-        if ch == "j" and ed.mode == "NORMAL" and (
-            self._body_row < n_lines - 1
-        ):
+        if ch == "j" and ed.mode == "NORMAL" and (self._body_row < n_lines - 1):
             self._dd_pending = False
             self._body_row += 1
             return None
@@ -1384,10 +1422,11 @@ class ComposePanel:
             if ch == "y":
                 try:
                     import pyperclip
+
                     text = self._body_visual_text()
                     if text:
                         self._body_register = text
-                        pyperclip.copy(text)
+                        pyperclip.copy(_ascii_safe_text(text))
                 except ImportError:
                     pass
                 self._clear_body_visual()
@@ -1467,7 +1506,7 @@ class FolderPanel:
         win.erase()
         title = "Dosierujoj"
         title_attr = curses.A_REVERSE if focused else curses.A_BOLD
-        _safe_addstr(win, 0, 0, title[:w - 1].ljust(w - 1), title_attr)
+        _safe_addstr(win, 0, 0, title[: w - 1].ljust(w - 1), title_attr)
 
         for i in range(h - 1):
             idx = i + self._scroll
@@ -1479,7 +1518,7 @@ class FolderPanel:
                 attr = curses.A_BOLD | (curses.A_STANDOUT if is_cur else 0)
             else:
                 attr = curses.A_STANDOUT if is_cur else curses.A_NORMAL
-            _safe_addstr(win, i + 1, 0, item["label"][:w - 1].ljust(w - 1), attr)
+            _safe_addstr(win, i + 1, 0, item["label"][: w - 1].ljust(w - 1), attr)
 
         win.noutrefresh()
 
@@ -1524,7 +1563,7 @@ class FolderPanel:
 # ──────────────────────────────────────────────────────────────────────────────
 
 _LIST_COLS = [
-    ("!", 1),        # priority/flag
+    ("!", 1),  # priority/flag
     ("De", 22),
     ("Subjekto", 40),
     ("Dato", 12),
@@ -1617,7 +1656,7 @@ class MessagePanel:
         # Header
         header = f" {'✓':1} {'!':1}  {'De':22}  {'Subjekto':40}  {'Dato':10}"
         title_attr = curses.A_REVERSE if focused else curses.A_BOLD
-        _safe_addstr(win, 0, 0, header[:w - 1].ljust(w - 1), title_attr)
+        _safe_addstr(win, 0, 0, header[: w - 1].ljust(w - 1), title_attr)
 
         for i in range(h - 2):
             idx = i + self._scroll
@@ -1660,13 +1699,13 @@ class MessagePanel:
                 attr = curses.A_BOLD
             else:
                 attr = curses.A_NORMAL
-            _safe_addstr(win, i + 1, 0, line[:w - 1].ljust(w - 1), attr)
+            _safe_addstr(win, i + 1, 0, line[: w - 1].ljust(w - 1), attr)
 
         # Count
         count_str = f" {len(msgs)} mesaĝo(j)"
         if self._search_query:
             count_str += f"  /{self._search_query}"
-        _safe_addstr(win, h - 1, 0, count_str[:w - 1].ljust(w - 1), curses.A_DIM)
+        _safe_addstr(win, h - 1, 0, count_str[: w - 1].ljust(w - 1), curses.A_DIM)
 
         win.noutrefresh()
 
@@ -1740,12 +1779,16 @@ def _message_to_lines(msg: dict) -> list[str]:
 
     body = _unwrap_wrapped_mail_urls(msg.get("korpo") or "")
     for line in body.split("\n"):
-        for wrapped in (
-            textwrap.wrap(
-                line, 76, break_long_words=False, break_on_hyphens=False
-            )
-            if line.strip()
-            else [""]
+        if not line.strip():
+            lines.append("  ")
+            continue
+        # Keep full URLs on one logical line so copy/open actions can target the
+        # complete URL instead of a wrapped fragment.
+        if re.search(r"https?://\S+", line):
+            lines.append("  " + line)
+            continue
+        for wrapped in textwrap.wrap(
+            line, 76, break_long_words=False, break_on_hyphens=False
         ):
             lines.append("  " + wrapped)
 
@@ -1763,9 +1806,10 @@ class MessageReader:
         self._lines = _message_to_lines(msg)
         self._row: int = 0
         self._view_row: int = 0
-        self._col: int = 0       # horizontal scroll offset
+        self._col: int = 0  # horizontal scroll offset
         self._char_col: int = 0  # cursor column within line
         self._search_term: str = ""
+        self._url_re = re.compile(r"https?://\S+")
         self._mode: str = "NORMAL"
         self._search_buf: str = ""
         self._cmd_buf: str = ""
@@ -1795,7 +1839,7 @@ class MessageReader:
         content_h = h - 3  # 1 title row + 2 status rows
 
         # Title
-        subj = (self.msg.get("subjekto") or "")[:w - 4]
+        subj = (self.msg.get("subjekto") or "")[: w - 4]
         _safe_addstr(self.stdscr, 0, 0, f" {subj} ".ljust(w - 1), curses.A_REVERSE)
 
         has_conv = len(self._conversation) > 1 and w >= 70
@@ -1823,11 +1867,10 @@ class MessageReader:
             if li >= len(self._lines):
                 break
             line = self._lines[li]
-            visible = line[self._col: self._col + content_w]
+            visible = line[self._col : self._col + content_w]
 
             is_match = bool(
-                self._search_term
-                and self._search_term.lower() in line.lower()
+                self._search_term and self._search_term.lower() in line.lower()
             )
             if li == self._row and self._mode == "NORMAL":
                 attr = curses.A_UNDERLINE
@@ -1897,11 +1940,7 @@ class MessageReader:
                 prefix = "▶ " if li == self._conv_row else "  "
                 subj = item.get("subjekto") or "(sen subjekto)"
                 line = f"{prefix}{subj}"
-                attr = (
-                    curses.A_STANDOUT
-                    if li == self._conv_row
-                    else curses.A_NORMAL
-                )
+                attr = curses.A_STANDOUT if li == self._conv_row else curses.A_NORMAL
                 _safe_addstr(
                     self.stdscr,
                     scr_row,
@@ -1928,22 +1967,21 @@ class MessageReader:
             line1 = f"{mode_label}  j/k:↕  gg/G:⇕  h/l:↔  v/V:VIDA  Ctrl+←/→:vorto"
             # Show different hints for VISUAL mode vs NORMAL mode
             if self._visual_mode:
-                line2 = (
-                    "y:kopii-tekston  Esc:nuligi-elekton  :h/:help  q:reen"
-                )
+                line2 = "y:kopii-tekston  Esc:nuligi-elekton  :h/:help  q:reen"
             else:
                 line2 = (
                     "r/R/f:x  D/Y:movi/kopii  i/I/a/A:redakti-skizon  "
-                    "Ctrl+A:aldonaĵoj  :h/:help  q:reen"
+                    "Ctrl+A:aldonaĵoj  Ctrl+O:malfermi-URL  "
+                    "Ctrl+Y:kopii-URL  :h/:help  q:reen"
                 )
             status_lines = [line1, line2]
-        
+
         # Render status bar (use last 2 rows if we have 2 status lines)
         status_rows = min(len(status_lines), 2)
         for i, line in enumerate(status_lines[-status_rows:]):
             row = h - status_rows + i
             _safe_addstr(
-                self.stdscr, row, 0, line[:w - 1].ljust(w - 1), curses.A_REVERSE
+                self.stdscr, row, 0, line[: w - 1].ljust(w - 1), curses.A_REVERSE
             )
 
         if focused_cursor:
@@ -2050,9 +2088,7 @@ class MessageReader:
             if ch == "h" or key == curses.KEY_LEFT:
                 self._pane_focus = "body"
                 return None
-            moved = self._move_index(
-                key, ch, self._conv_row, len(self._conversation)
-            )
+            moved = self._move_index(key, ch, self._conv_row, len(self._conversation))
             if moved != self._conv_row:
                 self._conv_row = moved
             self._prev_ch = ch
@@ -2069,6 +2105,18 @@ class MessageReader:
         if key in (_CTRL_C, _CTRL_D):
             self._prev_ch = ""
             return "quit"
+        if key == 15:  # Ctrl+O
+            url = self._url_under_cursor()
+            if url:
+                self._prev_ch = ""
+                return f"open_url:{url}"
+            return None
+        if key == 25:  # Ctrl+Y
+            url = self._url_under_cursor()
+            if url:
+                self._prev_ch = ""
+                return f"copy_url:{url}"
+            return None
         if key == _ESC:
             if self._visual_mode:
                 self._visual_mode = ""
@@ -2114,9 +2162,7 @@ class MessageReader:
                 self._pane_focus = "conv"
             else:
                 cur_line = self._lines[self._row] if self._lines else ""
-                self._char_col = min(
-                    self._char_col + count, max(0, len(cur_line) - 1)
-                )
+                self._char_col = min(self._char_col + count, max(0, len(cur_line) - 1))
         elif _is_ctrl_left(key) or ch == "b":
             cur_line = self._lines[self._row] if self._lines else ""
             self._char_col = _word_left(cur_line, self._char_col)
@@ -2211,9 +2257,10 @@ class MessageReader:
             if self._visual_mode:
                 try:
                     import pyperclip
+
                     text = self._get_visual_text()
                     if text:
-                        pyperclip.copy(text)
+                        pyperclip.copy(_ascii_safe_text(text))
                         # Clear visual mode after yank
                         self._visual_mode = ""
                         return "yank_text"  # Signal successful copy
@@ -2237,6 +2284,20 @@ class MessageReader:
             return "edit_draft"
 
         self._prev_ch = ch
+        return None
+
+    def _url_under_cursor(self) -> str | None:
+        if not self._lines or not (0 <= self._row < len(self._lines)):
+            return None
+        line = self._lines[self._row]
+        matches = list(self._url_re.finditer(line))
+        if not matches:
+            return None
+        for match in matches:
+            if match.start() <= self._char_col <= max(match.start(), match.end() - 1):
+                return match.group(0)
+        if len(matches) == 1:
+            return matches[0].group(0)
         return None
 
     def _is_visual_row(self, row: int) -> bool:
@@ -2263,16 +2324,16 @@ class MessageReader:
         """Extract text from current VISUAL selection."""
         if not self._visual_mode:
             return ""
-        
+
         lines = []
         top = min(self._visual_anchor_row, self._row)
         bot = max(self._visual_anchor_row, self._row)
-        
+
         for row in range(top, bot + 1):
             if row >= len(self._lines):
                 break
             line = self._lines[row]
-            
+
             if self._visual_mode == "line":
                 # Full line selection
                 lines.append(line)
@@ -2280,8 +2341,8 @@ class MessageReader:
                 # Character selection
                 start_col, end_col = self._visual_bounds_for_row(row, len(line))
                 if start_col <= end_col and start_col < len(line):
-                    lines.append(line[start_col:end_col + 1])
-        
+                    lines.append(line[start_col : end_col + 1])
+
         return "\n".join(lines)
 
     def _search_key(self, key: int, ch: str) -> str | None:
@@ -2446,6 +2507,7 @@ class RetpostoTUI:
         curses.curs_set(0)
         try:
             import locale
+
             locale.setlocale(locale.LC_ALL, "")
         except Exception:
             pass
@@ -2518,7 +2580,7 @@ class RetpostoTUI:
         else:
             status = self._current_status() or self._default_status()
         _safe_addstr(
-            self.stdscr, h - 1, 0, status[:w - 1].ljust(w - 1), curses.A_REVERSE
+            self.stdscr, h - 1, 0, status[: w - 1].ljust(w - 1), curses.A_REVERSE
         )
 
         self.stdscr.noutrefresh()
@@ -2537,22 +2599,19 @@ class RetpostoTUI:
             if row >= h - 1:
                 break
             col = max(0, (w - len(line)) // 2)
-            _safe_addstr(self.stdscr, row, col, line[:w - 1], curses.A_DIM)
+            _safe_addstr(self.stdscr, row, col, line[: w - 1], curses.A_DIM)
 
         if self._mode == "COMMAND":
             status = f":{self._cmd_buf}█"
         else:
             accounts = self._load_accounts()
-            status = (
-                self._current_status()
-                or (
-                    "NORMAL  a:aldoni-konton  h:helpo  :q:eliri  |  : komando"
-                    if not accounts
-                    else "NORMAL  a h :q  |  : komando  |  / serĉi"
-                )
+            status = self._current_status() or (
+                "NORMAL  a:aldoni-konton  h:helpo  :q:eliri  |  : komando"
+                if not accounts
+                else "NORMAL  a h :q  |  : komando  |  / serĉi"
             )
         _safe_addstr(
-            self.stdscr, h - 1, 0, status[:w - 1].ljust(w - 1), curses.A_REVERSE
+            self.stdscr, h - 1, 0, status[: w - 1].ljust(w - 1), curses.A_REVERSE
         )
         self.stdscr.refresh()
 
@@ -2594,12 +2653,8 @@ class RetpostoTUI:
         if key in (_CTRL_C, _CTRL_D):
             return True
         if key == _ESC:
-            if (
-                self._focus == "list"
-                and (
-                    self._selected_message_ids
-                    or self._message_visual_anchor is not None
-                )
+            if self._focus == "list" and (
+                self._selected_message_ids or self._message_visual_anchor is not None
             ):
                 self._clear_message_selection()
                 self._set_status("Mesaĝ-elekto nuligita.", transient=True)
@@ -2873,9 +2928,7 @@ class RetpostoTUI:
                 self._refresh_list()
                 # Restore cursor position (or clamp to new list bounds)
                 if self._message_panel._messages:
-                    new_cursor = min(
-                        old_cursor, len(self._message_panel._messages) - 1
-                    )
+                    new_cursor = min(old_cursor, len(self._message_panel._messages) - 1)
                     self._message_panel._cursor = new_cursor
                 return
             elif result == "delete_perm":
@@ -2886,9 +2939,7 @@ class RetpostoTUI:
                 self._refresh_list()
                 # Restore cursor position (or clamp to new list bounds)
                 if self._message_panel._messages:
-                    new_cursor = min(
-                        old_cursor, len(self._message_panel._messages) - 1
-                    )
+                    new_cursor = min(old_cursor, len(self._message_panel._messages) - 1)
                     self._message_panel._cursor = new_cursor
                 return
             elif result == "spam":
@@ -2925,6 +2976,26 @@ class RetpostoTUI:
                 self._open_message_html(msg)
             elif result == "help":
                 self._show_help()
+            elif result and result.startswith("open_url:"):
+                url = result.split(":", 1)[1]
+                if url:
+                    webbrowser.open(url)
+                    self._set_status("[✓] Malfermis URL en retumilo.", transient=True)
+                continue
+            elif result and result.startswith("copy_url:"):
+                url = result.split(":", 1)[1]
+                if url:
+                    try:
+                        import pyperclip
+
+                        pyperclip.copy(_ascii_safe_text(url))
+                        self._set_status("[✓] URL kopiita al tondujo.", transient=True)
+                    except ImportError:
+                        self._set_status(
+                            "[!] pyperclip ne disponeblas.",
+                            transient=True,
+                        )
+                continue
             elif result and result.startswith("open:"):
                 target_id_text = result.split(":", 1)[1]
                 if target_id_text.isdigit():
@@ -2937,12 +3008,12 @@ class RetpostoTUI:
                         msg = next_msg
                         continue
             elif result and result.startswith("priority:"):
-                    p_str = result.split(":", 1)[1].strip()
-                    if p_str and p_str.isdigit():
-                        p = int(p_str)
-                        self._update_message_field(msg["id"], prioritato=p)
-                        self._set_status(f"Prioritato: {p}", transient=True)
-                        self._refresh_list()
+                p_str = result.split(":", 1)[1].strip()
+                if p_str and p_str.isdigit():
+                    p = int(p_str)
+                    self._update_message_field(msg["id"], prioritato=p)
+                    self._set_status(f"Prioritato: {p}", transient=True)
+                    self._refresh_list()
             return
 
     def _open_message_html(self, msg: dict) -> None:
@@ -3010,15 +3081,17 @@ class RetpostoTUI:
         refs = " ".join(
             x for x in [msg.get("references_hdr"), msg.get("message_id")] if x
         ).strip()
-        return self._run_compose({
-            "de": self._default_compose_from_address(),
-            "al": ", ".join(to_targets),
-            "subjekto": "Re: " + (msg.get("subjekto") or ""),
-            "korpo": f"\n--- Originala mesaĝo ---\n{body_quote}\n{sig}",
-            "_in_reply_to": msg.get("message_id") or "",
-            "_references_hdr": refs,
-            "_focus_body": "1",
-        })
+        return self._run_compose(
+            {
+                "de": self._default_compose_from_address(),
+                "al": ", ".join(to_targets),
+                "subjekto": "Re: " + (msg.get("subjekto") or ""),
+                "korpo": f"\n--- Originala mesaĝo ---\n{body_quote}\n{sig}",
+                "_in_reply_to": msg.get("message_id") or "",
+                "_references_hdr": refs,
+                "_focus_body": "1",
+            }
+        )
 
     def _compose_reply_all(self, msg: dict | None = None) -> str:
         if msg is None:
@@ -3097,12 +3170,14 @@ class RetpostoTUI:
         body_fwd = "\n".join(
             "> " + line for line in (msg.get("korpo") or "").split("\n")
         )
-        return self._run_compose({
-            "de": self._default_compose_from_address(),
-            "subjekto": "Fwd: " + (msg.get("subjekto") or ""),
-            "korpo": f"\n\n--- Plusendita mesaĝo ---\n{body_fwd}",
-            "_focus_body": "1",
-        })
+        return self._run_compose(
+            {
+                "de": self._default_compose_from_address(),
+                "subjekto": "Fwd: " + (msg.get("subjekto") or ""),
+                "korpo": f"\n\n--- Plusendita mesaĝo ---\n{body_fwd}",
+                "_focus_body": "1",
+            }
+        )
 
     def _selected_account_for_compose(self) -> dict | None:
         sel = self._folder_panel.selected() or {}
@@ -3190,9 +3265,8 @@ class RetpostoTUI:
         # Prepend signature if configured
         sig_text, sig_html = self._load_signature(acc)
         if (
-            ("korpo" not in initial or not initial.get("korpo", "").strip())
-            and not sig_html
-        ):
+            "korpo" not in initial or not initial.get("korpo", "").strip()
+        ) and not sig_html:
             sig = sig_text
             if sig:
                 initial = {**initial, "korpo": (initial.get("korpo") or "") + sig}
@@ -3267,9 +3341,7 @@ class RetpostoTUI:
                     self._show_help_screen()
                     continue
                 if result == "prompt_attachment":
-                    path = self._prompt_compose_inline(
-                        panel, "Aldonaĵo dosier-vojo"
-                    )
+                    path = self._prompt_compose_inline(panel, "Aldonaĵo dosier-vojo")
                     if not path:
                         panel._set_status("Nuligita.", transient=True)
                         continue
@@ -3298,8 +3370,7 @@ class RetpostoTUI:
                         (
                             a
                             for a in accounts
-                            if str(a.get("retposto") or "").strip().lower()
-                            == from_addr
+                            if str(a.get("retposto") or "").strip().lower() == from_addr
                         ),
                         None,
                     )
@@ -3371,8 +3442,7 @@ class RetpostoTUI:
                         (
                             a
                             for a in accounts
-                            if str(a.get("retposto") or "").strip().lower()
-                            == from_addr
+                            if str(a.get("retposto") or "").strip().lower() == from_addr
                         ),
                         None,
                     )
@@ -3416,18 +3486,16 @@ class RetpostoTUI:
                         plain_korpo = sender_sig_text.lstrip("\n")
                     if sender_sig_html:
                         if html_korpo:
-                            html_korpo = (
-                                f"{html_korpo}<br><br><hr>{sender_sig_html}"
-                            )
+                            html_korpo = f"{html_korpo}<br><br><hr>{sender_sig_html}"
                         else:
                             body_html = html_mod.escape(vals["korpo"]).replace(
                                 "\n", "<br>\n"
                             )
-                            html_korpo = (
-                                f"{body_html}<br><br><hr>{sender_sig_html}"
-                            )
+                            html_korpo = f"{body_html}<br><br><hr>{sender_sig_html}"
                     ok = self._send_message(
-                        sender_acc, al_list, vals["subjekto"],
+                        sender_acc,
+                        al_list,
+                        vals["subjekto"],
                         plain_korpo,
                         cc_list,
                         bcc_list,
@@ -3472,8 +3540,7 @@ class RetpostoTUI:
                             }
                         )
                         self._status_msg = (
-                            "[!] Eraro dum sendado. "
-                            "Mesaĝo konservita en OUTBOX."
+                            "[!] Eraro dum sendado. Mesaĝo konservita en OUTBOX."
                         )
                     return "done"
         finally:
@@ -3587,9 +3654,7 @@ class RetpostoTUI:
         if not msgs:
             return
         label = "definitive forigi" if permanent else "forigi"
-        if self._prompt_confirm_inline(
-            f"{label} {len(msgs)} mesaĝo(j)n? (J/n)"
-        ):
+        if self._prompt_confirm_inline(f"{label} {len(msgs)} mesaĝo(j)n? (J/n)"):
             # Remember cursor position before deletion
             old_cursor = self._message_panel._cursor
             for msg in msgs:
@@ -3599,9 +3664,7 @@ class RetpostoTUI:
             self._refresh_list()
             # Restore cursor position (or clamp to new list bounds)
             if self._message_panel._messages:
-                new_cursor = min(
-                    old_cursor, len(self._message_panel._messages) - 1
-                )
+                new_cursor = min(old_cursor, len(self._message_panel._messages) - 1)
                 self._message_panel._cursor = new_cursor
             self._message_visual_anchor = None
         else:
@@ -3654,33 +3717,33 @@ class RetpostoTUI:
         if not folder_id:
             self._set_status("[!] Mesaĝo ne estas skizo.", transient=True)
             return "cancel"
-        
+
         # Load folder info to check if it's a drafts folder
         folders = self._load_folders(msg["konto_id"])
         folder = next((f for f in folders if f["id"] == folder_id), None)
         if not folder:
             self._set_status("[!] Dosierujo ne trovita.", transient=True)
             return "cancel"
-        
+
         folder_name = folder.get("nomo", "").lower()
         server_name = folder.get("server_nomo", "").lower()
         is_draft = any(
             draft_name in folder_name or draft_name in server_name
             for draft_name in ["draft", "malnetoj", "skizo"]
         )
-        
+
         if not is_draft:
             self._set_status(
                 "[!] Nur mesaĝoj en 'Drafts' dosierujo povas esti redaktitaj.",
                 transient=True,
             )
             return "cancel"
-        
+
         # Prepare initial data for compose panel
         al_str = ",".join(msg.get("al") or [])
         cc_str = ",".join(msg.get("cc") or [])
         bcc_str = ",".join(msg.get("bcc") or [])
-        
+
         initial = {
             "al": al_str,
             "cc": cc_str,
@@ -3689,16 +3752,16 @@ class RetpostoTUI:
             "korpo": msg.get("korpo") or "",
             "_edit_placement": placement,
         }
-        
+
         # Run compose panel
         result = self._run_compose(initial)
-        
+
         # If user sent or saved, delete the original draft
         if result == "done":
             self._delete_message(msg["id"], permanent=True)
             self._refresh_list()
             self._folder_panel._refresh_items()
-        
+
         return result
 
     def _action_star(self) -> None:
@@ -3715,37 +3778,37 @@ class RetpostoTUI:
         if not params:
             self._set_status("Neniu dosierujo elektita.", transient=True)
             return
-        
+
         konto_id = params.get("konto_id")
         dosierujo_id = params.get("dosierujo_id")
-        
+
         if not dosierujo_id:
             self._set_status("Neniu dosierujo elektita.", transient=True)
             return
-        
+
         # Get count of unread messages
         from autish.commands.retposto import _get_db
+
         with _get_db() as con:
             unread_count = con.execute(
                 """SELECT COUNT(*) FROM mesago
                    WHERE konto_id = ? AND dosierujo_id = ? AND legita = 0""",
                 (konto_id, dosierujo_id),
             ).fetchone()[0]
-            
+
             if unread_count == 0:
                 self._set_status("Ĉiuj mesaĝoj jam legitaj.", transient=True)
                 return
-            
+
             # Update all unread messages
             con.execute(
                 """UPDATE mesago SET legita = 1
                    WHERE konto_id = ? AND dosierujo_id = ? AND legita = 0""",
                 (konto_id, dosierujo_id),
             )
-        
+
         self._set_status(
-            f"Markis {unread_count} mesaĝo(j)n kiel legita(j)n.",
-            transient=True
+            f"Markis {unread_count} mesaĝo(j)n kiel legita(j)n.", transient=True
         )
         self._refresh_list()
 
@@ -3901,12 +3964,12 @@ class RetpostoTUI:
         if not self._load_aldonajoj or not self._malfermi_aldonajon:
             self._set_status("[!] Aldonaĵoj ne subtenataj.", transient=True)
             return
-        
+
         aldonajoj = self._load_aldonajoj(msg["id"])
         if not aldonajoj:
             self._set_status("Neniu aldonaĵo en ĉi tiu mesaĝo.", transient=True)
             return
-        
+
         # If only one attachment, open it directly
         if len(aldonajoj) == 1:
             try:
@@ -3917,40 +3980,43 @@ class RetpostoTUI:
             except Exception as e:
                 self._set_status(f"[!] Eraro: {e}", transient=True)
             return
-        
+
         # Multiple attachments - show selection menu
         import curses
+
         h, w = self.stdscr.getmaxyx()
         menu_h = min(len(aldonajoj) + 4, h - 4)
         menu_w = min(60, w - 4)
         top = (h - menu_h) // 2
         left = (w - menu_w) // 2
-        
+
         win = curses.newwin(menu_h, menu_w, top, left)
         win.keypad(True)
         cursor = 0
-        
+
         while True:
             win.erase()
             win.box()
             _safe_addstr(win, 0, 2, " Aldonaĵoj ", curses.A_BOLD)
-            
+
             for i, att in enumerate(aldonajoj):
                 y = i + 2
                 if y >= menu_h - 1:
                     break
-                label = f"{i+1}. {att['dosiernomo']}"
+                label = f"{i + 1}. {att['dosiernomo']}"
                 attr = curses.A_REVERSE if i == cursor else curses.A_NORMAL
-                _safe_addstr(win, y, 2, label[:menu_w-4], attr)
-            
+                _safe_addstr(win, y, 2, label[: menu_w - 4], attr)
+
             _safe_addstr(
-                win, menu_h - 1, 2,
-                "Enter:malfermi  q:nuligi"[:menu_w-4],
-                curses.A_DIM
+                win,
+                menu_h - 1,
+                2,
+                "Enter:malfermi  q:nuligi"[: menu_w - 4],
+                curses.A_DIM,
             )
             win.noutrefresh()
             curses.doupdate()
-            
+
             key = win.getch()
             if key == ord("q") or key == _ESC:
                 break
@@ -3962,8 +4028,7 @@ class RetpostoTUI:
                 try:
                     self._malfermi_aldonajon(aldonajoj[cursor]["id"])
                     self._set_status(
-                        f"Malfermis: {aldonajoj[cursor]['dosiernomo']}",
-                        transient=True
+                        f"Malfermis: {aldonajoj[cursor]['dosiernomo']}", transient=True
                     )
                     break
                 except Exception as e:
@@ -4014,7 +4079,7 @@ class RetpostoTUI:
         accs = self._load_accounts()
         acc_nums = {acc["id"]: idx for idx, acc in enumerate(accs, 1)}
         suggestions: list[str] = []
-        
+
         # Build list of all folder options with account numbers
         for acc in accs:
             folders = self._load_folders(acc["id"])
@@ -4028,11 +4093,11 @@ class RetpostoTUI:
                 else:
                     full = name
                 suggestions.append(full)
-        
+
         # Filter by partial match
         if partial_low:
             suggestions = [s for s in suggestions if partial_low in s.lower()]
-        
+
         # Sort by relevance: exact start match > contains match > alphabetical
         def sort_key(s: str) -> tuple[int, str]:
             s_low = s.lower()
@@ -4041,9 +4106,9 @@ class RetpostoTUI:
             if partial_low and partial_low in s_low:
                 return (1, s)  # Contains match - medium priority
             return (2, s)  # No match or empty partial - lowest priority
-        
+
         suggestions.sort(key=sort_key)
-        
+
         # Add last-used folder at top ONLY if it matches the partial input
         if self._last_folder_target is not None:
             name, acc_id = self._last_folder_target
@@ -4059,7 +4124,7 @@ class RetpostoTUI:
                     suggestions.remove(last_full)
                 # Insert at top
                 suggestions.insert(0, last_full)
-        
+
         # Remove duplicates while preserving order
         uniq: list[str] = []
         seen: set[str] = set()
@@ -4103,8 +4168,11 @@ class RetpostoTUI:
                 h, w = self.stdscr.getmaxyx()
                 self.stdscr.erase()
                 _safe_addstr(
-                    self.stdscr, 0, 0,
-                    " Mesaĝ-serĉo (IMAP-stilo) ".ljust(w - 1), curses.A_REVERSE
+                    self.stdscr,
+                    0,
+                    0,
+                    " Mesaĝ-serĉo (IMAP-stilo) ".ljust(w - 1),
+                    curses.A_REVERSE,
                 )
                 examples = [
                     'FROM "alice@example.com"',
@@ -4115,27 +4183,29 @@ class RetpostoTUI:
                 ]
                 row = 1
                 for ex in examples:
-                    _safe_addstr(self.stdscr, row, 0, f"  {ex}"[:w - 1], curses.A_DIM)
+                    _safe_addstr(self.stdscr, row, 0, f"  {ex}"[: w - 1], curses.A_DIM)
                     row += 1
                 row += 1
-                for ln in lines[-max(0, h - row - 3):]:
+                for ln in lines[-max(0, h - row - 3) :]:
                     _safe_addstr(
-                        self.stdscr, row, 0, f"  {ln}"[:w - 1], curses.A_NORMAL
+                        self.stdscr, row, 0, f"  {ln}"[: w - 1], curses.A_NORMAL
                     )
                     row += 1
                 _safe_addstr(
                     self.stdscr,
                     row,
                     0,
-                    f"> {buf}█"[:w - 1].ljust(w - 1),
+                    f"> {buf}█"[: w - 1].ljust(w - 1),
                     curses.A_STANDOUT,
                 )
                 _safe_addstr(
-                    self.stdscr, h - 1, 0,
+                    self.stdscr,
+                    h - 1,
+                    0,
                     (
                         " Enter:aldoni-linion  malplena Enter:apliki/reset  "
                         "Esc:q nuligi "
-                    )[:w - 1].ljust(w - 1),
+                    )[: w - 1].ljust(w - 1),
                     curses.A_REVERSE,
                 )
                 self.stdscr.refresh()
@@ -4287,7 +4357,8 @@ class RetpostoTUI:
                 pool = [m for m in pool if needle in (m.get("subjekto") or "").lower()]
             elif field == "BODY":
                 pool = [
-                    m for m in pool
+                    m
+                    for m in pool
                     if needle in (m.get("korpo") or "").lower()
                     or needle in (m.get("html_korpo") or "").lower()
                 ]
@@ -4312,6 +4383,7 @@ class RetpostoTUI:
         query = " | ".join(query_parts)
         self._message_panel.set_filtered_messages(pool, query)
         self._set_status(f"Serĉ-rezultoj: {len(pool)}", transient=True)
+
     def _action_aldoni_konton(self) -> None:
         """Add a new email account interactively from within the TUI."""
         if self._save_account is None or self._set_password is None:
@@ -4456,7 +4528,9 @@ class RetpostoTUI:
             h, w = self.stdscr.getmaxyx()
             self.stdscr.erase()
             _safe_addstr(
-                self.stdscr, 0, 0,
+                self.stdscr,
+                0,
+                0,
                 " Kontoj — e:redakti  s:subskribo  q:reen ".ljust(w - 1),
                 curses.A_REVERSE,
             )
@@ -4470,9 +4544,11 @@ class RetpostoTUI:
                     f"{acc.get('smtp_servilo', '')}{sub_hint}"
                 )
                 attr = curses.A_STANDOUT if is_cur else curses.A_NORMAL
-                _safe_addstr(self.stdscr, i + 1, 0, line[:w - 1].ljust(w - 1), attr)
+                _safe_addstr(self.stdscr, i + 1, 0, line[: w - 1].ljust(w - 1), attr)
             _safe_addstr(
-                self.stdscr, h - 1, 0,
+                self.stdscr,
+                h - 1,
+                0,
                 " j/k:↕  e:redakti  s:subskribo  q:reen ".ljust(w - 1),
                 curses.A_REVERSE,
             )
@@ -4561,11 +4637,12 @@ class RetpostoTUI:
             self.stdscr.erase()
 
             _safe_addstr(
-                self.stdscr, 0, 0,
-                (
-                    " Spamo — Tab:sekcio  u:malbloki/restarigi  "
-                    ":h/:help  q:reen "
-                ).ljust(w - 1),
+                self.stdscr,
+                0,
+                0,
+                (" Spamo — Tab:sekcio  u:malbloki/restarigi  :h/:help  q:reen ").ljust(
+                    w - 1
+                ),
                 curses.A_REVERSE,
             )
 
@@ -4583,7 +4660,9 @@ class RetpostoTUI:
             mid = (h - 2) // 2
             row = 1
             _safe_addstr(
-                self.stdscr, row, 0,
+                self.stdscr,
+                row,
+                0,
                 f" ── Blokitaj adresoj ({len(blocks)}) ".ljust(w - 1),
                 curses.A_BOLD if section == 0 else curses.A_DIM,
             )
@@ -4595,14 +4674,16 @@ class RetpostoTUI:
                 added = blk.get("kreita_je", "")[:10]
                 if added:
                     line += f"  ({added})"
-                _safe_addstr(self.stdscr, row, 0, line[:w - 1].ljust(w - 1), attr)
+                _safe_addstr(self.stdscr, row, 0, line[: w - 1].ljust(w - 1), attr)
                 row += 1
                 if row >= mid:
                     break
 
             row = mid + 1
             _safe_addstr(
-                self.stdscr, mid, 0,
+                self.stdscr,
+                mid,
+                0,
                 f" ── Spamaj mesaĝoj ({len(spam_msgs)}) ".ljust(w - 1),
                 curses.A_BOLD if section == 1 else curses.A_DIM,
             )
@@ -4612,17 +4693,18 @@ class RetpostoTUI:
                 sender = (msg.get("de") or "")[:25]
                 subj = (msg.get("subjekto") or "")[:30]
                 line = f"  {sender:<25}  {subj}"
-                _safe_addstr(self.stdscr, row, 0, line[:w - 1].ljust(w - 1), attr)
+                _safe_addstr(self.stdscr, row, 0, line[: w - 1].ljust(w - 1), attr)
                 row += 1
                 if row >= h - 1:
                     break
 
             _safe_addstr(
-                self.stdscr, h - 1, 0,
-                (
-                    " j/k:↕  Tab:sekcio  u:malbloki/restarigi  "
-                    ":h/:help  q:reen "
-                ).ljust(w - 1),
+                self.stdscr,
+                h - 1,
+                0,
+                (" j/k:↕  Tab:sekcio  u:malbloki/restarigi  :h/:help  q:reen ").ljust(
+                    w - 1
+                ),
                 curses.A_REVERSE,
             )
             self.stdscr.refresh()
@@ -4709,16 +4791,12 @@ class RetpostoTUI:
                 curses.A_REVERSE,
             )
             # Left pane: accounts
-            _safe_addstr(
-                self.stdscr, 1, 0, " Kontoj ".ljust(left_w - 1), curses.A_BOLD
-            )
+            _safe_addstr(self.stdscr, 1, 0, " Kontoj ".ljust(left_w - 1), curses.A_BOLD)
             for i, a in enumerate(accounts[: max(0, h - 4)]):
                 marker = ">" if i == account_idx else " "
                 line = f"{marker} {i + 1}. {a['retposto']}"
                 attr = (
-                    curses.A_STANDOUT
-                    if pane == "accounts" and i == account_idx
-                    else 0
+                    curses.A_STANDOUT if pane == "accounts" and i == account_idx else 0
                 )
                 _safe_addstr(
                     self.stdscr,
@@ -4743,9 +4821,7 @@ class RetpostoTUI:
                 prefix = "[x]" if cut else ("[*]" if selected else "[ ]")
                 line = f"{prefix} {f.get('nomo') or ''}  (id={fid})"
                 attr = (
-                    curses.A_STANDOUT
-                    if pane == "folders" and i == folder_cursor
-                    else 0
+                    curses.A_STANDOUT if pane == "folders" and i == folder_cursor else 0
                 )
                 _safe_addstr(
                     self.stdscr,
@@ -4797,7 +4873,7 @@ class RetpostoTUI:
                 (
                     " Tab:h/l panelo  r:renomi  SPACE/v:elekti  "
                     "d:tondi  p:alglui  :h/:help  q:reen "
-                )[:w - 1].ljust(w - 1),
+                )[: w - 1].ljust(w - 1),
                 curses.A_REVERSE,
             )
             self.stdscr.refresh()
@@ -4911,9 +4987,7 @@ class RetpostoTUI:
         else:
             lines = ["  Nomo                           Retpoŝto", ""]
             for c in contacts:
-                lines.append(
-                    f"  {(c.get('nomo') or ''):<30}  {c['retposto']}"
-                )
+                lines.append(f"  {(c.get('nomo') or ''):<30}  {c['retposto']}")
         self._run_pager_lines(lines, "Koresponda Listo")
 
     def _run_pager_lines(self, lines: list[str], title: str) -> None:
@@ -4923,21 +4997,18 @@ class RetpostoTUI:
             h, w = self.stdscr.getmaxyx()
             page_h = max(1, h - 2)
             self.stdscr.erase()
-            _safe_addstr(
-                self.stdscr, 0, 0,
-                f" {title} ".ljust(w - 1), curses.A_REVERSE
-            )
+            _safe_addstr(self.stdscr, 0, 0, f" {title} ".ljust(w - 1), curses.A_REVERSE)
             for i in range(h - 2):
                 li = i + row
                 if li >= len(lines):
                     break
-                _safe_addstr(
-                    self.stdscr, i + 1, 0,
-                    lines[li][:w - 1], curses.A_NORMAL
-                )
+                _safe_addstr(self.stdscr, i + 1, 0, lines[li][: w - 1], curses.A_NORMAL)
             _safe_addstr(
-                self.stdscr, h - 1, 0,
-                " j/k:↕  PgDn/PgUp:paĝo  q:reen ".ljust(w - 1), curses.A_REVERSE
+                self.stdscr,
+                h - 1,
+                0,
+                " j/k:↕  PgDn/PgUp:paĝo  q:reen ".ljust(w - 1),
+                curses.A_REVERSE,
             )
             self.stdscr.refresh()
             key = _getch_unicode(self.stdscr)
@@ -4988,11 +5059,11 @@ class RetpostoTUI:
                             self.stdscr,
                             max(0, h - 2),
                             0,
-                            ("  " + "  ".join(sugg))[:w - 1].ljust(w - 1),
+                            ("  " + "  ".join(sugg))[: w - 1].ljust(w - 1),
                             curses.A_DIM,
                         )
                 _safe_addstr(
-                    self.stdscr, h - 1, 0, line[:w - 1].ljust(w - 1), curses.A_REVERSE
+                    self.stdscr, h - 1, 0, line[: w - 1].ljust(w - 1), curses.A_REVERSE
                 )
                 self.stdscr.refresh()
                 key = _getch_unicode(self.stdscr)
@@ -5031,7 +5102,7 @@ class RetpostoTUI:
                     self.stdscr,
                     h - 1,
                     0,
-                    line[:w - 1].ljust(w - 1),
+                    line[: w - 1].ljust(w - 1),
                     curses.A_REVERSE,
                 )
                 self.stdscr.refresh()
@@ -5055,7 +5126,7 @@ class RetpostoTUI:
     def _prompt_confirm_inline(self, prompt: str) -> bool:
         h, w = self.stdscr.getmaxyx()
         _safe_addstr(
-            self.stdscr, h - 1, 0, prompt[:w - 1].ljust(w - 1), curses.A_REVERSE
+            self.stdscr, h - 1, 0, prompt[: w - 1].ljust(w - 1), curses.A_REVERSE
         )
         self.stdscr.refresh()
         self.stdscr.timeout(-1)

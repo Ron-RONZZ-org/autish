@@ -37,6 +37,8 @@ tomli-w = ">=1"
 tomli = {version = ">=2", python = "<3.11"}
 markdown = ">=3.5"
 yt-dlp = "^2026.3.17"
+pyvis = ">=0.3.2"
+weasyprint = ">=68.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8"
@@ -61,6 +63,7 @@ encik = "autish.commands.encik:app"
 disko = "autish.commands.disko:app"
 usb = "autish.commands.usb:app"
 filmeto = "autish.commands.filmeto:app"
+kalendaro = "autish.commands.kalendaro:app"
 
 [tool.ruff]
 line-length = 88

@@ -18,7 +18,7 @@ import typer
 from autish.utils import echo_padded
 
 app = typer.Typer(
-    help="Print system information.",
+    help="Montri sistemajn informojn.",
     invoke_without_command=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )

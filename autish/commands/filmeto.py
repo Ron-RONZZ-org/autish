@@ -16,6 +16,7 @@ from typing import Any
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
@@ -607,6 +608,107 @@ def _resolve_output_template(output_path: Path) -> tuple[Path, str]:
     return parent, f"{base}.%(ext)s"
 
 
+def _format_duration(seconds: Any) -> str:
+    if not isinstance(seconds, (int, float)) or seconds <= 0:
+        return "-"
+    total = int(seconds)
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    secs = total % 60
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _render_clickable_path(path: Path) -> Text:
+    resolved = path.expanduser().resolve()
+    rendered = str(resolved)
+    text = Text(rendered)
+    text.stylize(f"link {resolved.as_uri()}")
+    return text
+
+
+def _collect_download_plan(
+    targets: list[str],
+    format_selector: str,
+    *,
+    playlist_limo: int | None = None,
+    cookies: str | None = None,
+    cookies_from_browser: str | None = None,
+) -> list[dict[str, Any]]:
+    plan: list[dict[str, Any]] = []
+    opts = {
+        "quiet": True,
+        "skip_download": True,
+        "no_warnings": True,
+        "format": format_selector,
+    }
+    runtimes = _auto_js_runtimes()
+    if runtimes:
+        opts["js_runtimes"] = runtimes
+    if playlist_limo is not None:
+        opts["playlistend"] = max(1, int(playlist_limo))
+    if cookies:
+        opts["cookiefile"] = cookies
+    if cookies_from_browser:
+        opts["cookiesfrombrowser"] = _cookies_from_browser_arg(cookies_from_browser)
+    with YoutubeDL(opts) as ydl:
+        for target in targets:
+            try:
+                info = ydl.extract_info(target, download=False)
+            except DownloadError:
+                continue
+            for item in _flatten_download_items(info):
+                size_bytes = _estimate_one_item_size(item)
+                plan.append(
+                    {
+                        "title": str(item.get("title") or "-"),
+                        "duration": _format_duration(item.get("duration")),
+                        "author": str(
+                            item.get("uploader") or item.get("channel") or "-"
+                        ),
+                        "size_bytes": size_bytes,
+                        "raw": item,
+                    }
+                )
+    return plan
+
+
+def _destination_path_for_item(
+    item: dict[str, Any], output_dir: Path, outtmpl_name: str
+) -> Path:
+    opts = {
+        "quiet": True,
+        "skip_download": True,
+        "outtmpl": str(output_dir / outtmpl_name),
+    }
+    with YoutubeDL(opts) as ydl:
+        prepared = ydl.prepare_filename(item)
+    return Path(prepared).expanduser().resolve()
+
+
+def _download_plan_table(
+    plan: list[dict[str, Any]], output_dir: Path, outtmpl_name: str
+) -> Table:
+    table = Table(title=f"Elŝuta resumo ({len(plan)})")
+    table.add_column("Titolo")
+    table.add_column("Daŭro", width=10)
+    table.add_column("Aŭtoro", width=20)
+    table.add_column("Grandeco", width=10)
+    table.add_column("Celo", overflow="fold")
+    for row in plan:
+        item = row.get("raw") if isinstance(row.get("raw"), dict) else {}
+        destination = _destination_path_for_item(item or {}, output_dir, outtmpl_name)
+        table.add_row(
+            str(row.get("title") or "-"),
+            str(row.get("duration") or "-"),
+            str(row.get("author") or "-"),
+            _format_size(int(row.get("size_bytes") or 0)),
+            _render_clickable_path(destination),
+        )
+    return table
+
+
 def _run_download(
     targets: list[str],
     output_dir: Path,
@@ -701,8 +803,17 @@ def _playlist_table(entries: list[dict[str, Any]], title: str) -> Table:
     return table
 
 
-@app.command("agordo")
-def agordo(
+def _print_agordi_summary(cfg: dict[str, str]) -> None:
+    table = Table(title="Filmeto-agordoj")
+    table.add_column("Agordo", style="dim", width=20)
+    table.add_column("Valoro", overflow="fold")
+    default_path = cfg.get("defauxlta_vojo") or str(_default_downloads_dir())
+    table.add_row("defaŭlta vojo", _render_clickable_path(Path(default_path)))
+    console.print(table)
+
+
+@app.command("agordi")
+def agordi(
     vojo: Path | None = typer.Option(
         None,
         "-v",
@@ -716,13 +827,29 @@ def agordo(
     """Montri aŭ agordi defaŭltojn por filmeto."""
     cfg = _load_agordo()
     if vojo is None:
-        default_path = cfg.get("defauxlta_vojo") or str(_default_downloads_dir())
-        typer.echo(f"Defaŭlta vojo: {default_path}")
+        _print_agordi_summary(cfg)
         return
     chosen = _ensure_folder(vojo)
     cfg["defauxlta_vojo"] = str(chosen)
     _save_agordo(cfg)
     typer.echo(f"Konservis defaŭltan vojon: {chosen}")
+    _print_agordi_summary(cfg)
+
+
+@app.command("agordo", hidden=True)
+def agordo(
+    vojo: Path | None = typer.Option(
+        None,
+        "-v",
+        "--vojo",
+        file_okay=False,
+        dir_okay=True,
+        resolve_path=False,
+        help="Defaŭlta dosierujo por `filmeto elsuti`.",
+    ),
+) -> None:
+    """Malnova aliaso por `filmeto agordi`."""
+    agordi(vojo=vojo)
 
 
 @app.command("serci")
@@ -1004,8 +1131,19 @@ def elsuti(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
     targets = _resolve_targets(celoj)
+    if vojo is not None:
+        resolved_output_path = vojo.expanduser()
+        if not resolved_output_path.is_absolute():
+            resolved_output_path = _default_download_dir() / resolved_output_path
+        output_dir, outtmpl_name = _resolve_output_template(resolved_output_path)
+    else:
+        output_dir, outtmpl_name = (
+            _default_download_dir(),
+            "%(title).80s [%(id)s].%(ext)s",
+        )
+    output_dir = _ensure_folder(output_dir)
     try:
-        count, total = _estimate_downloads(
+        plan = _collect_download_plan(
             targets,
             format_selector,
             playlist_limo=limo,
@@ -1020,24 +1158,16 @@ def elsuti(
         )
         typer.echo(_cookie_help_details(), err=True)
         raise typer.Exit(code=1) from exc
+    count = len(plan)
+    total = sum(int(item.get("size_bytes") or 0) for item in plan)
     typer.echo(f"Taksita nombro de elŝutoj: {count}")
     typer.echo(f"Taksita grandeco: {_format_size(total)}")
-    if total > _LARGE_SIZE_BYTES:
-        ok = typer.confirm(
-            "Averto: taksita grandeco > 500 MB. Ĉu daŭrigi?",
-            default=False,
-        )
-        if not ok:
-            typer.echo("Nuligita.")
-            return
-    if vojo is not None:
-        output_dir, outtmpl_name = _resolve_output_template(vojo)
-    else:
-        output_dir, outtmpl_name = (
-            _default_download_dir(),
-            "%(title).80s [%(id)s].%(ext)s",
-        )
-    output_dir = _ensure_folder(output_dir)
+    if plan:
+        console.print(_download_plan_table(plan, output_dir, outtmpl_name))
+    raw = typer.prompt("Ĉu daŭrigi elŝuton? (J/n)", default="J")
+    if raw.strip().lower()[:1] in {"n"}:
+        typer.echo("Nuligita.")
+        return
     try:
         if difino is not None or sonkvalito is not None:
             probe_opts = {"quiet": True, "skip_download": True, "extract_flat": False}
