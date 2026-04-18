@@ -215,14 +215,20 @@ def _delete_master_password() -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _load_profile() -> dict:
-    """Load the user profile.  Returns {} if not found."""
+def _load_profile(*, quiet: bool = False) -> dict:
+    """Load the user profile. Returns {} if not found.
+
+    quiet=True suppresses user-facing errors and falls back to {} when the
+    profile cannot be read (useful for non-interactive locale probing).
+    """
     from autish.commands._crypto import decrypt, is_encrypted  # noqa: PLC0415
 
     # Try encrypted file first
     if _PROFILE_ENC_FILE.exists():
         master = _get_master_password()
         if not master:
+            if quiet:
+                return {}
             typer.echo(
                 "[!] Profilo estas cifrita, sed neniu majstra pasvorto estas agordita.",
                 err=True,
@@ -233,13 +239,27 @@ def _load_profile() -> dict:
             try:
                 raw = decrypt(raw, master)
             except ValueError as exc:
+                if quiet:
+                    return {}
                 typer.echo(f"[!] Ne povis malcifri profilon: {exc}", err=True)
                 raise typer.Exit(1) from exc
-        return _toml_loads(raw.decode("utf-8"))
+        try:
+            return _toml_loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            if quiet:
+                return {}
+            typer.echo(f"[!] Profilo estas nevalida: {exc}", err=True)
+            raise typer.Exit(1) from exc
 
     # Plain file
     if _PROFILE_FILE.exists():
-        return _toml_loads(_PROFILE_FILE.read_text(encoding="utf-8"))
+        try:
+            return _toml_loads(_PROFILE_FILE.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            if quiet:
+                return {}
+            typer.echo(f"[!] Profilo estas nevalida: {exc}", err=True)
+            raise typer.Exit(1) from exc
 
     return {}
 

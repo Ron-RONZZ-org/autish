@@ -323,6 +323,107 @@ def test_elsuti_supports_target_folder_option(tmp_path, monkeypatch):
     assert called["dir"] == str(out_dir.resolve())
 
 
+def test_elsuti_csv_batch_supports_carry_forward_and_bool_values(tmp_path, monkeypatch):
+    import autish.commands.filmeto as mod
+
+    monkeypatch.setattr(mod, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(mod, "_CACHE_FILE", tmp_path / "filmeto_cache.json")
+    cache = {
+        "889ec426": "https://www.youtube.com/watch?v=vid1",
+        "c4c93dd0": "https://www.youtube.com/watch?v=vid2",
+    }
+    (tmp_path / "filmeto_cache.json").write_text(
+        json.dumps(cache),
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "filozofio"
+    csv_path = tmp_path / "batch.csv"
+    csv_path.write_text(
+        "celoj,vojo,audio\n"
+        f"889ec426,{out_dir},TRUE\n"
+        "c4c93dd0,,0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        mod,
+        "_collect_download_plan",
+        lambda *_a, **_k: [
+            {
+                "title": "Video",
+                "duration": "01:00",
+                "author": "Kanalo",
+                "size_bytes": 1024,
+                "raw": {"title": "Video", "id": "vid", "ext": "mp4"},
+            }
+        ],
+    )
+    calls: list[dict[str, object]] = []
+
+    def _fake_download(targets, output_dir, format_selector, **kwargs):
+        calls.append(
+            {
+                "targets": list(targets),
+                "output_dir": str(output_dir),
+                "format": format_selector,
+                "kwargs": kwargs,
+            }
+        )
+        return []
+
+    monkeypatch.setattr(mod, "_run_download", _fake_download)
+    result = runner.invoke(
+        app,
+        ["filmeto", "elsuti", "--csv-dosiero", str(csv_path)],
+        input="j\nj\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 2
+    assert calls[0]["targets"] == [cache["889ec426"]]
+    assert calls[1]["targets"] == [cache["c4c93dd0"]]
+    assert calls[0]["output_dir"] == str(out_dir.resolve())
+    assert calls[1]["output_dir"] == str(out_dir.resolve())
+    assert calls[0]["format"] == "bestaudio"
+    assert calls[1]["format"] == "best"
+
+
+def test_parse_elsuti_csv_rows_null_value_inherits_previous(tmp_path):
+    import autish.commands.filmeto as mod
+
+    csv_path = tmp_path / "batch-null.csv"
+    csv_path.write_text(
+        "celoj,vojo,audio\n"
+        "abc12345,/tmp/unua,True\n"
+        "def67890,NULL,NULL\n",
+        encoding="utf-8",
+    )
+    rows = mod._parse_elsuti_csv_rows(
+        csv_path,
+        initial_state={
+            "celoj": [],
+            "difino": None,
+            "sonkvalito": None,
+            "audio": False,
+            "filmeto": False,
+            "limo": None,
+            "kuketoj": None,
+            "kuketoj_de_retumilo": None,
+            "vojo": None,
+            "subtitoloj": None,
+        },
+    )
+    assert len(rows) == 2
+    assert rows[0]["audio"] is True
+    assert rows[1]["audio"] is True
+    assert str(rows[0]["vojo"]) == "/tmp/unua"
+    assert str(rows[1]["vojo"]) == "/tmp/unua"
+
+
+def test_elsuti_requires_targets_or_csv():
+    result = runner.invoke(app, ["filmeto", "elsuti"])
+    assert result.exit_code != 0
+    assert "Mankas celo(j)" in (result.output + (result.stderr or ""))
+
+
 def test_elsuti_full_output_path_strips_extension(tmp_path, monkeypatch):
     import autish.commands.filmeto as mod
 

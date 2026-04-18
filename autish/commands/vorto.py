@@ -21,8 +21,10 @@ import sqlite3
 import sys
 import tempfile
 import uuid as _uuid_mod
+import webbrowser
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
+from html import escape
 from pathlib import Path
 
 import typer
@@ -58,6 +60,7 @@ console = Console()
 
 _DATA_DIR: Path = Path.home() / ".local" / "share" / "autish"
 _DB_FILE: Path = _DATA_DIR / "vorto.db"
+_ENCIK_DB_FILE: Path = _DATA_DIR / "encik.db"
 _MAX_UNDO: int = 10
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -525,44 +528,517 @@ def _normalize_difinoj_uzoj(
     return clean_difinoj, clean_uzoj
 
 
+def _find_encik_entry(uid_or_prefix: str) -> dict | None:
+    normalized = str(uid_or_prefix or "").strip().lstrip("#")
+    if not normalized or not _ENCIK_DB_FILE.exists():
+        return None
+    con = sqlite3.connect(str(_ENCIK_DB_FILE), timeout=2.0)
+    con.row_factory = sqlite3.Row
+    try:
+        row = con.execute(
+            "SELECT uuid, titolo, difinio FROM encik WHERE uuid = ?",
+            (normalized,),
+        ).fetchone()
+        if row:
+            return dict(row)
+        rows = con.execute(
+            "SELECT uuid, titolo, difinio FROM encik "
+            "WHERE uuid LIKE ? ORDER BY uuid COLLATE NOCASE LIMIT 2",
+            (f"{normalized}%",),
+        ).fetchall()
+        if len(rows) == 1:
+            return dict(rows[0])
+        return None
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+
+
+def _normalize_inline_ref_token(raw_ref: str) -> str:
+    token = str(raw_ref or "").strip().split(",", 1)[0].strip()
+    if not token:
+        return ""
+    lower = token.lower()
+    if lower.startswith("vt#"):
+        local_ref = token[3:].lstrip("#").strip()
+        return f"#{local_ref}" if local_ref else ""
+    if lower.startswith("ec#"):
+        encik_ref = token[3:].lstrip("#").strip()
+        return f"ec#{encik_ref}" if encik_ref else ""
+    if token.startswith("#"):
+        local_ref = token.lstrip("#").strip()
+        return f"#{local_ref}" if local_ref else ""
+    return token
+
+
+_INTERNAL_LINK_RE = re.compile(
+    r"\[([^\]]+)\]\(((?:#|[eE][cC]#|[vV][tT]#)[^)]+)\)"
+)
+
+
 def _extract_markdown_link_refs(text: str) -> list[str]:
     refs: list[str] = []
-    for match in re.finditer(r"\[[^\]]+\]\(#([^)]+)\)", str(text or "")):
-        raw_ref = match.group(1).split(",", 1)[0].strip().lstrip("#")
-        if raw_ref:
-            refs.append(raw_ref)
+    for match in re.finditer(r"\[[^\]]+\]\(([^)]+)\)", str(text or "")):
+        target = _normalize_inline_ref_token(match.group(1))
+        if not target:
+            continue
+        if target.startswith("#") or target.lower().startswith("ec#"):
+            refs.append(target)
     return refs
+
+
+def _extract_markdown_link_refs_from_payload(payload: object) -> list[str]:
+    refs: list[str] = []
+    if isinstance(payload, str):
+        refs.extend(_extract_markdown_link_refs(payload))
+        return refs
+    if isinstance(payload, list):
+        for item in payload:
+            refs.extend(_extract_markdown_link_refs_from_payload(item))
+        return refs
+    if isinstance(payload, dict):
+        for value in payload.values():
+            refs.extend(_extract_markdown_link_refs_from_payload(value))
+    return refs
+
+
+def _canonicalize_ligilo_ref(raw_ref: str, entries: list[dict]) -> str:
+    token = _normalize_inline_ref_token(raw_ref)
+    if not token:
+        return ""
+    if token.lower().startswith("ec#"):
+        encik_ref = token[3:]
+        if not encik_ref:
+            return ""
+        target = _find_encik_entry(encik_ref)
+        resolved = str(target.get("uuid") or encik_ref).strip() if target else encik_ref
+        return f"ec#{resolved}" if resolved else ""
+    lookup = token[1:] if token.startswith("#") else token
+    if not lookup:
+        return ""
+    target = _find_entry(lookup, entries)
+    if target is not None:
+        return str(target.get("uuid") or "")
+    return lookup
 
 
 def _normalize_link_refs(refs: list[str], entries: list[dict]) -> list[str]:
     normalized: list[str] = []
     seen: set[str] = set()
     for raw in refs:
-        target = _find_entry(raw, entries)
-        target_uuid = str(target["uuid"] if target is not None else raw).lstrip("#")
-        if not target_uuid or target_uuid in seen:
+        target_ref = _canonicalize_ligilo_ref(raw, entries)
+        if not target_ref:
             continue
-        seen.add(target_uuid)
-        normalized.append(target_uuid)
+        dedup_key = (
+            target_ref.lower() if target_ref.lower().startswith("ec#") else target_ref
+        )
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        normalized.append(target_ref)
     return normalized
 
 
 def _merge_links_with_inline_refs(
-    base_links: list[str], difinoj: list[str], uzoj: list[str], entries: list[dict]
+    base_links: list[str],
+    difinoj: list[str],
+    uzoj: list[str],
+    entries: list[dict],
+    *,
+    extra_payload: object | None = None,
 ) -> list[str]:
     inline_refs: list[str] = []
     for part in [*(difinoj or []), *(uzoj or [])]:
         inline_refs.extend(_extract_markdown_link_refs(part))
+    if extra_payload is not None:
+        inline_refs.extend(_extract_markdown_link_refs_from_payload(extra_payload))
     return _normalize_link_refs([*(base_links or []), *inline_refs], entries)
 
 
-def _write_entry_preview_file(entry: dict, all_entries: list[dict]) -> str:
-    lines = _entry_to_lines(entry)
+def _write_preview_html_file(lines: list[str]) -> str:
+    body = escape("\n".join(lines))
+    html = (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<style>"
+        "body{font-family:system-ui,sans-serif;margin:1rem;line-height:1.45;}"
+        "pre{white-space:pre-wrap;background:#fafafa;border:1px solid #e5e7eb;"
+        "border-radius:8px;padding:.75rem;}"
+        "</style></head><body><pre>"
+        f"{body}"
+        "</pre></body></html>"
+    )
+    return _write_html_document(html)
+
+
+def _write_encik_preview_file(entry: dict) -> str:
+    title = str(entry.get("titolo") or "").strip()
+    short_uuid = str(entry.get("uuid") or "")[:8]
+    difinio = str(entry.get("difinio") or "").strip()
+    lines = [f"{title}  ec#{short_uuid}", ""]
+    if difinio:
+        lines.append(difinio)
+    return _write_preview_html_file(lines)
+
+
+def _write_html_document(html_doc: str) -> str:
     with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False, encoding="utf-8"
+        mode="w", suffix=".html", delete=False, encoding="utf-8"
     ) as fh:
-        fh.write("\n".join(lines))
+        fh.write(html_doc)
         return fh.name
+
+
+def _render_internal_ref_html(
+    label: str,
+    target_token: str,
+    all_entries: list[dict] | None,
+    *,
+    link_depth: int = 0,
+) -> str:
+    safe_label = escape(label.strip() or target_token)
+    normalized = _normalize_inline_ref_token(target_token)
+    if normalized.lower().startswith("ec#"):
+        encik_ref = normalized[3:]
+        if not encik_ref:
+            return safe_label
+        target = _find_encik_entry(encik_ref)
+        if target is None:
+            return safe_label
+        preview_path = _write_encik_preview_file(target)
+        if link_depth > 0:
+            return safe_label
+        safe_href = escape(f"file://{preview_path}")
+        return f"<a href='{safe_href}'>{safe_label}</a>"
+    raw_ref = normalized.lstrip("#")
+    if not raw_ref:
+        return safe_label
+    if all_entries is None:
+        return safe_label
+    target = _find_entry(raw_ref, all_entries)
+    if target is None:
+        return safe_label
+    preview_path = _write_entry_preview_file(
+        target,
+        all_entries,
+        montri_cxion=False,
+        link_depth=link_depth + 1,
+    )
+    if link_depth > 0:
+        return safe_label
+    safe_href = escape(f"file://{preview_path}")
+    return f"<a href='{safe_href}'>{safe_label}</a>"
+
+
+def _render_html_text_with_internal_links(
+    text: str, all_entries: list[dict] | None, *, link_depth: int = 0
+) -> str:
+    raw_text = str(text or "")
+    if not raw_text:
+        return ""
+    chunks: list[str] = []
+    cursor = 0
+    for match in _INTERNAL_LINK_RE.finditer(raw_text):
+        chunks.append(escape(raw_text[cursor:match.start()]))
+        chunks.append(
+            _render_internal_ref_html(
+                match.group(1),
+                match.group(2),
+                all_entries,
+                link_depth=link_depth,
+            )
+        )
+        cursor = match.end()
+    chunks.append(escape(raw_text[cursor:]))
+    return "".join(chunks)
+
+
+def _render_ligilo_html(
+    raw_ref: str, all_entries: list[dict] | None, *, link_depth: int = 0
+) -> str:
+    token = _normalize_inline_ref_token(raw_ref)
+    local_ref = token[1:] if token.startswith("#") else token
+    if all_entries is not None and local_ref:
+        linked = _find_entry(local_ref, all_entries)
+        if linked is not None:
+            linked_label = (
+                str(linked.get("teksto") or "").strip() or f"#{local_ref[:8]}"
+            )
+            short_uuid = str(linked.get("uuid") or "")[:8]
+            if link_depth > 0:
+                return (
+                    f"{escape(linked_label)} "
+                    f"<span class='dim'>(#{escape(short_uuid)})</span>"
+                )
+            preview_path = _write_entry_preview_file(
+                linked,
+                all_entries,
+                montri_cxion=False,
+                link_depth=link_depth + 1,
+            )
+            safe_href = escape(f"file://{preview_path}")
+            return (
+                f"<a href='{safe_href}'>{escape(linked_label)}</a> "
+                f"<span class='dim'>(#{escape(short_uuid)})</span>"
+            )
+    if token.lower().startswith("ec#"):
+        encik_ref = token[3:]
+        if not encik_ref:
+            return "ec#"
+        target = _find_encik_entry(encik_ref)
+        if target is None:
+            return escape(f"ec#{encik_ref[:8]}")
+        title = str(target.get("titolo") or "").strip() or f"ec#{encik_ref[:8]}"
+        short_uuid = str(target.get("uuid") or "")[:8]
+        if link_depth > 0:
+            return f"{escape(title)} <span class='dim'>(ec#{escape(short_uuid)})</span>"
+        preview_path = _write_encik_preview_file(target)
+        safe_href = escape(f"file://{preview_path}")
+        return (
+            f"<a href='{safe_href}'>{escape(title)}</a> "
+            f"<span class='dim'>(ec#{escape(short_uuid)})</span>"
+        )
+    return escape(str(raw_ref or token))
+
+
+def _render_entry_preview_html(
+    entry: dict,
+    all_entries: list[dict] | None,
+    *,
+    montri_cxion: bool = False,
+    link_depth: int = 0,
+) -> str:
+    uid_short = str(entry.get("uuid") or "")[:8]
+    title = str(entry.get("teksto") or "").strip() or f"#{uid_short}"
+    kategorio = entry.get("kategorio") or ""
+    tipos = entry.get("tipo") or []
+    tipo_str = (
+        ", ".join(str(item) for item in tipos if str(item))
+        if isinstance(tipos, list)
+        else str(tipos) if tipos else ""
+    )
+    tipo_full = kategorio + ("/" + tipo_str if tipo_str else "")
+    lingvo = str(entry.get("lingvo") or "")
+    lingvo_tipo = ""
+    if lingvo and tipo_full:
+        lingvo_tipo = f"{lingvo} - {tipo_full}"
+    elif lingvo or tipo_full:
+        lingvo_tipo = lingvo or tipo_full
+    metadata_rows: list[tuple[str, str]] = []
+    if lingvo_tipo:
+        metadata_rows.append(("lingvo/tipo", escape(lingvo_tipo)))
+    autoro = str(entry.get("autoro") or "")
+    if autoro:
+        metadata_rows.append(
+            (
+                "aŭtoro",
+                _render_html_text_with_internal_links(
+                    autoro, all_entries, link_depth=link_depth
+                ),
+            )
+        )
+    verko = str(entry.get("verko") or "")
+    if verko:
+        metadata_rows.append(
+            (
+                "verko",
+                _render_html_text_with_internal_links(
+                    verko, all_entries, link_depth=link_depth
+                ),
+            )
+        )
+    if montri_cxion:
+        temo = str(entry.get("temo") or "")
+        if temo:
+            metadata_rows.append(
+                (
+                    "temo",
+                    _render_html_text_with_internal_links(
+                        temo, all_entries, link_depth=link_depth
+                    ),
+                )
+            )
+        tono = str(entry.get("tono") or "")
+        if tono:
+            metadata_rows.append(
+                (
+                    "tono",
+                    _render_html_text_with_internal_links(
+                        tono, all_entries, link_depth=link_depth
+                    ),
+                )
+            )
+        nivelo = entry.get("nivelo")
+        if nivelo is not None:
+            metadata_rows.append(("nivelo", escape(f"{float(nivelo):.1f}")))
+    metadata_html = ""
+    if metadata_rows:
+        rows = "".join(
+            f"<tr><th>{escape(label)}</th><td>{value}</td></tr>"
+            for label, value in metadata_rows
+        )
+        metadata_html = f"<table class='meta'>{rows}</table>"
+
+    difinoj: list[str] = entry.get("difinoj") or []
+    uzoj: list[str] = entry.get("uzoj") or []
+    if difinoj:
+        if len(difinoj) == 1:
+            rendered_difino = _render_html_text_with_internal_links(
+                difinoj[0], all_entries, link_depth=link_depth
+            )
+            item = f"<li><strong>{rendered_difino}</strong>"
+            if uzoj and uzoj[0]:
+                rendered_uzo = _render_html_text_with_internal_links(
+                    uzoj[0], all_entries, link_depth=link_depth
+                )
+                item += f"<div class='uzo'>{rendered_uzo}</div>"
+            item += "</li>"
+            difino_html = f"<ol class='difinoj'>{item}</ol>"
+        else:
+            items: list[str] = []
+            for index, difino in enumerate(difinoj):
+                rendered_difino = _render_html_text_with_internal_links(
+                    difino, all_entries, link_depth=link_depth
+                )
+                item = f"<li><strong>{rendered_difino}</strong>"
+                if index < len(uzoj) and uzoj[index]:
+                    rendered_uzo = _render_html_text_with_internal_links(
+                        uzoj[index], all_entries, link_depth=link_depth
+                    )
+                    item += f"<div class='uzo'>{rendered_uzo}</div>"
+                item += "</li>"
+                items.append(item)
+            difino_html = f"<ol class='difinoj'>{''.join(items)}</ol>"
+    else:
+        difino_html = "<p class='muted'>(neniu difino)</p>"
+
+    etikedoj: dict[str, str] = entry.get("etikedoj") or {}
+    etikedoj_html = ""
+    if montri_cxion and etikedoj:
+        items = "".join(
+            f"<li><code>{escape(str(k))}</code>: {escape(str(v))}</li>"
+            for k, v in etikedoj.items()
+        )
+        etikedoj_html = f"<h2>etikedoj</h2><ul>{items}</ul>"
+
+    ligiloj: list[str] = entry.get("ligiloj") or []
+    ligiloj_html = ""
+    if ligiloj:
+        rendered = " | ".join(
+            _render_ligilo_html(str(item or ""), all_entries, link_depth=link_depth)
+            for item in ligiloj
+            if str(item or "").strip()
+        )
+        ligiloj_html = f"<h2>ligiloj</h2><p>{rendered}</p>"
+
+    timestamp_rows: list[tuple[str, str]] = []
+    if montri_cxion:
+        kreita = str(entry.get("kreita_je") or "")
+        if kreita:
+            timestamp_rows.append(("kreita", escape(kreita[:19])))
+        modifita = str(entry.get("modifita_je") or "")
+        if modifita and modifita != kreita:
+            timestamp_rows.append(("modifita", escape(modifita[:19])))
+    timestamp_html = ""
+    if timestamp_rows:
+        rows = "".join(
+            f"<tr><th>{escape(label)}</th><td>{value}</td></tr>"
+            for label, value in timestamp_rows
+        )
+        timestamp_html = f"<h2>datoj</h2><table class='meta'>{rows}</table>"
+
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<style>"
+        "body{font-family:system-ui,sans-serif;margin:1rem;line-height:1.5;}"
+        "h1{margin:0 0 .25rem 0;font-size:1.25rem;}"
+        ".uuid{color:#6b7280;font-size:.95rem;margin-bottom:1rem;}"
+        "table.meta{border-collapse:collapse;margin:0 0 1rem 0;}"
+        "table.meta th{padding:.2rem .6rem .2rem 0;text-align:left;"
+        "color:#6b7280;font-weight:600;vertical-align:top;}"
+        "table.meta td{padding:.2rem 0;}"
+        ".difinoj{margin:.5rem 0 1rem 1.25rem;padding:0;}"
+        ".difinoj li{margin:.35rem 0;}"
+        ".uzo{font-style:italic;color:#4b5563;margin-top:.15rem;white-space:pre-wrap;}"
+        ".dim{color:#6b7280;}"
+        ".muted{color:#6b7280;}"
+        "code{background:#f3f4f6;padding:0 .2rem;border-radius:.2rem;}"
+        "h2{font-size:1rem;margin:1rem 0 .4rem 0;}"
+        "p{margin:.25rem 0;white-space:pre-wrap;}"
+        "a{text-decoration:none;}"
+        "a:hover{text-decoration:underline;}"
+        "</style></head><body>"
+        f"<h1>{escape(title)}</h1>"
+        f"<div class='uuid'>#{escape(uid_short)}</div>"
+        f"{metadata_html}"
+        "<h2>difinoj</h2>"
+        f"{difino_html}"
+        f"{etikedoj_html}"
+        f"{ligiloj_html}"
+        f"{timestamp_html}"
+        "</body></html>"
+    )
+
+
+def _write_entry_preview_file(
+    entry: dict,
+    all_entries: list[dict] | None,
+    *,
+    montri_cxion: bool = False,
+    link_depth: int = 0,
+) -> str:
+    html_doc = _render_entry_preview_html(
+        entry,
+        all_entries,
+        montri_cxion=montri_cxion,
+        link_depth=link_depth,
+    )
+    return _write_html_document(html_doc)
+
+
+def _open_entry_preview_file(
+    entry: dict, all_entries: list[dict], *, montri_cxion: bool = False
+) -> str:
+    out_path = _write_entry_preview_file(
+        entry,
+        all_entries,
+        montri_cxion=montri_cxion,
+        link_depth=0,
+    )
+    webbrowser.open(f"file://{out_path}")
+    return out_path
+
+
+def _render_encik_ligilo_markdown(label: str, raw_ref: str) -> str:
+    token = _normalize_inline_ref_token(raw_ref)
+    if not token.lower().startswith("ec#"):
+        return ""
+    encik_ref = token[3:]
+    if not encik_ref:
+        return label
+    target = _find_encik_entry(encik_ref)
+    if target is None:
+        return label
+    preview_path = _write_encik_preview_file(target)
+    return f"[{label}]({preview_path})"
+
+
+def _render_encik_ligilo_summary(raw_ref: str) -> str | None:
+    token = _normalize_inline_ref_token(raw_ref)
+    if not token.lower().startswith("ec#"):
+        return None
+    encik_ref = token[3:]
+    if not encik_ref:
+        return "ec#"
+    target = _find_encik_entry(encik_ref)
+    if target is None:
+        return f"ec#{encik_ref[:8]}"
+    title = str(target.get("titolo") or "").strip() or f"ec#{encik_ref[:8]}"
+    preview_path = _write_encik_preview_file(target)
+    short_uuid = str(target.get("uuid") or "")[:8]
+    return f"[**{title}**](file://{preview_path}) (ec#{short_uuid})"
 
 
 def _render_internal_markdown_links(text: str, all_entries: list[dict] | None) -> str:
@@ -571,15 +1047,19 @@ def _render_internal_markdown_links(text: str, all_entries: list[dict] | None) -
 
     def _replace(match: re.Match[str]) -> str:
         label = match.group(1).strip()
-        raw_ref = match.group(2).split(",", 1)[0].strip().lstrip("#")
+        target_token = _normalize_inline_ref_token(match.group(2))
+        if target_token.lower().startswith("ec#"):
+            return _render_encik_ligilo_markdown(label, target_token)
+        raw_ref = target_token.lstrip("#")
+        if not raw_ref:
+            return label
         target = _find_entry(raw_ref, all_entries)
         if target is None:
-            return f"{label} (#{raw_ref[:8]})"
+            return label
         preview_path = _write_entry_preview_file(target, all_entries)
-        short_uuid = str(target.get("uuid") or "")[:8]
-        return f"[{label}](file://{preview_path}) (#{short_uuid})"
+        return f"[{label}]({preview_path})"
 
-    return re.sub(r"\[([^\]]+)\]\(#([^)]+)\)", _replace, text)
+    return _INTERNAL_LINK_RE.sub(_replace, text)
 
 
 def _copy_to_clipboard(value: str, success_message: str) -> None:
@@ -722,7 +1202,10 @@ def _parse_forigi_targets(raw_targets: list[str]) -> list[str]:
 
 def _find_entry(uid_or_teksto: str, entries: list[dict]) -> dict | None:
     """Locate an entry by exact UUID, UUID prefix, or case-insensitive exact text."""
-    lookup = uid_or_teksto[1:] if uid_or_teksto.startswith("#") else uid_or_teksto
+    raw_lookup = str(uid_or_teksto or "").strip()
+    if raw_lookup.lower().startswith("vt#"):
+        raw_lookup = "#" + raw_lookup[3:]
+    lookup = raw_lookup[1:] if raw_lookup.startswith("#") else raw_lookup
     # Exact UUID match
     for e in entries:
         if e["uuid"] == lookup:
@@ -824,6 +1307,44 @@ def _ligilo_hops_of(root_uuid: str, entries: list[dict], max_depth: int) -> list
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def _render_ligilo_cli_text(
+    raw_ref: str, all_entries: list[dict] | None, *, show_ref: bool = True
+) -> Text:
+    raw_token = str(raw_ref or "").strip()
+    token = _normalize_inline_ref_token(raw_token)
+    local_ref = token[1:] if token.startswith("#") else token
+    if all_entries is not None and local_ref:
+        linked = _find_entry(local_ref, all_entries)
+        if linked is not None:
+            linked_label = str(linked.get("teksto") or "").strip()
+            short_uuid = str(linked.get("uuid") or "")[:8]
+            preview_path = _write_entry_preview_file(linked, all_entries)
+            rendered = Text()
+            rendered.append(
+                linked_label or f"#{short_uuid}",
+                style=f"link file://{preview_path}",
+            )
+            if show_ref:
+                rendered.append(f" (#{short_uuid})", style="dim")
+            return rendered
+    if token.lower().startswith("ec#"):
+        encik_ref = token[3:]
+        if not encik_ref:
+            return Text("ec#")
+        target = _find_encik_entry(encik_ref)
+        if target is None:
+            return Text(f"ec#{encik_ref[:8]}")
+        title = str(target.get("titolo") or "").strip() or f"ec#{encik_ref[:8]}"
+        preview_path = _write_encik_preview_file(target)
+        short_uuid = str(target.get("uuid") or "")[:8]
+        rendered = Text()
+        rendered.append(title, style=f"link file://{preview_path}")
+        if show_ref:
+            rendered.append(f" (ec#{short_uuid})", style="dim")
+        return rendered
+    return Text(raw_token or token)
+
+
 def _display_entry(
     entry: dict,
     all_entries: list[dict] | None = None,
@@ -896,25 +1417,15 @@ def _display_entry(
                 lines.append(f"{k}: {v}")
 
     ligiloj: list[str] = entry.get("ligiloj") or []
+    ligiloj_line: Text | None = None
     if ligiloj:
-        linked_parts: list[str] = []
-        if all_entries is None:
-            linked_parts = ligiloj
-        else:
-            for lid in ligiloj:
-                linked = _find_entry(lid, all_entries)
-                if linked is None:
-                    linked_parts.append(lid)
-                    continue
-                text = linked.get("teksto") or ""
-                short_uuid = str(linked.get("uuid") or "")[:8]
-                preview_path = _write_entry_preview_file(linked, all_entries)
-                linked_parts.append(
-                    f"[**{text}**](file://{preview_path}) (#{short_uuid})"
-                )
-        if lines and lines[-1] != "":
-            lines.append("")
-        _row("ligiloj:", " | ".join(linked_parts))
+        ligiloj_line = Text("ligiloj: ")
+        for index, raw_link in enumerate(ligiloj):
+            if index:
+                ligiloj_line.append(" | ", style="dim")
+            ligiloj_line.append_text(
+                _render_ligilo_cli_text(str(raw_link or ""), all_entries)
+            )
 
     if montri_cxion:
         lines.append("")
@@ -925,28 +1436,42 @@ def _display_entry(
             _row("modifita:", modifita[:19])
 
     md_obj = Markdown("\n".join(lines))
-    panel = Panel(Group(header, Text(""), md_obj), border_style="dim", expand=False)
+    body_parts = [header, Text(""), md_obj]
+    if ligiloj_line is not None:
+        body_parts.extend([Text(""), ligiloj_line])
+    panel = Panel(Group(*body_parts), border_style="dim", expand=False)
     console.print(panel)
 
 
-def _display_results(entries: list[dict]) -> None:
+def _display_results(
+    entries: list[dict],
+    *,
+    all_entries: list[dict] | None = None,
+    numerate: bool = False,
+) -> None:
     """Render a list of entries as a Rich table."""
     if not entries:
         typer.echo("Neniu rezulto trovita. (No results found.)")
         return
+    link_context = all_entries or entries
+    show_ligiloj = any(bool(e.get("ligiloj")) for e in entries)
     table = Table(
         show_header=True,
         header_style="dim",
         border_style="dim",
         expand=False,
     )
+    if numerate:
+        table.add_column("#", style="dim", width=3, no_wrap=True)
     table.add_column("UUID", style="dim", width=10, no_wrap=True)
     table.add_column("Teksto", min_width=20)
     table.add_column("Lingvo", width=8)
     table.add_column("Tipo", width=18)
     table.add_column("Niv.", width=5)
     table.add_column("Dato", width=12)
-    for e in entries:
+    if show_ligiloj:
+        table.add_column("Ligiloj", overflow="fold")
+    for idx, e in enumerate(entries, 1):
         uid_short = e["uuid"][:8]
         kategorio = e.get("kategorio") or ""
         tipos = e.get("tipo") or []
@@ -959,19 +1484,91 @@ def _display_results(entries: list[dict]) -> None:
         tipo_full = kategorio + ("/" + tipo_str_list if tipo_str_list else "")
         date_str = (e.get("kreita_je") or "")[:10]
         nivelo = e.get("nivelo")
-        table.add_row(
-            uid_short,
-            e["teksto"],
-            e.get("lingvo") or "",
-            tipo_full,
-            f"{nivelo:.1f}" if nivelo is not None else "",
-            date_str,
+        row_cells: list[str | Text] = []
+        if numerate:
+            row_cells.append(str(idx))
+        row_cells.extend(
+            [
+                uid_short,
+                e["teksto"],
+                e.get("lingvo") or "",
+                tipo_full,
+                f"{nivelo:.1f}" if nivelo is not None else "",
+                date_str,
+            ]
         )
+        if show_ligiloj:
+            rendered_links = Text("-")
+            ligiloj = e.get("ligiloj") or []
+            if ligiloj:
+                rendered_links = Text()
+                for link_index, raw_link in enumerate(ligiloj):
+                    if link_index:
+                        rendered_links.append(" | ", style="dim")
+                    rendered_links.append_text(
+                        _render_ligilo_cli_text(
+                            str(raw_link or ""),
+                            link_context,
+                            show_ref=False,
+                        )
+                    )
+            row_cells.append(rendered_links)
+        table.add_row(*row_cells)
     console.print(table)
 
 
+def _truncate_text_for_display(text: str, *, limit: int = 30) -> str:
+    value = str(text or "").strip()
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 3)] + "..."
+
+
+def _ligilo_human_label(raw_ref: str, all_entries: list[dict] | None) -> str:
+    raw_token = str(raw_ref or "").strip()
+    token = _normalize_inline_ref_token(raw_token)
+    local_ref = token[1:] if token.startswith("#") else token
+    if all_entries:
+        linked = _find_entry(local_ref, all_entries)
+        if linked is not None:
+            label = str(linked.get("teksto") or "").strip() or f"#{local_ref[:8]}"
+            return _truncate_text_for_display(label, limit=30)
+    if token.lower().startswith("ec#"):
+        encik_ref = token[3:]
+        target = _find_encik_entry(encik_ref)
+        if target is not None:
+            title = str(target.get("titolo") or "").strip() or f"ec#{encik_ref[:8]}"
+            return _truncate_text_for_display(title, limit=30)
+        return f"ec#{encik_ref[:8]}"
+    plain_ref = local_ref.lstrip("#")
+    if re.fullmatch(r"[0-9a-fA-F-]{8,36}", plain_ref):
+        return f"#{plain_ref[:8]}"
+    return _truncate_text_for_display(raw_token or token, limit=30)
+
+
+def _format_ligiloj_for_confirmation(
+    value: object, all_entries: list[dict] | None
+) -> str:
+    if not value:
+        return "[]"
+    if isinstance(value, list):
+        items = value
+    else:
+        items = [value]
+    labels = [
+        f"[{_ligilo_human_label(str(item), all_entries)}]"
+        for item in items
+        if str(item).strip()
+    ]
+    return ", ".join(labels) if labels else "[]"
+
+
 def _show_diff_confirmation(
-    action_label: str, entry: dict, old_entry: dict | None = None
+    action_label: str,
+    entry: dict,
+    old_entry: dict | None = None,
+    *,
+    all_entries: list[dict] | None = None,
 ) -> bool:
     """Print a summary of the proposed change and ask for confirmation."""
     _FIELDS = (
@@ -991,6 +1588,12 @@ def _show_diff_confirmation(
     )
     title = entry.get("teksto") or action_label
     uuid_short = (entry.get("uuid") or "")[:8]
+
+    def _fmt(field: str, value: object) -> str:
+        if field == "ligiloj":
+            return _format_ligiloj_for_confirmation(value, all_entries)
+        return repr(value)
+
     typer.echo("")
     typer.echo(f"── **{title}** #{uuid_short} ──────────────────────────")
     if old_entry:
@@ -998,12 +1601,12 @@ def _show_diff_confirmation(
             old_v = old_entry.get(f)
             new_v = entry.get(f)
             if old_v != new_v:
-                typer.echo(f"  {f}: {old_v!r}  →  {new_v!r}")
+                typer.echo(f"  {f}: {_fmt(f, old_v)}  →  {_fmt(f, new_v)}")
     else:
         for f in _FIELDS:
             v = entry.get(f)
             if v:
-                typer.echo(f"  {f}: {v!r}")
+                typer.echo(f"  {f}: {_fmt(f, v)}")
     typer.echo("──────────────────────────────────────────────────────────")
     return _confirm_esperante("Daŭrigi?", default_yes=True)
 
@@ -1084,7 +1687,10 @@ def aldoni(
         None,
         "-L",
         "--ligilo",
-        help="Linked entry UUID(s). Repeat flag for multiple. Example: -L #952f2079",
+        help=(
+            "Linked ref(s). Repeat flag for multiple. "
+            "Examples: -L #952f2079 (vorto), -L ec#4feb123f (encik)"
+        ),
     ),
     autoro: str | None = typer.Option(
         None, "-A", "--autoro", help='Author of the text. Example: --autoro "Voltaire"'
@@ -1169,6 +1775,7 @@ def aldoni(
             existing_entry.get("difinoj") or [],
             existing_entry.get("uzoj") or [],
             entries,
+            extra_payload=existing_entry,
         )
         if autoro is not None:
             existing_entry["autoro"] = _normalize_multiline_text(autoro)
@@ -1176,7 +1783,10 @@ def aldoni(
             existing_entry["verko"] = _normalize_multiline_text(verko)
         existing_entry["modifita_je"] = _now_iso()
         if not _show_diff_confirmation(
-            "modifi (anstataŭigi)", existing_entry, old_entry
+            "modifi (anstataŭigi)",
+            existing_entry,
+            old_entry,
+            all_entries=entries,
         ):
             typer.echo("Nuligita. (Cancelled.)")
             return
@@ -1224,9 +1834,10 @@ def aldoni(
         entry.get("difinoj") or [],
         entry.get("uzoj") or [],
         entries,
+        extra_payload=entry,
     )
 
-    if not _show_diff_confirmation("aldoni", entry):
+    if not _show_diff_confirmation("aldoni", entry, all_entries=entries):
         typer.echo("Nuligita. (Cancelled.)")
         return
 
@@ -1259,6 +1870,12 @@ def vidi(
     montri_cxion: bool = typer.Option(
         False, "-a", "--cxio", help="Montri ĉiujn detalojn (inkluzive datojn)."
     ),
+    html: bool = typer.Option(
+        False,
+        "-H",
+        "--html",
+        help="Malfermi la eniron kiel formatitan HTML-paĝon en retumilo.",
+    ),
     kopii_uuid: bool = typer.Option(
         False,
         "-k",
@@ -1277,11 +1894,17 @@ def vidi(
     if kopii_uuid and semantika_kopii:
         typer.echo("Uzu nur unu el --kopii aŭ --semantika-kopii.", err=True)
         raise typer.Exit(code=1)
+    if (kopii_uuid or semantika_kopii) and html:
+        typer.echo("--kopii/--semantika-kopii ne kongruas kun --html.", err=True)
+        raise typer.Exit(code=1)
     if uid is None and (kopii_uuid or semantika_kopii):
         typer.echo(
             "--kopii/--semantika-kopii postulas UUID aŭ tekstan referencon.",
             err=True,
         )
+        raise typer.Exit(code=1)
+    if uid is None and html:
+        typer.echo("--html postulas UUID aŭ tekstan referencon.", err=True)
         raise typer.Exit(code=1)
     entries = _load_entries()
     if uid is None:
@@ -1291,7 +1914,7 @@ def vidi(
         else:
             results = list(reversed(entries))[:50]
         typer.echo(f"{len(results)} rezulto(j).")
-        _display_results(results)
+        _display_results(results, all_entries=entries)
         return
     lookup_uid = uid[1:] if uid.startswith("#") else uid
     entry = _find_entry(lookup_uid, entries)
@@ -1306,6 +1929,12 @@ def vidi(
                 f"Ekzakta kongruo ne trovita. Montras plej proksiman: "
                 f"\"{closest[0]['teksto']}\""
             )
+            if html:
+                out_path = _open_entry_preview_file(
+                    closest[0], entries, montri_cxion=montri_cxion
+                )
+                typer.echo(f"Malfermas en retumilo: {out_path}")
+                return
             if kopii_uuid or semantika_kopii:
                 _copy_entry_reference(closest[0], semantika=semantika_kopii)
             _display_entry(closest[0], entries, montri_cxion=montri_cxion)
@@ -1332,9 +1961,19 @@ def vidi(
         except ValueError:
             typer.echo("Nevalida elekto.", err=True)
             raise typer.Exit(code=1) from None
+        if html:
+            out_path = _open_entry_preview_file(
+                closest[idx], entries, montri_cxion=montri_cxion
+            )
+            typer.echo(f"Malfermas en retumilo: {out_path}")
+            return
         if kopii_uuid or semantika_kopii:
             _copy_entry_reference(closest[idx], semantika=semantika_kopii)
         _display_entry(closest[idx], entries, montri_cxion=montri_cxion)
+        return
+    if html:
+        out_path = _open_entry_preview_file(entry, entries, montri_cxion=montri_cxion)
+        typer.echo(f"Malfermas en retumilo: {out_path}")
         return
     if kopii_uuid or semantika_kopii:
         _copy_entry_reference(entry, semantika=semantika_kopii)
@@ -1400,7 +2039,10 @@ def modifi(
         None,
         "-L",
         "--ligilo",
-        help="New linked UUIDs (replaces existing). Example: -L #952f2079",
+        help=(
+            "New linked ref(s), replaces existing. "
+            "Examples: -L #952f2079 (vorto), -L ec#4feb123f (encik)"
+        ),
     ),
     autoro: str | None = typer.Option(
         None, "-A", "--autoro", help='New author. Example: --autoro "Voltaire"'
@@ -1487,9 +2129,10 @@ def modifi(
         entry.get("difinoj") or [],
         entry.get("uzoj") or [],
         entries,
+        extra_payload=entry,
     )
 
-    if not _show_diff_confirmation("modifi", entry, old_entry):
+    if not _show_diff_confirmation("modifi", entry, old_entry, all_entries=entries):
         typer.echo("Nuligita. (Cancelled.)")
         return
 
@@ -1663,8 +2306,36 @@ def serci(
         "--uuid",
         help="Eligi nur UUID-liston kiel JSON (8-signaj prefiksoj).",
     ),
+    kopii_uuid: bool = typer.Option(
+        False,
+        "-k",
+        "--kopii",
+        help=(
+            "Kopii #xxxxxxxx de la trovita eniro al tondujo "
+            "(ĉe pluraj rezultoj: la interage elektita)."
+        ),
+    ),
+    semantika_kopii: bool = typer.Option(
+        False,
+        "-sk",
+        "--semantika-kopii",
+        help=(
+            "Kopii [teksto](#xxxxxxxx) de la trovita eniro al tondujo "
+            "(ĉe pluraj rezultoj: la interage elektita)."
+        ),
+    ),
 ) -> None:
     """Serĉi en la vortaro."""
+    if kopii_uuid and semantika_kopii:
+        typer.echo("Uzu nur unu el --kopii aŭ --semantika-kopii.", err=True)
+        raise typer.Exit(code=1)
+    if (kopii_uuid or semantika_kopii) and teksto is None:
+        typer.echo("--kopii/--semantika-kopii postulas serĉan demandon.", err=True)
+        raise typer.Exit(code=1)
+    if (kopii_uuid or semantika_kopii) and ligilo_ref is not None:
+        typer.echo("--kopii/--semantika-kopii ne kongruas kun --ligilo.", err=True)
+        raise typer.Exit(code=1)
+
     entries = _load_entries()
     results = list(entries)
     fuzzy_used = False
@@ -1690,7 +2361,7 @@ def serci(
             f"{len(results)} ligita(j) rezulto(j) trovita(j) "
             f"por #{str(root.get('uuid') or '')[:8]} (limo={depth})."
         )
-        _display_results(results)
+        _display_results(results, all_entries=entries)
         return
 
     # Text filter
@@ -1771,10 +2442,32 @@ def serci(
     if fuzzy_used:
         typer.echo("Neniu preciza rezulto; montrante similajn kongruojn.")
     if len(results) == 1:
+        if kopii_uuid or semantika_kopii:
+            _copy_entry_reference(results[0], semantika=semantika_kopii)
         _display_entry(results[0], entries, montri_cxion=False)
         return
     typer.echo(f"{len(results)} rezulto(j) trovita(j).")
-    _display_results(results)
+    _display_results(
+        results,
+        all_entries=entries,
+        numerate=bool(kopii_uuid or semantika_kopii),
+    )
+    if not (kopii_uuid or semantika_kopii):
+        return
+    raw = typer.prompt("Elektu numeron por kopii (aŭ Enter por nuligi)", default="")
+    if not raw.strip():
+        typer.echo("Nuligita.")
+        return
+    try:
+        idx = int(raw.strip()) - 1
+    except ValueError:
+        typer.echo("Nevalida elekto.", err=True)
+        raise typer.Exit(code=1) from None
+    if idx < 0 or idx >= len(results):
+        typer.echo("Nevalida elekto.", err=True)
+        raise typer.Exit(code=1)
+    _copy_entry_reference(results[idx], semantika=semantika_kopii)
+    _display_entry(results[idx], entries, montri_cxion=False)
 
 
 @app.command("forigi")
@@ -1825,7 +2518,7 @@ def forigi(
             typer.echo(f"  {line}")
 
     typer.echo("Forigontaj eniroj:")
-    _display_results(to_delete)
+    _display_results(to_delete, all_entries=entries)
     confirm = typer.prompt("Ĉu daŭrigi? (j/N)", default="n")
     if confirm.strip().lower() not in ("j", "jes", "y", "yes"):
         typer.echo("Nuligita.")
@@ -2021,8 +2714,13 @@ def _entry_to_lines(entry: dict) -> list[str]:
 
     _row("lingvo:", entry.get("lingvo") or "")
     kategorio = entry.get("kategorio") or ""
-    tipo = entry.get("tipo") or ""
-    tipo_str = kategorio + ("/" + tipo if tipo else "")
+    tipos = entry.get("tipo") or []
+    tipo_value = (
+        ", ".join(str(t) for t in tipos if str(t))
+        if isinstance(tipos, list)
+        else str(tipos) if tipos else ""
+    )
+    tipo_str = kategorio + ("/" + tipo_value if tipo_value else "")
     _row("tipo:", tipo_str)
     _row("temo:", entry.get("temo") or "")
     _row("tono:", entry.get("tono") or "")
@@ -2053,7 +2751,12 @@ def _entry_to_lines(entry: dict) -> list[str]:
 
     ligiloj: list[str] = entry.get("ligiloj") or []
     if ligiloj:
-        _row("ligiloj:", ", ".join(ligiloj))
+        rendered_links: list[str] = []
+        for item in ligiloj:
+            raw_ref = str(item or "")
+            external = _render_encik_ligilo_summary(raw_ref)
+            rendered_links.append(external if external is not None else raw_ref)
+        _row("ligiloj:", ", ".join(rendered_links))
 
     lines.append("")
     _row("kreita:", (entry.get("kreita_je") or "")[:19])
@@ -2085,8 +2788,13 @@ def _entries_to_lines(entries: list[dict]) -> list[str]:
     for e in entries:
         uid_short = e["uuid"][:col_uuid]
         kategorio = e.get("kategorio") or ""
-        tipo = e.get("tipo") or ""
-        tipo_str = (kategorio + ("/" + tipo if tipo else ""))[:col_tipo]
+        tipos = e.get("tipo") or []
+        tipo_value = (
+            ", ".join(str(t) for t in tipos if str(t))
+            if isinstance(tipos, list)
+            else str(tipos) if tipos else ""
+        )
+        tipo_str = (kategorio + ("/" + tipo_value if tipo_value else ""))[:col_tipo]
         date_str = (e.get("kreita_je") or "")[:10]
         nivelo = e.get("nivelo")
         niv_str = f"{nivelo:.1f}" if nivelo is not None else ""
@@ -2156,6 +2864,13 @@ def _tui_save_new(entry: dict) -> None:
         entry.get("difinoj") or [], entry.get("uzoj") or []
     )
     all_entries = _load_entries()
+    entry["ligiloj"] = _merge_links_with_inline_refs(
+        entry.get("ligiloj") or [],
+        entry.get("difinoj") or [],
+        entry.get("uzoj") or [],
+        all_entries,
+        extra_payload=entry,
+    )
     all_entries.append(entry)
     _sync_bidirectional_links(
         all_entries,
@@ -2172,6 +2887,13 @@ def _tui_save_modified(entry: dict, old_entry: dict) -> None:
         entry.get("difinoj") or [], entry.get("uzoj") or []
     )
     all_entries = _load_entries()
+    entry["ligiloj"] = _merge_links_with_inline_refs(
+        entry.get("ligiloj") or [],
+        entry.get("difinoj") or [],
+        entry.get("uzoj") or [],
+        all_entries,
+        extra_payload=entry,
+    )
     idx = next(
         (i for i, e in enumerate(all_entries) if e["uuid"] == entry["uuid"]), None
     )
@@ -2211,8 +2933,13 @@ def _rubujo_entries_to_lines(entries: list[dict]) -> list[str]:
     for e in entries:
         uid_short = e["uuid"][:col_uuid]
         kategorio = e.get("kategorio") or ""
-        tipo = e.get("tipo") or ""
-        tipo_str = (kategorio + ("/" + tipo if tipo else ""))[:col_tipo]
+        tipos = e.get("tipo") or []
+        tipo_value = (
+            ", ".join(str(t) for t in tipos if str(t))
+            if isinstance(tipos, list)
+            else str(tipos) if tipos else ""
+        )
+        tipo_str = (kategorio + ("/" + tipo_value if tipo_value else ""))[:col_tipo]
         forigita = (e.get("forigita_je") or "")[:13]
         teksto = e["teksto"][:col_teksto]
         lines.append(

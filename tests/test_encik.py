@@ -124,6 +124,28 @@ def _load_db_fixture(entries: list[dict], tmp_db: Path):
     conn.close()
 
 
+def _load_vorto_db_fixture(entries: list[dict], tmp_db: Path) -> None:
+    """Write minimal vorto entries directly to a temp SQLite DB."""
+    import sqlite3
+
+    tmp_db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(tmp_db)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS vorto (
+            uuid TEXT PRIMARY KEY,
+            teksto TEXT NOT NULL
+        )"""
+    )
+    for e in entries:
+        conn.execute(
+            "INSERT OR REPLACE INTO vorto (uuid, teksto) VALUES (?, ?)",
+            (str(e.get("uuid") or ""), str(e.get("teksto") or "")),
+        )
+    conn.commit()
+    conn.close()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Unit tests — pure helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -613,6 +635,34 @@ class TestParseEncFile:
         assert source_entry is not None
         assert target_entry["uuid"] in (source_entry.get("ligilo") or [])
 
+    def test_aldoni_auto_adds_vt_ligilo_from_semantika_markdown(
+        self, tmp_path, monkeypatch
+    ):
+        import autish.commands.encik as enc_mod
+
+        db_path = tmp_path / "encik.db"
+        vorto_db = tmp_path / "vorto.db"
+        monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
+        monkeypatch.setattr(enc_mod, "_DATA_DIR", tmp_path)
+        monkeypatch.setattr(enc_mod, "_VORTO_DB_FILE", vorto_db)
+        vorto_uuid = "8bf534dc-1111-2222-3333-444444444444"
+        _load_vorto_db_fixture([{"uuid": vorto_uuid, "teksto": "mot"}], vorto_db)
+
+        source = tmp_path / "sem_vt.enc"
+        source.write_text(
+            'terminologio.eo = "Semantika VT"\n'
+            'difino.eo = "Difino"\n'
+            'semantika = """\n'
+            "str wdt:P5191 [mot](vt#8bf534dc)\n"
+            '"""\n',
+            encoding="utf-8",
+        )
+        add_source = runner.invoke(app, ["encik", "aldoni", str(source)])
+        assert add_source.exit_code == 0, add_source.output
+        source_entry = enc_mod._find_by_title_exact("Semantika VT")
+        assert source_entry is not None
+        assert f"vt#{vorto_uuid}" in (source_entry.get("ligilo") or [])
+
 
 class TestUuidRefExtraction:
     def test_extract_markdown_ligilo_refs_resolves_existing_full_uuid(
@@ -647,6 +697,54 @@ class TestUuidRefExtraction:
         refs = _extract_markdown_ligilo_refs(f"[A](#{SAMPLE_UUID[:8]},rdfs:subClassOf)")
         assert refs[0]["uuid"] == SAMPLE_UUID
         assert refs[0]["tipo"] == "rdfs:subClassOf"
+
+    def test_extract_markdown_ligilo_refs_resolves_vt_reference(
+        self, tmp_path, monkeypatch
+    ):
+        import autish.commands.encik as enc_mod
+
+        db_path = tmp_path / "encik.db"
+        vorto_db = tmp_path / "vorto.db"
+        monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
+        monkeypatch.setattr(enc_mod, "_DATA_DIR", tmp_path)
+        monkeypatch.setattr(enc_mod, "_VORTO_DB_FILE", vorto_db)
+        _load_db_fixture([_make_entry(uuid=SAMPLE_UUID, titolo="A")], db_path)
+        vorto_uuid = "8bf534dc-1111-2222-3333-444444444444"
+        _load_vorto_db_fixture([{"uuid": vorto_uuid, "teksto": "mot"}], vorto_db)
+
+        refs = _extract_markdown_ligilo_refs("[mot](vt#8bf534dc)")
+        assert refs == [{"uuid": f"vt#{vorto_uuid}", "tipo": None}]
+
+    def test_merge_auto_ligilo_refs_scans_semantika_and_nested_text(
+        self, tmp_path, monkeypatch
+    ):
+        import autish.commands.encik as enc_mod
+
+        db_path = tmp_path / "encik.db"
+        vorto_db = tmp_path / "vorto.db"
+        monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
+        monkeypatch.setattr(enc_mod, "_DATA_DIR", tmp_path)
+        monkeypatch.setattr(enc_mod, "_VORTO_DB_FILE", vorto_db)
+        _load_db_fixture([_make_entry(uuid=SAMPLE_UUID, titolo="A")], db_path)
+        vorto_uuid = "8bf534dc-1111-2222-3333-444444444444"
+        _load_vorto_db_fixture([{"uuid": vorto_uuid, "teksto": "mot"}], vorto_db)
+
+        parsed = {
+            "ligilo": [],
+            "terminologio": {"eo": "Nodo [A](#aaaaaaaa)"},
+            "difinoj": {"eo": "Difino"},
+            "difinio": "",
+            "enhavo": "",
+            "fonto": [{"noto": "Noto [mot](vt#8bf534dc)"}],
+            "citajo": [{"teksto": "Citaĵo [mot](vt#8bf534dc)"}],
+            "datumo": {},
+            "semantika": [
+                {"tipo": "str", "arko": "wdt:P5191", "valoro": "[mot](vt#8bf534dc)"}
+            ],
+        }
+        merged = _merge_auto_ligilo_refs(parsed)
+        assert SAMPLE_UUID in merged["ligilo"]
+        assert f"vt#{vorto_uuid}" in merged["ligilo"]
 
     def test_linked_graph_collects_super_sub_and_ligilo(self, tmp_path, monkeypatch):
         import autish.commands.encik as enc_mod
@@ -702,6 +800,12 @@ class TestUuidRefExtraction:
             and dst == SAMPLE_UUID
             and rel == "ligilo"
             and sem == "rdf:type"
+            for src, dst, rel, sem in edges
+        )
+        assert not any(
+            rel == "ligilo"
+            and sem is None
+            and {src, dst} == {CHILD_UUID, SAMPLE_UUID}
             for src, dst, rel, sem in edges
         )
 
@@ -1187,6 +1291,61 @@ class TestEncikCLI:
         assert copied["value"].startswith("[CopyMod2](#")
         assert copied["value"].endswith(")")
 
+    def test_modifi_removes_semantic_subclass_link_without_reappearing(self, tmp_path):
+        parent = self._make_enc_file(tmp_path, "Historiisto", "Difino de historiisto")
+        add_parent = runner.invoke(app, ["encik", "aldoni", str(parent)])
+        assert add_parent.exit_code == 0, add_parent.output
+
+        import autish.commands.encik as enc_mod
+
+        parent_entry = enc_mod._find_by_title_exact("Historiisto")
+        assert parent_entry is not None
+        parent_short = str(parent_entry["uuid"])[:8]
+
+        child = tmp_path / "esploristo.enc"
+        child.write_text(
+            'terminologio.eo = "Esploristo"\n'
+            'difinio.eo = "Difino de esploristo"\n'
+            f'ligilo = [["#{parent_short}", "rdfs:subClassOf"]]\n',
+            encoding="utf-8",
+        )
+        add_child = runner.invoke(app, ["encik", "aldoni", str(child)])
+        assert add_child.exit_code == 0, add_child.output
+
+        child_update = tmp_path / "esploristo_mod.enc"
+        child_update.write_text(
+            'terminologio.eo = "Esploristo"\n'
+            'difinio.eo = "Ĝisdatigita difino"\n',
+            encoding="utf-8",
+        )
+        mod = runner.invoke(
+            app,
+            ["encik", "modifi", "Esploristo", str(child_update)],
+        )
+        assert mod.exit_code == 0, mod.output
+
+        updated_child = enc_mod._find_by_title_exact("Esploristo")
+        updated_parent = enc_mod._find_by_title_exact("Historiisto")
+        assert updated_child is not None
+        assert updated_parent is not None
+
+        child_links = {
+            (
+                str(item.get("uuid") or ""),
+                enc_mod._normalize_semantika_ligilo(item.get("tipo")),
+            )
+            for item in enc_mod._display_ligilo_items(updated_child)
+        }
+        parent_links = {
+            (
+                str(item.get("uuid") or ""),
+                enc_mod._normalize_semantika_ligilo(item.get("tipo")),
+            )
+            for item in enc_mod._display_ligilo_items(updated_parent)
+        }
+        assert (str(updated_parent["uuid"]), "rdfs:subClassOf") not in child_links
+        assert (str(updated_child["uuid"]), "rdfs:hasSubClass") not in parent_links
+
     def test_vidi_kopii_copies_uuid_of_displayed_node(self, tmp_path, monkeypatch):
         enc = self._make_enc_file(tmp_path, "CopyView", "Difino")
         add = runner.invoke(app, ["encik", "aldoni", str(enc)])
@@ -1461,6 +1620,24 @@ class TestEncikCLI:
         assert "Nodo Vera" in result.output
         assert "Nodo Malvera" not in result.output
 
+    def test_encik_vidi_formats_semantika_as_priskribo_plus_valoro(self, tmp_path):
+        _load_db_fixture(
+            [
+                _make_entry(
+                    uuid="45000000-0000-0000-0000-000000000005",
+                    titolo="Nodo Demografio",
+                    terminologio={"eo": "Nodo Demografio"},
+                    semantika=[{"tipo": "int", "arko": "wdt:P1082", "valoro": 890}],
+                )
+            ],
+            tmp_path / "encik.db",
+        )
+        result = runner.invoke(app, ["encik", "vidi", "Nodo Demografio"])
+        assert result.exit_code == 0, result.output
+        assert "loĝantaro / populacio" in result.output
+        assert "890" in result.output
+        assert "wdt:P1082 890" not in result.output
+
     def test_semantika_serci_invalid_range_errors(self):
         result = runner.invoke(app, ["encik", "semantika-serci", "wdt:P1082 (1000,0)"])
         assert result.exit_code != 0
@@ -1509,6 +1686,80 @@ class TestEncikCLI:
         show_group = runner.invoke(app, ["encik", "semantika", "demografio"])
         assert show_group.exit_code == 0, show_group.output
         assert "wdt:P1082" in show_group.output
+
+    def test_semantika_aldoni_duplicate_no_overwrite(self, monkeypatch):
+        monkeypatch.setattr(
+            "autish.commands.encik._wikidata_property_metadata",
+            lambda _prop_id, _langs: {
+                "etikedo": "population",
+                "priskribo": "Loĝantaro",
+                "aliasoj": ["population", "p1082"],
+            },
+        )
+        add = runner.invoke(
+            app,
+            ["encik", "semantika", "aldoni", "P1082", "demografio"],
+            input="j\n",
+        )
+        assert add.exit_code == 0, add.output
+        deny = runner.invoke(
+            app,
+            [
+                "encik",
+                "semantika",
+                "aldoni",
+                "P1082",
+                "demografio",
+                "--priskribo",
+                "Nova priskribo",
+            ],
+            input="n\n",
+        )
+        assert deny.exit_code == 0, deny.output
+        merged = deny.output.lower() + (deny.stderr or "").lower()
+        assert "jam ekzistas" in merged
+        assert "nuligita" in merged
+        show_group = runner.invoke(app, ["encik", "semantika", "demografio"])
+        assert show_group.exit_code == 0, show_group.output
+        assert "Loĝantaro" in show_group.output
+        assert "Nova priskribo" not in show_group.output
+
+    def test_semantika_aldoni_duplicate_overwrite(self, monkeypatch):
+        monkeypatch.setattr(
+            "autish.commands.encik._wikidata_property_metadata",
+            lambda _prop_id, _langs: {
+                "etikedo": "population",
+                "priskribo": "Loĝantaro",
+                "aliasoj": ["population", "p1082"],
+            },
+        )
+        add = runner.invoke(
+            app,
+            ["encik", "semantika", "aldoni", "P1082", "demografio"],
+            input="j\n",
+        )
+        assert add.exit_code == 0, add.output
+        overwrite = runner.invoke(
+            app,
+            [
+                "encik",
+                "semantika",
+                "aldoni",
+                "P1082",
+                "demografio",
+                "--priskribo",
+                "Nova priskribo",
+                "--aliazoj",
+                "p1082,populacio",
+            ],
+            input="j\n",
+        )
+        assert overwrite.exit_code == 0, overwrite.output
+        assert "Anstataŭigis wdt:P1082" in overwrite.output
+        show_group = runner.invoke(app, ["encik", "semantika", "demografio"])
+        assert show_group.exit_code == 0, show_group.output
+        assert "Nova priskribo" in show_group.output
+        assert show_group.output.count("wdt:P1082") == 1
 
     def test_semantika_aldoni_offline_requires_priskribo(self, monkeypatch):
         def _offline(*_args, **_kwargs):
@@ -1572,6 +1823,124 @@ class TestEncikCLI:
         assert result.exit_code == 0, result.output
         assert "wikidata" in result.output.lower()
         assert "wdt:P1082" in result.output
+
+    def test_semantika_serci_languages_uses_profile_order_then_eo_en(
+        self, monkeypatch
+    ):
+        import autish.commands.encik as enc_mod
+
+        monkeypatch.setattr(
+            enc_mod,
+            "_load_user_language_preferences",
+            lambda: (["fr", "de"], False),
+        )
+        assert enc_mod._semantika_serci_languages(None) == ["fr", "de", "eo", "en"]
+
+    def test_load_user_language_preferences_accepts_lingvo_csv(self, monkeypatch):
+        import autish.commands.encik as enc_mod
+        import autish.commands.uzanto as uz_mod
+
+        monkeypatch.setattr(
+            uz_mod,
+            "_load_profile",
+            lambda quiet=True: {"lingvo": "fr,de"},
+        )
+        langs, show_hint = enc_mod._load_user_language_preferences()
+        assert langs == ["fr", "de"]
+        assert show_hint is False
+
+    def test_wikidata_property_metadata_falls_back_to_eo_then_en(self, monkeypatch):
+        import autish.commands.encik as enc_mod
+
+        captured: dict[str, str] = {}
+
+        def _fake_api_get(params: dict[str, str], *, timeout: float = 5.0) -> dict:
+            captured["languages"] = params.get("languages", "")
+            return {
+                "entities": {
+                    "P1082": {
+                        "labels": {
+                            "fr": {"language": "fr", "value": "Population"},
+                            "eo": {"language": "eo", "value": "Loĝantaro"},
+                            "en": {"language": "en", "value": "Population"},
+                        },
+                        "descriptions": {
+                            "eo": {"language": "eo", "value": "Esperanta priskribo"},
+                            "en": {"language": "en", "value": "English description"},
+                        },
+                        "aliases": {
+                            "eo": [
+                                {"language": "eo", "value": "populacio"},
+                            ],
+                            "en": [
+                                {"language": "en", "value": "population"},
+                            ],
+                        },
+                    }
+                }
+            }
+
+        monkeypatch.setattr(enc_mod, "_wikidata_api_get", _fake_api_get)
+        meta = enc_mod._wikidata_property_metadata("P1082", ["fr", "de"])
+        assert captured["languages"] == "fr|de|eo|en"
+        assert meta["priskribo"] == "Esperanta priskribo"
+        assert meta["aliasoj"][:2] == ["populacio", "population"]
+
+    def test_wikidata_search_properties_prefers_localized_metadata(
+        self, monkeypatch
+    ):
+        import autish.commands.encik as enc_mod
+
+        calls: list[str] = []
+
+        def _fake_api_get(params: dict[str, str], *, timeout: float = 5.0) -> dict:
+            calls.append(str(params.get("action") or ""))
+            if params.get("action") == "wbsearchentities":
+                return {
+                    "search": [
+                        {
+                            "id": "P1082",
+                            "label": "Population",
+                            "description": "English default",
+                            "match": {"text": "population"},
+                        }
+                    ]
+                }
+            if params.get("action") == "wbgetentities":
+                assert params.get("languages") == "fr|de|eo|en"
+                return {
+                    "entities": {
+                        "P1082": {
+                            "labels": {
+                                "fr": {"language": "fr", "value": "Population (FR)"},
+                                "eo": {"language": "eo", "value": "Loĝantaro"},
+                            },
+                            "descriptions": {
+                                "eo": {
+                                    "language": "eo",
+                                    "value": "Esperanta priskribo",
+                                },
+                                "en": {
+                                    "language": "en",
+                                    "value": "English description",
+                                },
+                            },
+                            "aliases": {
+                                "eo": [{"language": "eo", "value": "populacio"}],
+                                "en": [{"language": "en", "value": "population"}],
+                            },
+                        }
+                    }
+                }
+            raise AssertionError(f"Neatendita Wikidata ago: {params}")
+
+        monkeypatch.setattr(enc_mod, "_wikidata_api_get", _fake_api_get)
+        rows = enc_mod._wikidata_search_properties("population", ["fr", "de"])
+        assert "wbgetentities" in calls
+        assert len(rows) == 1
+        assert rows[0]["etikedo"] == "Population (FR)"
+        assert rows[0]["priskribo"] == "Esperanta priskribo"
+        assert rows[0]["aliasoj"][0] == "populacio"
 
     def test_semantika_serci_offline_falls_back_to_local(self, monkeypatch):
         monkeypatch.setattr(

@@ -1,11 +1,9 @@
 ┏━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━┓
 ┃ UUID     ┃ Aŭtoro      ┃ Titolo                                                                                     ┃ Dato ┃
 ┡━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━┩
-│ 2bb130de │ CrashCourse │ What is Philosophy?: Crash Course Philosophy #1                                            │ -    │
 │ 2febd296 │ CrashCourse │ Aristotle & Virtue Theory: Crash Course Philosophy #38                                     │ -    │
 │ 1f8ff608 │ CrashCourse │ Locke, Berkeley, & Empiricism: Crash Course Philosophy #6                                  │ -    │
 │ 4b10970e │ CrashCourse │ Determinism vs Free Will: Crash Course Philosophy #24                                      │ -    │
-│ c4c93dd0 │ CrashCourse │ Utilitarianism: Crash Course Philosophy #36                                                │ -    │
 │ 9ada38af │ CrashCourse │ What Is a Good Life?: Crash Course Philosophy #46                                          │ -    │
 │ 7de34488 │ CrashCourse │ The Problem of Evil: Crash Course Philosophy #13                                           │ -    │
 │ 04e039df │ CrashCourse │ Existentialism: Crash Course Philosophy #16                                                │ -    │
@@ -19,7 +17,5 @@
 │ 7b857d7d │ CrashCourse │ Cartesian Skepticism - Neo, Meet Rene: Crash Course Philosophy #5                          │ -    │
 │ d84be1a9 │ CrashCourse │ Perspectives on Death: Crash Course Philosophy #17                                         │ -    │
 │ 7f137300 │ CrashCourse │ Anselm & the Argument for God: Crash Course Philosophy #9                                  │ -    │
-│ 889ec426 │ CrashCourse │ Anti-Vaxxers, Conspiracy Theories, & Epistemic Responsibility: Crash Course Philosophy #14 │ -    │
-│ 5132ca07 │ CrashCourse │ Where Does Your Mind Reside?: Crash Course Philosophy #22                                  │ -    │
 └──────────┴─────────────┴────────────────────────────────────────────────────────────────────────────────────────────┴──────┘
 

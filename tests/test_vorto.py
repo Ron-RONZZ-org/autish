@@ -14,6 +14,7 @@ from autish.commands.vorto import (
     _apply_french_ligatures,
     _detect_kategorio,
     _display_entry,
+    _display_results,
     _entries_to_lines,
     _entry_to_lines,
     _find_entry,
@@ -22,6 +23,8 @@ from autish.commands.vorto import (
     _normalize_tipo,
     _normalize_tono,
     _parse_etikedo,
+    _render_entry_preview_html,
+    _tui_save_modified,
 )
 from autish.main import app
 
@@ -191,6 +194,9 @@ class TestFindEntry:
     def test_uuid_prefix_match(self):
         assert _find_entry("aaaaaaaa", self.entries) is self.entry
 
+    def test_vt_prefixed_uuid_prefix_match(self):
+        assert _find_entry("vt#aaaaaaaa", self.entries) is self.entry
+
     def test_text_match_case_insensitive(self):
         assert _find_entry("HELLO", self.entries) is self.entry
 
@@ -329,6 +335,42 @@ class TestAldoni:
         entry = mock_save.call_args[0][0][0]
         assert entry["ligiloj"] == [SAMPLE_UUID2]
 
+    def test_aldoni_confirmation_shows_human_readable_ligilo_text(self):
+        linked = _make_entry(uuid=SAMPLE_UUID2, teksto="s'ingérer", ligiloj=[])
+        with (
+            patch(_LOAD, return_value=[linked]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=False),
+        ):
+            result = runner.invoke(
+                app,
+                ["vorto", "aldoni", "hello", "-L", SAMPLE_UUID2],
+            )
+        assert result.exit_code == 0, result.output
+        assert "ligiloj: [s'ingérer]" in result.output
+        assert SAMPLE_UUID2 not in result.output
+        mock_save.assert_not_called()
+
+    def test_aldoni_confirmation_truncates_long_ligilo_text(self):
+        long_text = "x" * 40
+        linked = _make_entry(uuid=SAMPLE_UUID2, teksto=long_text, ligiloj=[])
+        with (
+            patch(_LOAD, return_value=[linked]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=False),
+        ):
+            result = runner.invoke(
+                app,
+                ["vorto", "aldoni", "hello", "-L", SAMPLE_UUID2],
+            )
+        assert result.exit_code == 0, result.output
+        assert f"ligiloj: [{'x' * 27}...]" in result.output
+        mock_save.assert_not_called()
+
     def test_difino_with_braced_uzo_syntax_is_split(self):
         with (
             patch(_LOAD, return_value=[]),
@@ -371,6 +413,60 @@ class TestAldoni:
         saved_entries = mock_save.call_args[0][0]
         entry_a = next(e for e in saved_entries if e["uuid"] == SAMPLE_UUID)
         assert SAMPLE_UUID2 in entry_a["ligiloj"]
+
+    def test_inline_markdown_link_to_encik_ref_adds_canonical_ec_ligilo(self):
+        encik_uuid = "4feb123f-aaaa-bbbb-cccc-ddddeeeeffff"
+        with (
+            patch(_LOAD, return_value=[]),
+            patch(_SAVE) as mock_save,
+            patch(_LOAD_UNDO, return_value=[]),
+            patch(_SAVE_UNDO),
+            patch(_CONFIRM, return_value=True),
+            patch(
+                "autish.commands.vorto._find_encik_entry",
+                return_value={"uuid": encik_uuid, "titolo": "Encik Nodo"},
+            ),
+        ):
+            runner.invoke(
+                app,
+                [
+                    "vorto",
+                    "aldoni",
+                    "hello",
+                    "-d",
+                    "difino kun [nodo](ec#4feb123f)",
+                ],
+            )
+        entry = mock_save.call_args[0][0][0]
+        assert f"ec#{encik_uuid}" in entry["ligiloj"]
+
+    def test_inline_markdown_link_is_parsed_from_all_text_fields(self):
+        encik_uuid = "4feb123f-aaaa-bbbb-cccc-ddddeeeeffff"
+        cases = [
+            ["vorto", "aldoni", "hello [nodo](ec#4feb123f)"],
+            ["vorto", "aldoni", "hello", "-d", "difino [nodo](ec#4feb123f)"],
+            ["vorto", "aldoni", "hello", "--temo", "temo [nodo](ec#4feb123f)"],
+            ["vorto", "aldoni", "hello", "--tono", "[nodo](ec#4feb123f)"],
+            ["vorto", "aldoni", "hello", "-A", "autoro [nodo](ec#4feb123f)"],
+            ["vorto", "aldoni", "hello", "-v", "verko [nodo](ec#4feb123f)"],
+            ["vorto", "aldoni", "hello", "-e", "etikedo:[nodo](ec#4feb123f)"],
+        ]
+        for argv in cases:
+            with (
+                patch(_LOAD, return_value=[]),
+                patch(_SAVE) as mock_save,
+                patch(_LOAD_UNDO, return_value=[]),
+                patch(_SAVE_UNDO),
+                patch(_CONFIRM, return_value=True),
+                patch(
+                    "autish.commands.vorto._find_encik_entry",
+                    return_value={"uuid": encik_uuid, "titolo": "Encik Nodo"},
+                ),
+            ):
+                result = runner.invoke(app, argv)
+            assert result.exit_code == 0, result.output
+            entry = mock_save.call_args[0][0][0]
+            assert f"ec#{encik_uuid}" in entry["ligiloj"]
 
     def test_ligilo_adds_reciprocal_link(self):
         linked = _make_entry(uuid=SAMPLE_UUID2, teksto="world", ligiloj=[])
@@ -540,6 +636,35 @@ class TestVidi:
         assert result.exit_code != 0
         assert "postulas UUID" in (result.output + (result.stderr or ""))
 
+    def test_vidi_html_without_ref_fails(self):
+        with patch(_LOAD, return_value=[]):
+            result = runner.invoke(app, ["vorto", "vidi", "--html"])
+        assert result.exit_code != 0
+        assert "postulas UUID" in (result.output + (result.stderr or ""))
+
+    def test_vidi_html_conflicts_with_copy_options(self):
+        entry = _make_entry()
+        with patch(_LOAD, return_value=[entry]):
+            result = runner.invoke(
+                app, ["vorto", "vidi", SAMPLE_UUID, "--html", "--kopii"]
+            )
+        assert result.exit_code != 0
+        assert "ne kongruas kun --html" in (result.output + (result.stderr or ""))
+
+    def test_vidi_html_opens_entry_preview_in_browser(self):
+        entry = _make_entry()
+        with (
+            patch(_LOAD, return_value=[entry]),
+            patch(
+                "autish.commands.vorto._open_entry_preview_file",
+                return_value="/tmp/vorto-preview.html",
+            ) as mock_open_preview,
+        ):
+            result = runner.invoke(app, ["vorto", "vidi", SAMPLE_UUID, "--html"])
+        assert result.exit_code == 0, result.output
+        assert "Malfermas en retumilo: /tmp/vorto-preview.html" in result.output
+        mock_open_preview.assert_called_once_with(entry, [entry], montri_cxion=False)
+
     def test_display_entry_formats_linked_content_and_bold_definitions(self):
         linked = _make_entry(
             uuid=SAMPLE_UUID2,
@@ -555,8 +680,35 @@ class TestVidi:
         md = rendered.renderables[2]
         assert md.__class__.__name__ == "Markdown"
         assert "**short def**" in md.markup
-        assert "[**bonjour**](file://" in md.markup
-        assert "(#11111111)" in md.markup
+        ligiloj_lines = [
+            row
+            for row in rendered.renderables
+            if isinstance(row, Text) and row.plain.startswith("ligiloj:")
+        ]
+        assert ligiloj_lines
+        assert "ligiloj: bonjour (#11111111)" in ligiloj_lines[0].plain
+        assert "[bonjour](file://" not in ligiloj_lines[0].plain
+        assert any("link " in str(span.style) for span in ligiloj_lines[0].spans)
+        assert any(".html" in str(span.style) for span in ligiloj_lines[0].spans)
+
+    def test_vidi_renders_ligiloj_without_raw_markdown(self):
+        linked = _make_entry(uuid=SAMPLE_UUID2, teksto="bonjour")
+        entry = _make_entry(ligiloj=[SAMPLE_UUID2])
+        with patch(_LOAD, return_value=[entry, linked]):
+            result = runner.invoke(app, ["vorto", "vidi", SAMPLE_UUID])
+        assert result.exit_code == 0, result.output
+        assert "ligiloj: bonjour (#11111111)" in result.output
+        assert "[bonjour](file://" not in result.output
+
+    def test_vidi_renders_internal_difino_links_without_raw_markdown(self):
+        linked = _make_entry(uuid=SAMPLE_UUID2, teksto="bonjour")
+        entry = _make_entry(difinoj=["rilata al [bonjour](#11111111)"])
+        with patch(_LOAD, return_value=[entry, linked]):
+            result = runner.invoke(app, ["vorto", "vidi", SAMPLE_UUID])
+        assert result.exit_code == 0, result.output
+        assert "[bonjour](" not in result.output
+        assert "bonjour" in result.output
+        assert "(#11111111)" not in result.output
 
     def test_display_entry_renders_markdown_in_difino_and_uzo(self):
         entry = _make_entry(
@@ -579,6 +731,39 @@ class TestVidi:
             "qui présente une ambivalence**"
         ) in md.markup
         assert "*_ekzemplo_ de uzo*" in md.markup
+
+    def test_display_entry_markdown_link_preview_supports_tipo_lists(self):
+        linked = _make_entry(
+            uuid=SAMPLE_UUID2,
+            teksto="bonjour",
+            tipo=["adjektivo"],
+            difinoj=["difino de celo"],
+        )
+        entry = _make_entry(
+            tipo=["substantivo-neŭtra"],
+            difinoj=["rilata al [bonjour](#11111111)"],
+        )
+        with patch("autish.commands.vorto.console.print") as mock_print:
+            _display_entry(entry, [entry, linked])
+        panel = mock_print.call_args[0][0]
+        md = panel.renderable.renderables[2]
+        assert "file://" not in md.markup
+        assert ".html)" in md.markup
+        assert "(#11111111)" not in md.markup
+
+    def test_display_results_renders_ligiloj_as_clickable_text_without_uuid(self):
+        linked = _make_entry(uuid=SAMPLE_UUID2, teksto="bonjour")
+        entry = _make_entry(ligiloj=[SAMPLE_UUID2])
+        with patch("autish.commands.vorto.console.print") as mock_print:
+            _display_results([entry], all_entries=[entry, linked], numerate=True)
+        table = mock_print.call_args[0][0]
+        assert table.columns[0].header == "#"
+        assert table.columns[-1].header == "Ligiloj"
+        ligilo_cell = table.columns[-1]._cells[0]
+        assert isinstance(ligilo_cell, Text)
+        assert "bonjour" in ligilo_cell.plain
+        assert "#11111111" not in ligilo_cell.plain
+        assert any("link file://" in str(span.style) for span in ligilo_cell.spans)
 
     def test_display_entry_single_definition_is_not_numbered(self):
         entry = _make_entry(difinoj=["nur unu difino"], uzoj=["unu uzo"])
@@ -714,6 +899,34 @@ class TestModifi:
         assert SAMPLE_UUID in saved_c["ligiloj"]
 
 
+class TestTuiSaveModified:
+    def test_parses_inline_links_from_new_text_fields(self):
+        encik_uuid = "4feb123f-aaaa-bbbb-cccc-ddddeeeeffff"
+        old_entry = _make_entry(uuid=SAMPLE_UUID, ligiloj=[])
+        entry = _make_entry(
+            uuid=SAMPLE_UUID,
+            ligiloj=[],
+            autoro="Aŭtoro [nodo](ec#4feb123f)",
+            verko="Verko [bonjour](#11111111)",
+            uzoj=["uzo [bonjour](#11111111)"],
+        )
+        linked = _make_entry(uuid=SAMPLE_UUID2, teksto="bonjour", ligiloj=[])
+        with (
+            patch(_LOAD, return_value=[dict(old_entry), linked]),
+            patch(_SAVE) as mock_save,
+            patch(
+                "autish.commands.vorto._find_encik_entry",
+                return_value={"uuid": encik_uuid, "titolo": "Encik Nodo"},
+            ),
+            patch("autish.commands.vorto._push_undo"),
+        ):
+            _tui_save_modified(entry, old_entry)
+        saved_entries = mock_save.call_args[0][0]
+        saved = next(e for e in saved_entries if e["uuid"] == SAMPLE_UUID)
+        assert SAMPLE_UUID2 in saved["ligiloj"]
+        assert f"ec#{encik_uuid}" in saved["ligiloj"]
+
+
 class TestSerci:
     def setup_method(self):
         self.entries = [
@@ -749,6 +962,67 @@ class TestSerci:
         assert "hello  #aaaaaaaa" in result.output
         assert "rezulto(j) trovita(j)" not in result.output
         assert "UUID" not in result.output
+
+    def test_serci_kopii_requires_query(self):
+        with patch(_LOAD, return_value=self.entries):
+            result = runner.invoke(app, ["vorto", "serci", "--kopii"])
+        assert result.exit_code != 0
+        assert "postulas serĉan demandon" in (result.output + (result.stderr or ""))
+
+    def test_serci_rejects_both_copy_modes(self):
+        with patch(_LOAD, return_value=self.entries):
+            result = runner.invoke(
+                app,
+                ["vorto", "serci", "hello", "--kopii", "--semantika-kopii"],
+            )
+        assert result.exit_code != 0
+        assert "Uzu nur unu el --kopii aŭ --semantika-kopii." in (
+            result.output + (result.stderr or "")
+        )
+
+    def test_serci_kopii_copies_single_match(self, monkeypatch):
+        copied: dict[str, str] = {}
+
+        def _fake_copy(value: str) -> None:
+            copied["value"] = value
+
+        monkeypatch.setattr("pyperclip.copy", _fake_copy)
+        with patch(_LOAD, return_value=self.entries):
+            result = runner.invoke(app, ["vorto", "serci", "hello", "--kopii"])
+        assert result.exit_code == 0, result.output
+        assert copied["value"] == "#aaaaaaaa"
+
+    def test_serci_semantika_kopii_copies_interactively_selected_match(
+        self, monkeypatch
+    ):
+        copied: dict[str, str] = {}
+
+        def _fake_copy(value: str) -> None:
+            copied["value"] = value
+
+        monkeypatch.setattr("pyperclip.copy", _fake_copy)
+        with patch(_LOAD, return_value=self.entries):
+            result = runner.invoke(
+                app,
+                ["vorto", "serci", "o", "--semantika-kopii"],
+                input="2\n",
+            )
+        assert result.exit_code == 0, result.output
+        assert copied["value"] == "[saluton](#11111111)"
+        assert "saluton  #11111111" in result.output
+
+    def test_serci_copy_selection_view_is_numbered(self):
+        with (
+            patch(_LOAD, return_value=self.entries),
+            patch("autish.commands.vorto._display_results") as mock_display_results,
+        ):
+            result = runner.invoke(
+                app,
+                ["vorto", "serci", "o", "--semantika-kopii"],
+                input="\n",
+            )
+        assert result.exit_code == 0, result.output
+        assert mock_display_results.call_args.kwargs.get("numerate") is True
 
     def test_lingvo_filter(self):
         with patch(_LOAD, return_value=self.entries):
@@ -794,6 +1068,19 @@ class TestSerci:
         assert result.exit_code == 0
         assert "b" in result.output
         assert "c" not in result.output
+
+    def test_serci_copy_modes_reject_ligilo_search(self):
+        a = _make_entry(uuid=SAMPLE_UUID, teksto="a", ligiloj=[SAMPLE_UUID2])
+        b = _make_entry(uuid=SAMPLE_UUID2, teksto="b", ligiloj=[SAMPLE_UUID])
+        with patch(_LOAD, return_value=[a, b]):
+            result = runner.invoke(
+                app,
+                ["vorto", "serci", "a", "--ligilo", "aaaaaaaa", "--kopii"],
+            )
+        assert result.exit_code != 0
+        assert "--kopii/--semantika-kopii ne kongruas kun --ligilo." in (
+            result.output + (result.stderr or "")
+        )
 
     def test_ligilo_search_multiple_hops_with_limo(self):
         a = _make_entry(uuid=SAMPLE_UUID, teksto="a", ligiloj=[SAMPLE_UUID2])
@@ -1161,6 +1448,26 @@ class TestEntryToLines:
         assert isinstance(lines, list)
         assert all(isinstance(ln, str) for ln in lines)
 
+    def test_tipo_list_is_rendered_without_type_error(self):
+        entry = _make_entry(tipo=["adjektivo", "substantivo-neŭtra"])
+        lines = _entry_to_lines(entry)
+        joined = "\n".join(lines)
+        assert "vorto/adjektivo, substantivo-neŭtra" in joined
+
+
+class TestEntryPreviewHtml:
+    def test_default_preview_hides_timestamps(self):
+        entry = _make_entry(modifita_je="2024-01-02T00:00:00+00:00")
+        html = _render_entry_preview_html(entry, [entry], montri_cxion=False)
+        assert "kreita" not in html
+        assert "modifita" not in html
+
+    def test_full_preview_shows_timestamps(self):
+        entry = _make_entry(modifita_je="2024-01-02T00:00:00+00:00")
+        html = _render_entry_preview_html(entry, [entry], montri_cxion=True)
+        assert "kreita" in html
+        assert "modifita" in html
+
 
 class TestEntriesToLines:
     def test_empty_list_gives_no_results_message(self):
@@ -1492,6 +1799,82 @@ class TestFormEditorModeInit:
         form = FormEditor(stdscr, title="Test")
         for ed in form.editors[1:]:
             assert ed.mode == "NORMAL"
+
+    def test_collect_parses_new_uzoj_autoro_verko_fields(self):
+        from unittest.mock import MagicMock
+
+        from autish.commands._vorto_tui import FormEditor
+        stdscr = MagicMock()
+        stdscr.getmaxyx.return_value = (40, 120)
+        form = FormEditor(
+            stdscr,
+            title="Test",
+            initial={
+                "uzoj": ["uzo 1", "uzo 2"],
+                "autoro": "Voltaire",
+                "verko": "Candide:1759",
+            },
+        )
+        values = form._collect()
+        assert values["uzoj"] == ["uzo 1", "uzo 2"]
+        assert values["autoro"] == "Voltaire"
+        assert values["verko"] == "Candide:1759"
+
+
+class TestVortoTuiModifi:
+    def test_modifi_updates_uzoj_autoro_verko_fields(self):
+        from unittest.mock import MagicMock, patch
+
+        from autish.commands._vorto_tui import VortoTUI
+
+        saved: dict[str, dict] = {}
+
+        def _save_modified(entry: dict, old_entry: dict) -> None:
+            saved["entry"] = dict(entry)
+            saved["old"] = dict(old_entry)
+
+        tui = VortoTUI(
+            load_entries=lambda: [],
+            save_new_entry=lambda _entry: None,
+            save_modified_entry=_save_modified,
+            delete_entry=lambda _entry: None,
+            undo=lambda: "",
+            render_entry=lambda _entry: [],
+            render_results=lambda _entries: [],
+            detect_kategorio=lambda _text: "vorto",
+            normalize_tipo=lambda raw: [raw] if raw else None,
+            normalize_tono=lambda raw: raw,
+            parse_etikedo=lambda _items: {},
+            find_entry=lambda _uid, _entries: None,
+            now_iso=lambda: "2024-01-02T00:00:00+00:00",
+            make_uuid=lambda: SAMPLE_UUID,
+        )
+        tui.stdscr = MagicMock()
+        entry = _make_entry(uzoj=["malnova uzo"], autoro="Malnova", verko="Malnova")
+        form_values = {
+            "teksto": "hello",
+            "lingvo": "en",
+            "difinoj": ["nova difino"],
+            "uzoj": ["nova uzo"],
+            "tipo": "aj",
+            "temo": "temo",
+            "tono": "nf",
+            "nivelo": 2.0,
+            "autoro": "Voltaire",
+            "verko": "Candide:1759",
+            "etikedoj": {},
+            "ligiloj": [],
+        }
+        with patch(
+            "autish.commands._vorto_tui.FormEditor.run",
+            return_value=form_values,
+        ):
+            tui._do_modifi_entry(entry)
+        assert saved["entry"]["uzoj"] == ["nova uzo"]
+        assert saved["entry"]["autoro"] == "Voltaire"
+        assert saved["entry"]["verko"] == "Candide:1759"
+        assert saved["old"]["uzoj"] == ["malnova uzo"]
+        assert saved["old"]["autoro"] == "Malnova"
 
 
 class TestPagerCharCursor:

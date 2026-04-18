@@ -503,10 +503,13 @@ _FORM_FIELDS = [
     ("teksto",     "Teksto (vorto/frazo)"),
     ("lingvo",     "Lingvo (eo/en/…)"),
     ("difinoj",    "Difino(j) — sep: ;"),
+    ("uzoj",       "Uzo(j) — sep: ;"),
     ("tipo",       "Tipo (su/ve/vt/vn/aj/av/…) — sep: ,"),
     ("temo",       "Temo"),
     ("tono",       "Tono (nf/fo/am)"),
     ("nivelo",     "Nivelo 1–10"),
+    ("autoro",     "Aŭtoro"),
+    ("verko",      "Verko (Titolo:Jaro)"),
     ("etikedoj",   "Etikedoj KEY:VAL …"),
     ("ligiloj",    "Ligiloj (UUID …)"),
 ]
@@ -666,7 +669,7 @@ class FormEditor:
         vals: dict = {}
         for (key, _), editor in zip(_FORM_FIELDS, self.editors, strict=False):
             raw = editor.text.strip()
-            if key == "difinoj":
+            if key in {"difinoj", "uzoj"}:
                 vals[key] = [s.strip() for s in raw.split(";") if s.strip()]
             elif key == "etikedoj":
                 d: dict[str, str] = {}
@@ -1696,8 +1699,11 @@ class VortoTUI:
             "tono": self._normalize_tono(vals.get("tono")),
             "nivelo": vals.get("nivelo"),
             "difinoj": vals.get("difinoj") or [],
+            "uzoj": vals.get("uzoj") or [],
             "etikedoj": vals.get("etikedoj") or {},
             "ligiloj": vals.get("ligiloj") or [],
+            "autoro": vals.get("autoro"),
+            "verko": vals.get("verko"),
             "kreita_je": now,
             "modifita_je": now,
         }
@@ -1725,6 +1731,7 @@ class VortoTUI:
             "teksto": entry.get("teksto") or "",
             "lingvo": entry.get("lingvo") or "",
             "difinoj": entry.get("difinoj") or [],
+            "uzoj": entry.get("uzoj") or [],
             "tipo": (
                 ", ".join(entry.get("tipo"))
                 if isinstance(entry.get("tipo"), list)
@@ -1735,6 +1742,8 @@ class VortoTUI:
             "nivelo": (
                 str(entry.get("nivelo")) if entry.get("nivelo") is not None else ""
             ),
+            "autoro": entry.get("autoro") or "",
+            "verko": entry.get("verko") or "",
             "etikedoj": entry.get("etikedoj") or {},
             "ligiloj": entry.get("ligiloj") or [],
         }
@@ -1749,7 +1758,7 @@ class VortoTUI:
             return
         _MODIFI_KEYS = (
             "teksto", "lingvo", "tipo", "temo", "tono",
-            "difinoj", "etikedoj", "ligiloj",
+            "difinoj", "uzoj", "autoro", "verko", "etikedoj", "ligiloj",
         )
         for key in _MODIFI_KEYS:
             if vals.get(key) is not None:

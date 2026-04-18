@@ -77,6 +77,7 @@ console = Console()
 
 _DATA_DIR: Path = Path.home() / ".local" / "share" / "autish"
 _DB_FILE: Path = _DATA_DIR / "encik.db"
+_VORTO_DB_FILE: Path = _DATA_DIR / "vorto.db"
 _CONFIG_DIR: Path = Path.home() / ".config" / "autish"
 _ENCIK_CONFIG_FILE: Path = _CONFIG_DIR / "encik.toml"
 _SEMANTIKA_CONFIG_DIR: Path = _CONFIG_DIR / "semantika"
@@ -475,6 +476,24 @@ def _runtime_semantika_alias_map() -> dict[str, str]:
     return mapping
 
 
+def _runtime_semantika_description_map() -> dict[str, str]:
+    descriptions: dict[str, str] = {}
+    for canonical, (description, _aliases) in _SEMANTIKA_DEFINOJ_MAP.items():
+        text = str(description or "").strip()
+        if text:
+            descriptions[canonical] = text
+    for rows in _load_semantika_groups().values():
+        for row in rows:
+            ligilo = str(row.get("ligilo") or "").strip()
+            if not ligilo:
+                continue
+            canonical = _SEMANTIKAJ_LIGILOJ.get(ligilo.lower(), ligilo)
+            priskribo = str(row.get("priskribo") or "").strip()
+            if priskribo:
+                descriptions[canonical] = priskribo
+    return descriptions
+
+
 def _runtime_known_semantika_ligiloj() -> set[str]:
     return set(_runtime_semantika_alias_map().values())
 
@@ -646,7 +665,12 @@ def _load_all() -> list[dict]:
 
 
 def _find_by_uuid(uid: str) -> dict | None:
-    normalized = str(uid or "").strip().lstrip("#")
+    raw = str(uid or "").strip()
+    if raw.lower().startswith("vt#"):
+        return None
+    if raw.lower().startswith("ec#"):
+        raw = raw[3:]
+    normalized = raw.lstrip("#")
     if not normalized:
         return None
     conn = _get_conn()
@@ -665,6 +689,54 @@ def _find_by_uuid(uid: str) -> dict | None:
         return None
     finally:
         conn.close()
+
+
+def _find_vorto_by_uuid(uid: str) -> dict | None:
+    normalized = str(uid or "").strip().lstrip("#")
+    if not normalized or not _VORTO_DB_FILE.exists():
+        return None
+    conn = sqlite3.connect(str(_VORTO_DB_FILE), timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT uuid, teksto FROM vorto WHERE uuid = ?",
+            (normalized,),
+        ).fetchone()
+        if row:
+            return dict(row)
+        rows = conn.execute(
+            "SELECT uuid, teksto FROM vorto "
+            "WHERE uuid LIKE ? ORDER BY uuid COLLATE NOCASE LIMIT 2",
+            (f"{normalized}%",),
+        ).fetchall()
+        if len(rows) == 1:
+            return dict(rows[0])
+        return None
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
+def _canonicalize_ligilo_ref(ref: str | None) -> str:
+    token = _clean_uuid_ref(ref)
+    if not token:
+        return ""
+    lower = token.lower()
+    if lower.startswith("vt#"):
+        vorto_ref = token[3:].lstrip("#").strip()
+        if not vorto_ref:
+            return ""
+        target = _find_vorto_by_uuid(vorto_ref)
+        resolved = str(target.get("uuid") or vorto_ref) if target else vorto_ref
+        return f"vt#{resolved}"
+    if lower.startswith("ec#"):
+        encik_ref = token[3:].lstrip("#").strip()
+        if not encik_ref:
+            return ""
+        target = _find_by_uuid(encik_ref)
+        return str(target.get("uuid") or encik_ref) if target else encik_ref
+    return token
 
 
 def _find_by_title_exact(titolo: str) -> dict | None:
@@ -959,6 +1031,7 @@ superklaso = {superklaso}
 # Ligiloj: listo de UUID-oj aŭ [UUID, semantika_tipo]
 # Ekzemploj:
 #   ligilo = "uuid1"
+#   ligilo = ["vt#8bf534dc"]          # ligo al vorto
 #   ligilo = ["uuid1", "#uuid2", ["uuid3", "rdf:type"], ["uuid4", "owl:inverseOf"]]
 ligilo = {ligilo}
 
@@ -2098,6 +2171,32 @@ def _directional_semantic_family(rel: str | None) -> set[str]:
     return {normalized} if normalized else set()
 
 
+def _load_auto_reverse_pairs(entry: dict) -> set[tuple[str, str | None]]:
+    datumo = entry.get("datumo") if isinstance(entry.get("datumo"), dict) else {}
+    raw = datumo.get(_AUTO_REVERSE_DATUMO_KEY) if isinstance(datumo, dict) else None
+    items = _normalize_ligilo_items(raw or [])
+    return {
+        (str(item.get("uuid") or ""), _normalize_semantika_ligilo(item.get("tipo")))
+        for item in items
+        if str(item.get("uuid") or "")
+    }
+
+
+def _save_auto_reverse_pairs(
+    entry: dict, pairs: set[tuple[str, str | None]]
+) -> None:
+    datumo = dict(entry.get("datumo") or {})
+    ordered_pairs = sorted(pairs, key=lambda item: (item[0], item[1] or ""))
+    payload = _serialize_ligilo_items(
+        [{"uuid": uid, "tipo": sem} for uid, sem in ordered_pairs]
+    )
+    if payload:
+        datumo[_AUTO_REVERSE_DATUMO_KEY] = payload
+    else:
+        datumo.pop(_AUTO_REVERSE_DATUMO_KEY, None)
+    entry["datumo"] = datumo
+
+
 def _reconcile_all_semantic_reverse_links() -> None:
     all_entries = _load_all()
     changed: dict[str, dict] = {}
@@ -2117,35 +2216,25 @@ def _reconcile_all_semantic_reverse_links() -> None:
                 (source_uuid, reverse_sem)
             )
 
-    def _load_auto_pairs(entry: dict) -> set[tuple[str, str | None]]:
-        datumo = entry.get("datumo") if isinstance(entry.get("datumo"), dict) else {}
-        raw = datumo.get(_AUTO_REVERSE_DATUMO_KEY) if isinstance(datumo, dict) else None
-        items = _normalize_ligilo_items(raw or [])
-        return {
-            (str(i.get("uuid") or ""), _normalize_semantika_ligilo(i.get("tipo")))
-            for i in items
-            if str(i.get("uuid") or "")
-        }
-
-    def _save_auto_pairs(entry: dict, pairs: set[tuple[str, str | None]]) -> None:
-        datumo = dict(entry.get("datumo") or {})
-        ordered_pairs = sorted(pairs, key=lambda item: (item[0], item[1] or ""))
-        payload = _serialize_ligilo_items(
-            [{"uuid": uid, "tipo": sem} for uid, sem in ordered_pairs]
-        )
-        if payload:
-            datumo[_AUTO_REVERSE_DATUMO_KEY] = payload
-        else:
-            datumo.pop(_AUTO_REVERSE_DATUMO_KEY, None)
-        entry["datumo"] = datumo
-
     for target in all_entries:
         target_uuid = str(target.get("uuid") or "")
         if not target_uuid:
             continue
         expected_pairs = expected_by_target.get(target_uuid, set())
-        auto_pairs = _load_auto_pairs(target)
+        auto_pairs = _load_auto_reverse_pairs(target)
         target_items_original = _normalize_ligilo_items(target.get("ligilo") or [])
+        manual_pairs = {
+            (
+                str(item.get("uuid") or ""),
+                _normalize_semantika_ligilo(item.get("tipo")),
+            )
+            for item in target_items_original
+            if (
+                str(item.get("uuid") or ""),
+                _normalize_semantika_ligilo(item.get("tipo")),
+            )
+            not in auto_pairs
+        }
         target_items = list(target_items_original)
 
         # Remove stale auto-managed reverse links.
@@ -2182,9 +2271,15 @@ def _reconcile_all_semantic_reverse_links() -> None:
 
         original_serialized = _serialize_ligilo_items(target_items_original)
         reconciled_serialized = _serialize_ligilo_items(target_items)
-        if original_serialized != reconciled_serialized or auto_pairs != expected_pairs:
+        final_auto_pairs = {
+            pair for pair in expected_pairs if pair not in manual_pairs
+        }
+        if (
+            original_serialized != reconciled_serialized
+            or auto_pairs != final_auto_pairs
+        ):
             target["ligilo"] = reconciled_serialized
-            _save_auto_pairs(target, expected_pairs)
+            _save_auto_reverse_pairs(target, final_auto_pairs)
             target["modifita_je"] = _now_iso()
             changed[target_uuid] = target
 
@@ -2457,9 +2552,11 @@ def _normalize_ligilo_items(raw: list | str) -> list[dict[str, str | None]]:
     items: list[dict[str, str | None]] = []
     for item in normalized:
         if isinstance(item, str):
-            items.append({"uuid": item, "tipo": None})
+            canonical_ref = _canonicalize_ligilo_ref(item)
+            if canonical_ref:
+                items.append({"uuid": canonical_ref, "tipo": None})
         elif isinstance(item, list) and item:
-            uuid_ref = _clean_uuid_ref(str(item[0]))
+            uuid_ref = _canonicalize_ligilo_ref(str(item[0]))
             if not uuid_ref:
                 continue
             sem = _normalize_semantika_ligilo(str(item[1])) if len(item) > 1 else None
@@ -2518,7 +2615,16 @@ def _resolve_uuid_to_title(uuid: str) -> str:
 
     Supports prefix matching (e.g., 'c487fa8b' matches 'c487fa8b-...-...').
     """
-    normalized_uuid = str(uuid or "").strip().lstrip("#")
+    raw_ref = str(uuid or "").strip()
+    if raw_ref.lower().startswith("vt#"):
+        vorto_ref = raw_ref[3:].lstrip("#")
+        target = _find_vorto_by_uuid(vorto_ref)
+        if target:
+            return str(target.get("teksto") or f"vt#{vorto_ref[:8]}")
+        return f"vt#{vorto_ref[:8]}"
+    if raw_ref.lower().startswith("ec#"):
+        raw_ref = raw_ref[3:]
+    normalized_uuid = raw_ref.lstrip("#")
     conn = _get_conn()
     try:
         # Try exact match first
@@ -2591,7 +2697,7 @@ def _parse_ligilo_cli_values(values: list[str]) -> list:
             continue
         if ":" in token:
             uuid_part, tipo_part = token.split(":", 1)
-            uuid_part = _clean_uuid_ref(uuid_part)
+            uuid_part = _canonicalize_ligilo_ref(uuid_part)
             tipo_norm = _normalize_semantika_ligilo(tipo_part)
             if tipo_part.strip() and not _is_known_semantika_ligilo(tipo_norm):
                 raise ValueError(
@@ -2601,7 +2707,7 @@ def _parse_ligilo_cli_values(values: list[str]) -> list:
             if uuid_part:
                 items.append({"uuid": uuid_part, "tipo": tipo_norm})
         else:
-            uuid_part = _clean_uuid_ref(token)
+            uuid_part = _canonicalize_ligilo_ref(token)
             if uuid_part:
                 items.append({"uuid": uuid_part, "tipo": None})
     return _serialize_ligilo_items(items)
@@ -2609,33 +2715,52 @@ def _parse_ligilo_cli_values(values: list[str]) -> list:
 
 def _extract_markdown_ligilo_refs(text: str) -> list[dict[str, str | None]]:
     refs: list[dict[str, str | None]] = []
-    for match in re.finditer(r"\[[^\]]+\]\(#([^)]+)\)", text or ""):
+    for match in re.finditer(
+        r"\[[^\]]+\]\(((?:#|[eE][cC]#|[vV][tT]#)[^)]+)\)",
+        text or "",
+    ):
         raw = match.group(1).strip()
         if not raw:
             continue
         first, sep, second = raw.partition(",")
-        uuid_raw = first.strip().lstrip("#")
+        uuid_raw = first.strip()
         if not uuid_raw:
             continue
         sem = _normalize_semantika_ligilo(second.strip()) if sep else None
-        target = _find_by_uuid(uuid_raw)
-        resolved_uuid = str(target.get("uuid")) if target else uuid_raw
-        refs.append({"uuid": resolved_uuid, "tipo": sem})
+        resolved_ref = _canonicalize_ligilo_ref(uuid_raw)
+        if not resolved_ref:
+            continue
+        if not resolved_ref.lower().startswith("vt#"):
+            target = _find_by_uuid(resolved_ref)
+            if target is not None:
+                resolved_ref = str(target.get("uuid") or resolved_ref)
+        refs.append({"uuid": resolved_ref, "tipo": sem})
+    return refs
+
+
+def _extract_markdown_ligilo_refs_from_payload(
+    payload: object,
+) -> list[dict[str, str | None]]:
+    refs: list[dict[str, str | None]] = []
+    if isinstance(payload, str):
+        refs.extend(_extract_markdown_ligilo_refs(payload))
+        return refs
+    if isinstance(payload, list):
+        for item in payload:
+            refs.extend(_extract_markdown_ligilo_refs_from_payload(item))
+        return refs
+    if isinstance(payload, dict):
+        for value in payload.values():
+            refs.extend(_extract_markdown_ligilo_refs_from_payload(value))
     return refs
 
 
 def _extract_auto_ligilo_refs(parsed: dict) -> list[dict[str, str | None]]:
     refs: list[dict[str, str | None]] = []
-    for value in (parsed.get("terminologio") or {}).values():
-        refs.extend(_extract_markdown_ligilo_refs(str(value)))
-    for value in (parsed.get("difinoj") or {}).values():
-        refs.extend(_extract_markdown_ligilo_refs(str(value)))
-    refs.extend(_extract_markdown_ligilo_refs(str(parsed.get("difinio") or "")))
-    refs.extend(_extract_markdown_ligilo_refs(str(parsed.get("enhavo") or "")))
-    for payload in (parsed.get("datumo") or {}).values():
-        refs.extend(
-            _extract_markdown_ligilo_refs(json.dumps(payload, ensure_ascii=False))
-        )
+    for key, value in parsed.items():
+        if key in {"ligilo", "superklaso"}:
+            continue
+        refs.extend(_extract_markdown_ligilo_refs_from_payload(value))
     return refs
 
 
@@ -2712,7 +2837,9 @@ def _collect_encik_incoming_refs(
     return warnings
 
 
-def _sync_bidirectional_relations_for_entry(entry: dict) -> None:
+def _sync_bidirectional_relations_for_entry(
+    entry: dict, *, previous_ligilo: list | None = None
+) -> None:
     """Keep ligilo/superklaso relationships consistent in both directions.
 
     - A.ligilo contains B  => B.ligilo contains A
@@ -2754,6 +2881,31 @@ def _sync_bidirectional_relations_for_entry(entry: dict) -> None:
     current["superklaso"] = current_sup
     current["modifita_je"] = _now_iso()
     changed.append(current)
+    current_pairs = {
+        (
+            str(item.get("uuid") or ""),
+            _normalize_semantika_ligilo(item.get("tipo")),
+        )
+        for item in current_lig_items
+        if str(item.get("uuid") or "")
+    }
+    removed_pairs: set[tuple[str, str | None]] = set()
+    if previous_ligilo is not None:
+        previous_items = [
+            {
+                "uuid": _resolve_ref(str(item.get("uuid") or "")),
+                "tipo": item.get("tipo"),
+            }
+            for item in _normalize_ligilo_items(previous_ligilo)
+            if _resolve_ref(str(item.get("uuid") or ""))
+        ]
+        for item in previous_items:
+            key = (
+                str(item.get("uuid") or ""),
+                _normalize_semantika_ligilo(item.get("tipo")),
+            )
+            if key[0] and key not in current_pairs:
+                removed_pairs.add(key)
 
     # Bidirectional ligilo with semantic inverse mapping where needed
     for item in current_lig_items:
@@ -2770,9 +2922,41 @@ def _sync_bidirectional_relations_for_entry(entry: dict) -> None:
             for x in other_lig_items
         ):
             other_lig_items.append({"uuid": current["uuid"], "tipo": reverse_sem})
+            auto_pairs = _load_auto_reverse_pairs(other)
+            auto_pairs.add((current["uuid"], reverse_sem))
+            _save_auto_reverse_pairs(other, auto_pairs)
             other["ligilo"] = _serialize_ligilo_items(other_lig_items)
             other["modifita_je"] = _now_iso()
             changed.append(other)
+
+    # Remove stale auto-managed reverse links for relations removed from current.
+    for other_uuid, sem in removed_pairs:
+        reverse_sem = _reverse_semantika_ligilo(sem)
+        other = by_uuid.get(other_uuid) or _find_by_uuid(other_uuid)
+        if other is None:
+            continue
+        auto_pairs = _load_auto_reverse_pairs(other)
+        auto_key = (current["uuid"], reverse_sem)
+        if auto_key not in auto_pairs:
+            continue
+        other_lig_items = _normalize_ligilo_items(other.get("ligilo") or [])
+        filtered_items = [
+            item
+            for item in other_lig_items
+            if not (
+                str(item.get("uuid") or "") == current["uuid"]
+                and _normalize_semantika_ligilo(item.get("tipo")) == reverse_sem
+            )
+        ]
+        if len(filtered_items) == len(other_lig_items):
+            auto_pairs.discard(auto_key)
+            _save_auto_reverse_pairs(other, auto_pairs)
+            continue
+        auto_pairs.discard(auto_key)
+        _save_auto_reverse_pairs(other, auto_pairs)
+        other["ligilo"] = _serialize_ligilo_items(filtered_items)
+        other["modifita_je"] = _now_iso()
+        changed.append(other)
 
     # Normalize parent links (superklaso only stores UUID refs)
     for parent_ref in current_sup:
@@ -2996,19 +3180,23 @@ def _display_entry(
     semantika = _normalize_semantika_valoroj(entry.get("semantika"))
     if semantika:
         panel_lines.append(f"  [dim]{'semantika:':<14}[/dim]")
+        semantika_priskriboj = _runtime_semantika_description_map()
         for item in semantika:
             tipo = str(item.get("tipo") or "")
-            arko = str(item.get("arko") or "")
+            arko = str(item.get("arko") or "").strip()
+            canonical_arko = _normalize_semantika_ligilo(arko) or arko
+            priskribo = semantika_priskriboj.get(canonical_arko, canonical_arko)
             rendered_value = _format_semantika_valoro(
                 item.get("valoro"), tipo=tipo, markdown=True
             )
             rendered_unuo = _format_semantika_unuo_cli(item)
+            rendered_priskribo = _render_markdown_text(priskribo)
             if rendered_unuo:
                 panel_lines.append(
-                    f"    {tipo} {arko} {rendered_value} {rendered_unuo}"
+                    f"    {rendered_priskribo} {rendered_value} {rendered_unuo}"
                 )
             else:
-                panel_lines.append(f"    {tipo} {arko} {rendered_value}")
+                panel_lines.append(f"    {rendered_priskribo} {rendered_value}")
 
     datumo = entry.get("datumo") or {}
     datumo = _public_datumo(entry)
@@ -3061,7 +3249,17 @@ def _render_markdown_text(text: str) -> str:
     def _replace_internal(match: re.Match[str]) -> str:
         label = match.group(1).strip()
         raw_ref = match.group(2).strip()
-        ref = raw_ref.split(",", 1)[0].strip().lstrip("#")
+        ref_token = raw_ref.split(",", 1)[0].strip()
+        if ref_token.lower().startswith("vt#"):
+            vorto_ref = ref_token[3:].lstrip("#")
+            target = _find_vorto_by_uuid(vorto_ref)
+            if not target:
+                return f"{label} (vt#{vorto_ref[:8]})"
+            short_uuid = str(target.get("uuid") or "")[:8]
+            return f"{label} (vt#{short_uuid})"
+        if ref_token.lower().startswith("ec#"):
+            ref_token = ref_token[3:]
+        ref = ref_token.lstrip("#")
         target = _find_by_uuid(ref)
         if not target:
             return label
@@ -3076,7 +3274,11 @@ def _render_markdown_text(text: str) -> str:
             return f"[link={href}]{label}[/link]"
         return label
 
-    rendered = re.sub(r"\[([^\]]+)\]\(#([^)]+)\)", _replace_internal, text)
+    rendered = re.sub(
+        r"\[([^\]]+)\]\(((?:#|[eE][cC]#|[vV][tT]#)[^)]+)\)",
+        _replace_internal,
+        text,
+    )
     rendered = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", _replace_external, rendered)
     rendered = re.sub(r"(\*\*|__|\*|_|`)", "", rendered)
     return rendered
@@ -3104,14 +3306,25 @@ def _strip_markdown_links(text: str) -> str:
 
 def _render_relation_cli_link(label: str, ref: str) -> str:
     """Render a clickable CLI relation link for an encik UUID reference."""
-    normalized_ref = str(ref or "").strip().lstrip("#")
-    target = _find_by_uuid(normalized_ref)
+    raw_ref = str(ref or "").strip()
+    is_vorto_ref = raw_ref.lower().startswith("vt#")
+    if raw_ref.lower().startswith("ec#"):
+        raw_ref = raw_ref[3:]
+    normalized_ref = raw_ref[3:].lstrip("#") if is_vorto_ref else raw_ref.lstrip("#")
+    target = _find_vorto_by_uuid(normalized_ref) if is_vorto_ref else _find_by_uuid(
+        normalized_ref
+    )
     short_ref = normalized_ref[:8]
     clean_label = _strip_markdown_links(str(label or "")).strip()
     if clean_label.startswith("##"):
         clean_label = "#" + clean_label.lstrip("#")
-    if re.fullmatch(r"#?[0-9a-fA-F]{1,8}\*?", clean_label):
+    if not is_vorto_ref and re.fullmatch(r"#?[0-9a-fA-F]{1,8}\*?", clean_label):
         clean_label = f"#{short_ref}"
+    if is_vorto_ref:
+        shown_label = clean_label or (str(target.get("teksto") or "") if target else "")
+        if shown_label:
+            return f"{shown_label} [dim]vt#{short_ref}[/dim]"
+        return f"[dim]vt#{short_ref}[/dim]"
     if not target:
         if clean_label:
             if clean_label == f"#{short_ref}":
@@ -3127,14 +3340,25 @@ def _render_relation_cli_link(label: str, ref: str) -> str:
 
 def _render_relation_html_link(label: str, ref: str, *, link_depth: int = 0) -> str:
     """Render an HTML relation link for an encik UUID reference."""
-    normalized_ref = str(ref or "").strip().lstrip("#")
-    target = _find_by_uuid(normalized_ref)
+    raw_ref = str(ref or "").strip()
+    is_vorto_ref = raw_ref.lower().startswith("vt#")
+    if raw_ref.lower().startswith("ec#"):
+        raw_ref = raw_ref[3:]
+    normalized_ref = raw_ref[3:].lstrip("#") if is_vorto_ref else raw_ref.lstrip("#")
+    target = _find_vorto_by_uuid(normalized_ref) if is_vorto_ref else _find_by_uuid(
+        normalized_ref
+    )
     short_ref = normalized_ref[:8]
     clean_label = _strip_markdown_links(str(label or "")).strip()
     if clean_label.startswith("##"):
         clean_label = "#" + clean_label.lstrip("#")
-    if re.fullmatch(r"#?[0-9a-fA-F]{1,8}\*?", clean_label):
+    if not is_vorto_ref and re.fullmatch(r"#?[0-9a-fA-F]{1,8}\*?", clean_label):
         clean_label = f"#{short_ref}"
+    if is_vorto_ref:
+        shown_label = clean_label or (str(target.get("teksto") or "") if target else "")
+        if shown_label:
+            return f"{escape(shown_label)} vt#{escape(short_ref)}"
+        return f"vt#{escape(short_ref)}"
     if not target:
         if clean_label:
             if clean_label == f"#{short_ref}":
@@ -3201,7 +3425,17 @@ def _replace_internal_markdown_links_with_file_urls(md_text: str) -> str:
 
     def _replace(match: re.Match[str]) -> str:
         label = match.group(1).strip()
-        ref = match.group(2).strip().lstrip("#")
+        ref_token = match.group(2).strip().split(",", 1)[0].strip()
+        if ref_token.lower().startswith("vt#"):
+            vorto_ref = ref_token[3:].lstrip("#")
+            target = _find_vorto_by_uuid(vorto_ref)
+            if not target:
+                return f"{label} (vt#{vorto_ref[:8]})"
+            short_uuid = str(target.get("uuid") or "")[:8]
+            return f"{label} (vt#{short_uuid})"
+        if ref_token.lower().startswith("ec#"):
+            ref_token = ref_token[3:]
+        ref = ref_token.lstrip("#")
         target = _find_by_uuid(ref)
         if not target:
             return f"{label} (#{ref[:8]})"
@@ -3209,7 +3443,11 @@ def _replace_internal_markdown_links_with_file_urls(md_text: str) -> str:
         target_path = _write_html_document(target_html)
         return f"[{label}](file://{target_path})"
 
-    return re.sub(r"\[([^\]]+)\]\(#([^)]+)\)", _replace, md_text)
+    return re.sub(
+        r"\[([^\]]+)\]\(((?:#|[eE][cC]#|[vV][tT]#)[^)]+)\)",
+        _replace,
+        md_text,
+    )
 
 
 def _json_to_html_pretty(payload: object) -> str:
@@ -3462,21 +3700,29 @@ def _load_user_language_preferences() -> tuple[list[str], bool]:
     except Exception:
         return [], True
     try:
-        profile = _load_profile()
+        profile = _load_profile(quiet=True)
     except Exception:
         return [], True
     raw_langs = profile.get("lingvoj")
-    if not isinstance(raw_langs, list):
+    if raw_langs is None:
+        raw_langs = profile.get("lingvo")
+    if isinstance(raw_langs, str):
+        raw_items: list[object] = [part.strip() for part in raw_langs.split(",")]
+    elif isinstance(raw_langs, list):
+        raw_items = raw_langs
+    else:
         return [], True
     valid: list[str] = []
     invalid_found = False
-    for item in raw_langs:
+    for item in raw_items:
         code = str(item).strip().lower()
+        if not code:
+            continue
         if re.fullmatch(r"[a-z]{2}", code):
             if code not in valid:
                 valid.append(code)
-        elif code:
-            invalid_found = True
+            continue
+        invalid_found = True
     if not valid:
         return [], True
     return valid, invalid_found
@@ -3518,15 +3764,29 @@ def _open_html_document(html_doc: str) -> str:
 
 
 def _entry_user_locale_title(entry: dict) -> str:
+    preferred_langs, _ = _load_user_language_preferences()
     env_lang = (os.environ.get("LC_ALL") or os.environ.get("LANG") or "").split(".")[0]
     env_lang = env_lang.split("_")[0].lower()
-    terms = entry.get("terminologio") or {}
-    return (
-        terms.get(env_lang)
-        or terms.get("eo")
-        or entry.get("titolo")
-        or next(iter(terms.values()), "")
-    )
+    language_order = list(preferred_langs)
+    if re.fullmatch(r"[a-z]{2}", env_lang) and env_lang not in language_order:
+        language_order.append(env_lang)
+    terms_obj = entry.get("terminologio")
+    terms = terms_obj if isinstance(terms_obj, dict) else {}
+    for code in language_order:
+        candidate = str(terms.get(code) or "").strip()
+        if candidate:
+            return candidate
+    eo_term = str(terms.get("eo") or "").strip()
+    if eo_term:
+        return eo_term
+    title = str(entry.get("titolo") or "").strip()
+    if title:
+        return title
+    for value in terms.values():
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
 
 
 def _print_candidates(candidates: list[dict]) -> None:
@@ -3781,6 +4041,8 @@ def _linked_graph_of(
             continue
         links = []
         for link_item in _normalize_ligilo_items(entry.get("ligilo") or []):
+            if _normalize_semantika_ligilo(link_item.get("tipo")):
+                continue
             target = _find_by_uuid(str(link_item.get("uuid") or ""))
             if target:
                 links.append(str(target["uuid"]))
@@ -4232,9 +4494,9 @@ def aldoni(
             '  terminologio.xx = "..."\n'
             '  difino.xx = "..."\n'
             '  """laŭvola libera teksto"""\n'
-            '  superklaso = ["uuid1", "uuid2"]\n'
-            '  ligilo = ["uuid1", ["uuid2", "rdf:type"],\n'
-            '            ["uuid3", "owl:inverseOf"]]\n'
+             '  superklaso = ["uuid1", "uuid2"]\n'
+             '  ligilo = ["uuid1", ["uuid2", "rdf:type"],\n'
+             '            ["uuid3", "owl:inverseOf"], "vt#8bf534dc"]\n'
             '  fonto = [{titolo="...", autoro="...", jaro=2020, tipo="libroj", '
             'noto="...", ligilo="https://...", lingvo="eo,en"}]\n'
             '  citajo = [{teksto="...", autoro="...", verko="...", '
@@ -4317,6 +4579,9 @@ def aldoni(
     # Duplicate title check
     existing = _find_by_title_exact(parsed["titolo"])
     if existing is not None:
+        previous_ligilo = _serialize_ligilo_items(
+            _normalize_ligilo_items(existing.get("ligilo") or [])
+        )
         typer.echo(
             f'Nodo kun titolo "{existing["titolo"]}" jam ekzistas '
             f"(#{existing['uuid'][:8]})."
@@ -4340,7 +4605,10 @@ def aldoni(
             modifita_je=_now_iso(),
         )
         _update_entry(existing)
-        _sync_bidirectional_relations_for_entry(existing)
+        _sync_bidirectional_relations_for_entry(
+            existing,
+            previous_ligilo=previous_ligilo,
+        )
         typer.echo(f'Modifis #{existing["uuid"][:8]}  "{existing["titolo"]}"')
         if kopii_uuid or semantika_kopii:
             _copy_entry_reference(existing, semantika=semantika_kopii)
@@ -4454,6 +4722,9 @@ def modifi(
     if entry is None:
         typer.echo(f"Nodo ne trovita: {ref!r}", err=True)
         raise typer.Exit(code=1)
+    previous_ligilo = _serialize_ligilo_items(
+        _normalize_ligilo_items(entry.get("ligilo") or [])
+    )
 
     parsed: dict | None = None
     has_cli_updates = any(
@@ -4605,10 +4876,10 @@ def modifi(
         )
         raise typer.Exit(code=1)
 
-    _raise_if_semantic_conflicts(entry)
+    _raise_if_semantic_conflicts(entry, strict=False)
     entry["modifita_je"] = _now_iso()
     _update_entry(entry)
-    _sync_bidirectional_relations_for_entry(entry)
+    _sync_bidirectional_relations_for_entry(entry, previous_ligilo=previous_ligilo)
     invalid_path.unlink(missing_ok=True)
     typer.echo(f'Modifis #{entry["uuid"][:8]}  "{entry["titolo"]}"')
     if kopii_uuid or semantika_kopii:
@@ -4686,19 +4957,30 @@ def vidi(
     _display_entry(entry, lingvo=lingvo, montri_cxion=montri_cxion)
 
 
+def _semantika_language_priority(languages: list[str]) -> list[str]:
+    ordered: list[str] = []
+    for raw_code in [*languages, "eo", "en"]:
+        code = str(raw_code or "").strip().lower()
+        if not re.fullmatch(r"[a-z]{2}", code):
+            continue
+        if code not in ordered:
+            ordered.append(code)
+    return ordered or ["eo", "en"]
+
+
 def _semantika_serci_languages(lingvo: str | None) -> list[str]:
     if lingvo:
         parsed = _normalize_lingvo_codes(lingvo, field="--lingvo")
         if parsed:
-            return parsed
+            return _semantika_language_priority(parsed)
         raise ValueError("Nevalida --lingvo. Uzu 2-litera(j)n kodojn (ekz: eo,en).")
     preferred, _ = _load_user_language_preferences()
     if preferred:
-        return preferred
+        return _semantika_language_priority(preferred)
     env_lang = (os.environ.get("LC_ALL") or os.environ.get("LANG") or "").split(".")[0]
     env_code = env_lang.split("_")[0].strip().lower()
     if re.fullmatch(r"[a-z]{2}", env_code):
-        return [env_code]
+        return _semantika_language_priority([env_code])
     return ["eo", "en"]
 
 
@@ -4779,32 +5061,41 @@ def _wikidata_search_properties(
                 if alias.lower() not in {a.lower() for a in combined_aliases}:
                     combined_aliases.append(alias)
             existing["aliasoj"] = combined_aliases
+    if dedup:
+        prop_ids = [ligilo.split(":", 1)[1] for ligilo in dedup]
+        try:
+            metadata = _wikidata_properties_metadata(prop_ids, languages)
+        except RuntimeError:
+            metadata = {}
+        for ligilo, item in dedup.items():
+            prop_id = ligilo.split(":", 1)[1]
+            localized = metadata.get(prop_id)
+            if not localized:
+                continue
+            localized_label = str(localized.get("etikedo") or "").strip()
+            localized_description = str(localized.get("priskribo") or "").strip()
+            if localized_label:
+                item["etikedo"] = localized_label
+            if localized_description:
+                item["priskribo"] = localized_description
+            merged_aliases: list[str] = []
+            for alias in [
+                *[str(a) for a in (localized.get("aliasoj") or [])],
+                *[str(a) for a in (item.get("aliasoj") or [])],
+            ]:
+                cleaned = alias.strip()
+                if cleaned and cleaned.lower() not in {
+                    a.lower() for a in merged_aliases
+                }:
+                    merged_aliases.append(cleaned)
+            if merged_aliases:
+                item["aliasoj"] = merged_aliases
     return list(dedup.values())
 
 
-def _wikidata_property_metadata(
-    prop_id: str, languages: list[str]
+def _extract_wikidata_entity_metadata(
+    entity: dict[str, object], *, prop_id: str, lang_list: list[str]
 ) -> dict[str, object]:
-    lang_list = [lang.strip().lower() for lang in languages if lang.strip()]
-    if "en" not in lang_list:
-        lang_list.append("en")
-    if "eo" not in lang_list:
-        lang_list.append("eo")
-    data = _wikidata_api_get(
-        {
-            "action": "wbgetentities",
-            "format": "json",
-            "ids": prop_id,
-            "props": "labels|descriptions|aliases",
-            "languages": "|".join(lang_list),
-        }
-    )
-    entities = data.get("entities")
-    if not isinstance(entities, dict):
-        raise RuntimeError("Wikidata API respondo ne enhavas 'entities'")
-    entity = entities.get(prop_id)
-    if not isinstance(entity, dict):
-        raise RuntimeError("Wikidata API respondo ne enhavas la petitan ID")
     labels = entity.get("labels")
     descriptions = entity.get("descriptions")
     aliases_obj = entity.get("aliases")
@@ -4841,6 +5132,70 @@ def _wikidata_property_metadata(
         "priskribo": description,
         "aliasoj": alias_values,
     }
+
+
+def _wikidata_properties_metadata(
+    prop_ids: list[str], languages: list[str]
+) -> dict[str, dict[str, object]]:
+    normalized_ids: list[str] = []
+    for raw_id in prop_ids:
+        candidate = str(raw_id or "").strip().upper()
+        if not re.fullmatch(r"P\d+", candidate):
+            continue
+        if candidate not in normalized_ids:
+            normalized_ids.append(candidate)
+    if not normalized_ids:
+        return {}
+    lang_list = _semantika_language_priority(languages)
+    data = _wikidata_api_get(
+        {
+            "action": "wbgetentities",
+            "format": "json",
+            "ids": "|".join(normalized_ids),
+            "props": "labels|descriptions|aliases",
+            "languages": "|".join(lang_list),
+        }
+    )
+    entities = data.get("entities")
+    if not isinstance(entities, dict):
+        raise RuntimeError("Wikidata API respondo ne enhavas 'entities'")
+    extracted: dict[str, dict[str, object]] = {}
+    for prop_id in normalized_ids:
+        entity = entities.get(prop_id)
+        if not isinstance(entity, dict):
+            continue
+        extracted[prop_id] = _extract_wikidata_entity_metadata(
+            entity,
+            prop_id=prop_id,
+            lang_list=lang_list,
+        )
+    return extracted
+
+
+def _wikidata_property_metadata(
+    prop_id: str, languages: list[str]
+) -> dict[str, object]:
+    lang_list = _semantika_language_priority(languages)
+    data = _wikidata_api_get(
+        {
+            "action": "wbgetentities",
+            "format": "json",
+            "ids": prop_id,
+            "props": "labels|descriptions|aliases",
+            "languages": "|".join(lang_list),
+        }
+    )
+    entities = data.get("entities")
+    if not isinstance(entities, dict):
+        raise RuntimeError("Wikidata API respondo ne enhavas 'entities'")
+    entity = entities.get(prop_id)
+    if not isinstance(entity, dict):
+        raise RuntimeError("Wikidata API respondo ne enhavas la petitan ID")
+    return _extract_wikidata_entity_metadata(
+        entity,
+        prop_id=prop_id,
+        lang_list=lang_list,
+    )
 
 
 semantika_app = typer.Typer(
@@ -5066,17 +5421,28 @@ def semantika_ligilo_aldoni(
         groups[group_name] = []
 
     rows = [dict(row) for row in groups.get(group_name, [])]
-    existing = next(
+    existing_index = next(
         (
-            row
-            for row in rows
+            index
+            for index, row in enumerate(rows)
             if str(row.get("ligilo") or "").strip().lower() == ligilo.lower()
         ),
         None,
     )
-    if existing is not None:
-        typer.echo(f"{ligilo} jam ekzistas en grupo '{group_name}'.")
-        return
+    overwrite_existing = False
+    if existing_index is not None:
+        typer.echo(
+            f"Averto: {ligilo} jam ekzistas en grupo '{group_name}'.",
+            err=True,
+        )
+        answer = typer.prompt(
+            "Ĉu anstataŭigi la ekzistantan eniron? (j/N)",
+            default="n",
+        )
+        if answer.strip().lower() not in {"j", "jes", "y", "yes"}:
+            typer.echo("Nuligita.")
+            return
+        overwrite_existing = True
 
     default_desc, default_aliases = _SEMANTIKA_DEFINOJ_MAP.get(ligilo, ("", ()))
     resolved_desc = default_desc
@@ -5115,20 +5481,28 @@ def semantika_ligilo_aldoni(
         resolved_aliases = _parse_alias_list(aliazoj)
     if prop_id and prop_id.lower() not in {a.lower() for a in resolved_aliases}:
         resolved_aliases.append(prop_id.lower())
-    rows.append(
-        {
-            "ligilo": ligilo,
-            "priskribo": resolved_desc,
-            "aliasoj": resolved_aliases,
-        }
-    )
+    new_row = {
+        "ligilo": ligilo,
+        "priskribo": resolved_desc,
+        "aliasoj": resolved_aliases,
+    }
+    if overwrite_existing and existing_index is not None:
+        rows[existing_index] = new_row
+    else:
+        rows.append(new_row)
     _write_semantika_group_rows(group_name, rows)
     _invalidate_semantika_config_cache()
     _register_semantika_group_commands()
-    typer.echo(
-        f"Aldonis {ligilo} al grupo '{group_name}'. "
-        f"Dosiero: {_semantika_group_file(group_name)}"
-    )
+    if overwrite_existing:
+        typer.echo(
+            f"Anstataŭigis {ligilo} en grupo '{group_name}'. "
+            f"Dosiero: {_semantika_group_file(group_name)}"
+        )
+    else:
+        typer.echo(
+            f"Aldonis {ligilo} al grupo '{group_name}'. "
+            f"Dosiero: {_semantika_group_file(group_name)}"
+        )
 
 
 app.add_typer(semantika_app, name="semantika")

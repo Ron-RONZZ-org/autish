@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import re
@@ -42,6 +43,8 @@ _BROWSER_FORK_MAP: dict[str, str] = {
     "vivaldi": "chrome",
     "chromium": "chrome",
 }
+_CSV_TRUE_VALUES: frozenset[str] = frozenset({"1", "true"})
+_CSV_FALSE_VALUES: frozenset[str] = frozenset({"0", "false"})
 
 
 def _discover_firefox_style_profiles(browser_hint: str) -> list[str]:
@@ -539,6 +542,129 @@ def _resolve_targets(targets: list[str]) -> list[str]:
     return resolved
 
 
+def _normalize_csv_option_name(raw: str) -> str | None:
+    normalized = str(raw or "").strip().lower()
+    if not normalized:
+        return None
+    key = normalized.replace("-", "").replace("_", "").replace(" ", "")
+    mapping = {
+        "celo": "celoj",
+        "celoj": "celoj",
+        "target": "celoj",
+        "targets": "celoj",
+        "difino": "difino",
+        "rezolucio": "difino",
+        "sonkvalito": "sonkvalito",
+        "audio": "audio",
+        "filmeto": "filmeto",
+        "limo": "limo",
+        "kuketoj": "kuketoj",
+        "kuketojderetumilo": "kuketoj_de_retumilo",
+        "vojo": "vojo",
+        "subtitoloj": "subtitoloj",
+    }
+    return mapping.get(key)
+
+
+def _csv_effective_cell(raw: object) -> str | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    if text.lower() in {"null", "none"}:
+        return None
+    return text
+
+
+def _parse_csv_boolean(value: str, *, field: str, row_number: int) -> bool:
+    normalized = value.strip().lower()
+    if normalized in _CSV_TRUE_VALUES:
+        return True
+    if normalized in _CSV_FALSE_VALUES:
+        return False
+    raise ValueError(
+        f"CSV vico {row_number}: nevalida boolea valoro por {field!r}: {value!r}."
+    )
+
+
+def _parse_csv_targets(value: str) -> list[str]:
+    return [token for token in re.split(r"[,\s;]+", value.strip()) if token]
+
+
+def _parse_elsuti_csv_rows(
+    csv_path: Path,
+    *,
+    initial_state: dict[str, object],
+) -> list[dict[str, object]]:
+    if not csv_path.exists() or not csv_path.is_file():
+        raise ValueError(f"CSV-dosiero ne trovita: {csv_path}")
+    with csv_path.open("r", encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        headers = list(reader.fieldnames or [])
+        mapped_headers: dict[str, str] = {}
+        for header in headers:
+            option_name = _normalize_csv_option_name(header)
+            if option_name:
+                mapped_headers[header] = option_name
+        if not any(name == "celoj" for name in mapped_headers.values()):
+            raise ValueError(
+                "CSV-dosiero devas enhavi kolumnon 'celoj' "
+                "(ekzemplo: celoj,vojo,audio)."
+            )
+        state: dict[str, object] = dict(initial_state)
+        rows: list[dict[str, object]] = []
+        for row_number, row in enumerate(reader, start=2):
+            if not isinstance(row, dict):
+                continue
+            for raw_header, option_name in mapped_headers.items():
+                cell = _csv_effective_cell(row.get(raw_header))
+                if cell is None:
+                    continue
+                if option_name == "celoj":
+                    parsed_targets = _parse_csv_targets(cell)
+                    if not parsed_targets:
+                        raise ValueError(
+                            f"CSV vico {row_number}: malplena aŭ nevalida 'celoj'."
+                        )
+                    state["celoj"] = parsed_targets
+                elif option_name in {"audio", "filmeto"}:
+                    state[option_name] = _parse_csv_boolean(
+                        cell, field=option_name, row_number=row_number
+                    )
+                elif option_name in {"difino", "sonkvalito", "limo"}:
+                    try:
+                        state[option_name] = int(cell)
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"CSV vico {row_number}: nevalida nombro por "
+                            f"{option_name!r}: {cell!r}."
+                        ) from exc
+                elif option_name == "vojo":
+                    state[option_name] = Path(cell)
+                else:
+                    state[option_name] = cell
+            effective_targets = state.get("celoj")
+            if not isinstance(effective_targets, list) or not effective_targets:
+                raise ValueError(
+                    f"CSV vico {row_number}: mankas valida 'celoj' "
+                    "(neniu antaŭa valoro por transpreni)."
+                )
+            rows.append(
+                {
+                    "celoj": list(effective_targets),
+                    "difino": state.get("difino"),
+                    "sonkvalito": state.get("sonkvalito"),
+                    "audio": bool(state.get("audio", False)),
+                    "filmeto": bool(state.get("filmeto", False)),
+                    "limo": state.get("limo"),
+                    "kuketoj": state.get("kuketoj"),
+                    "kuketoj_de_retumilo": state.get("kuketoj_de_retumilo"),
+                    "vojo": state.get("vojo"),
+                    "subtitoloj": state.get("subtitoloj"),
+                }
+            )
+    return rows
+
+
 def _pick_closest_format_selector(
     info: dict[str, Any],
     *,
@@ -707,6 +833,20 @@ def _download_plan_table(
             _render_clickable_path(destination),
         )
     return table
+
+
+def _resolve_download_destination(vojo: Path | None) -> tuple[Path, str]:
+    if vojo is not None:
+        resolved_output_path = vojo.expanduser()
+        if not resolved_output_path.is_absolute():
+            resolved_output_path = _default_download_dir() / resolved_output_path
+        output_dir, outtmpl_name = _resolve_output_template(resolved_output_path)
+    else:
+        output_dir, outtmpl_name = (
+            _default_download_dir(),
+            "%(title).80s [%(id)s].%(ext)s",
+        )
+    return _ensure_folder(output_dir), outtmpl_name
 
 
 def _run_download(
@@ -1072,7 +1212,7 @@ def vidi(
 @app.command("elsuti")
 def elsuti(
     celoj: list[str] = typer.Argument(
-        ..., help="UUID aŭ URL de filmeto(j)/playlist(j)."
+        [], help="UUID aŭ URL de filmeto(j)/playlist(j). Ekzemplo: abc12345"
     ),
     difino: int | None = typer.Option(
         None, "-d", "--difino", help="Maksimuma video-rezolucio (ekz. 720, 1080)."
@@ -1113,6 +1253,18 @@ def elsuti(
         "--subtitoloj",
         help="Subtitoloj por elŝuti: auto, all, aŭ listo de lingvoj (ekz. eo,en,fr).",
     ),
+    csv_dosiero: Path | None = typer.Option(
+        None,
+        "--csv-dosiero",
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
+        resolve_path=False,
+        help=(
+            "CSV por plurbata elŝuto kun kolumnoj kiel celoj,vojo,audio. "
+            "Ekzemplo: --csv-dosiero /tmp/elsutoj.csv"
+        ),
+    ),
 ) -> None:
     """Elŝuti filmetojn/playlistojn kun difinita kvalito.
 
@@ -1123,79 +1275,181 @@ def elsuti(
       480p ≈ 8-15 MB/min, 720p ≈ 15-35 MB/min, 1080p ≈ 35-80 MB/min.
       480p por voĉo/kursoj, 720p por ĝenerala uzo, 1080p por detalaj bildoj.
     """
-    try:
-        format_selector = _build_format_selector(
-            difino=difino, sonkvalito=sonkvalito, audio=audio, filmeto=filmeto
-        )
-    except ValueError as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=1) from exc
-    targets = _resolve_targets(celoj)
-    if vojo is not None:
-        resolved_output_path = vojo.expanduser()
-        if not resolved_output_path.is_absolute():
-            resolved_output_path = _default_download_dir() / resolved_output_path
-        output_dir, outtmpl_name = _resolve_output_template(resolved_output_path)
+    if not celoj and csv_dosiero is None:
+        typer.echo("Mankas celo(j): uzu argumenton CELOJ aŭ --csv-dosiero.", err=True)
+        raise typer.Exit(code=1)
+
+    initial_state: dict[str, object] = {
+        "celoj": list(celoj),
+        "difino": difino,
+        "sonkvalito": sonkvalito,
+        "audio": audio,
+        "filmeto": filmeto,
+        "limo": limo,
+        "kuketoj": kuketoj,
+        "kuketoj_de_retumilo": kuketoj_de_retumilo,
+        "vojo": vojo,
+        "subtitoloj": subtitoloj,
+    }
+    if csv_dosiero is not None:
+        try:
+            specs = _parse_elsuti_csv_rows(csv_dosiero, initial_state=initial_state)
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
     else:
-        output_dir, outtmpl_name = (
-            _default_download_dir(),
-            "%(title).80s [%(id)s].%(ext)s",
+        specs = [initial_state]
+
+    if not specs:
+        typer.echo("Neniu elŝuta vico trovita en CSV.", err=True)
+        raise typer.Exit(code=1)
+
+    jobs: list[dict[str, object]] = []
+    for index, spec in enumerate(specs, start=1):
+        row_difino = spec.get("difino")
+        row_sonkvalito = spec.get("sonkvalito")
+        row_audio = bool(spec.get("audio", False))
+        row_filmeto = bool(spec.get("filmeto", False))
+        row_limo = spec.get("limo")
+        row_kuketoj = str(spec.get("kuketoj") or "") or None
+        row_browser = str(spec.get("kuketoj_de_retumilo") or "") or None
+        row_subtitoloj = str(spec.get("subtitoloj") or "") or None
+        row_vojo_raw = spec.get("vojo")
+        row_vojo = row_vojo_raw if isinstance(row_vojo_raw, Path) else None
+        row_targets_raw = spec.get("celoj") or []
+        row_targets = [str(item) for item in row_targets_raw if str(item).strip()]
+        if not row_targets:
+            typer.echo(f"Vico {index}: mankas celo(j).", err=True)
+            raise typer.Exit(code=1)
+        try:
+            format_selector = _build_format_selector(
+                difino=int(row_difino) if isinstance(row_difino, int) else None,
+                sonkvalito=(
+                    int(row_sonkvalito) if isinstance(row_sonkvalito, int) else None
+                ),
+                audio=row_audio,
+                filmeto=row_filmeto,
+            )
+        except ValueError as exc:
+            typer.echo(f"Vico {index}: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        targets = _resolve_targets(row_targets)
+        output_dir, outtmpl_name = _resolve_download_destination(row_vojo)
+        try:
+            plan = _collect_download_plan(
+                targets,
+                format_selector,
+                playlist_limo=int(row_limo) if isinstance(row_limo, int) else None,
+                cookies=row_kuketoj,
+                cookies_from_browser=row_browser,
+            )
+        except DownloadError as exc:
+            typer.echo(f"Taks-eraro (vico {index}): {exc}", err=True)
+            typer.echo(
+                "Sugesto: uzu --kuketoj aŭ --kuketoj-de-retumilo por "
+                "YouTube-bot-kontrolo.",
+                err=True,
+            )
+            typer.echo(_cookie_help_details(), err=True)
+            raise typer.Exit(code=1) from exc
+        jobs.append(
+            {
+                "index": index,
+                "targets": targets,
+                "difino": int(row_difino) if isinstance(row_difino, int) else None,
+                "sonkvalito": (
+                    int(row_sonkvalito) if isinstance(row_sonkvalito, int) else None
+                ),
+                "audio": row_audio,
+                "filmeto": row_filmeto,
+                "limo": int(row_limo) if isinstance(row_limo, int) else None,
+                "kuketoj": row_kuketoj,
+                "kuketoj_de_retumilo": row_browser,
+                "subtitoloj": row_subtitoloj,
+                "output_dir": output_dir,
+                "outtmpl_name": outtmpl_name,
+                "format_selector": format_selector,
+                "plan": plan,
+            }
         )
-    output_dir = _ensure_folder(output_dir)
-    try:
-        plan = _collect_download_plan(
-            targets,
-            format_selector,
-            playlist_limo=limo,
-            cookies=kuketoj,
-            cookies_from_browser=kuketoj_de_retumilo,
-        )
-    except DownloadError as exc:
-        typer.echo(f"Taks-eraro: {exc}", err=True)
-        typer.echo(
-            "Sugesto: uzu --kuketoj aŭ --kuketoj-de-retumilo por YouTube-bot-kontrolo.",
-            err=True,
-        )
-        typer.echo(_cookie_help_details(), err=True)
-        raise typer.Exit(code=1) from exc
-    count = len(plan)
-    total = sum(int(item.get("size_bytes") or 0) for item in plan)
+
+    count = sum(len(job.get("plan") or []) for job in jobs)
+    total = sum(
+        int(item.get("size_bytes") or 0)
+        for job in jobs
+        for item in (job.get("plan") or [])
+    )
     typer.echo(f"Taksita nombro de elŝutoj: {count}")
     typer.echo(f"Taksita grandeco: {_format_size(total)}")
-    if plan:
-        console.print(_download_plan_table(plan, output_dir, outtmpl_name))
+    for job in jobs:
+        plan = job.get("plan") or []
+        if len(jobs) > 1:
+            typer.echo(
+                f"Vico {job.get('index')} — {len(job.get('targets') or [])} celo(j):"
+            )
+        if plan:
+            console.print(
+                _download_plan_table(
+                    plan,
+                    Path(job["output_dir"]),
+                    str(job["outtmpl_name"]),
+                )
+            )
     raw = typer.prompt("Ĉu daŭrigi elŝuton? (J/n)", default="J")
     if raw.strip().lower()[:1] in {"n"}:
         typer.echo("Nuligita.")
         return
-    try:
-        if difino is not None or sonkvalito is not None:
-            probe_opts = {"quiet": True, "skip_download": True, "extract_flat": False}
-            with YoutubeDL(probe_opts) as ydl:
-                probe = ydl.extract_info(targets[0], download=False)
-            format_selector = _pick_closest_format_selector(
-                probe,
-                difino=difino,
-                sonkvalito=sonkvalito,
-                audio=audio,
-                filmeto=filmeto,
+
+    downloaded_total = 0
+    for job in jobs:
+        job_index = int(job.get("index") or 0)
+        targets = list(job.get("targets") or [])
+        format_selector = str(job.get("format_selector") or "best")
+        row_difino = job.get("difino")
+        row_sonkvalito = job.get("sonkvalito")
+        row_audio = bool(job.get("audio", False))
+        row_filmeto = bool(job.get("filmeto", False))
+        try:
+            if row_difino is not None or row_sonkvalito is not None:
+                probe_opts = {
+                    "quiet": True,
+                    "skip_download": True,
+                    "extract_flat": False,
+                }
+                with YoutubeDL(probe_opts) as ydl:
+                    probe = ydl.extract_info(targets[0], download=False)
+                format_selector = _pick_closest_format_selector(
+                    probe,
+                    difino=int(row_difino) if isinstance(row_difino, int) else None,
+                    sonkvalito=(
+                        int(row_sonkvalito)
+                        if isinstance(row_sonkvalito, int)
+                        else None
+                    ),
+                    audio=row_audio,
+                    filmeto=row_filmeto,
+                )
+            files = _run_download(
+                targets,
+                Path(job["output_dir"]),
+                format_selector,
+                playlist_limo=(
+                    int(job["limo"]) if isinstance(job.get("limo"), int) else None
+                ),
+                cookies=str(job.get("kuketoj") or "") or None,
+                cookies_from_browser=str(job.get("kuketoj_de_retumilo") or "") or None,
+                outtmpl_name=str(job["outtmpl_name"]),
+                subtitles=str(job.get("subtitoloj") or "") or None,
             )
-        files = _run_download(
-            targets,
-            output_dir,
-            format_selector,
-            playlist_limo=limo,
-            cookies=kuketoj,
-            cookies_from_browser=kuketoj_de_retumilo,
-            outtmpl_name=outtmpl_name,
-            subtitles=subtitoloj,
-        )
-    except DownloadError as exc:
-        typer.echo(f"Elŝut-eraro: {exc}", err=True)
-        typer.echo(
-            "Sugesto: uzu --kuketoj aŭ --kuketoj-de-retumilo por YouTube-bot-kontrolo.",
-            err=True,
-        )
-        typer.echo(_cookie_help_details(), err=True)
-        raise typer.Exit(code=1) from exc
-    typer.echo(f"Sukcese elŝutis {len(files)} dosieron(j)n.")
+            downloaded_total += len(files)
+        except DownloadError as exc:
+            prefix = f" (vico {job_index})" if job_index else ""
+            typer.echo(f"Elŝut-eraro{prefix}: {exc}", err=True)
+            typer.echo(
+                "Sugesto: uzu --kuketoj aŭ --kuketoj-de-retumilo por "
+                "YouTube-bot-kontrolo.",
+                err=True,
+            )
+            typer.echo(_cookie_help_details(), err=True)
+            raise typer.Exit(code=1) from exc
+    typer.echo(f"Sukcese elŝutis {downloaded_total} dosieron(j)n.")

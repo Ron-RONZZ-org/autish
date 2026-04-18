@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import re
 
 _EO_MAP: dict[str, str] = {
     "Usage:": "Uzado:",
@@ -39,10 +40,51 @@ _FR_MAP: dict[str, str] = {
 }
 
 
-def ui_lang() -> str:
+def _system_lang() -> str:
     raw = os.environ.get("LC_ALL") or os.environ.get("LANG") or ""
     code = raw.split(".")[0].split("_")[0].lower()
-    return code or "eo"
+    if re.fullmatch(r"[a-z]{2}", code):
+        return code
+    return "eo"
+
+
+def _profile_langs() -> list[str]:
+    try:
+        from autish.commands.uzanto import _load_profile  # noqa: PLC0415
+    except (ImportError, ModuleNotFoundError):
+        return []
+    profile = _load_profile(quiet=True)
+    raw_langs = profile.get("lingvoj")
+    if raw_langs is None:
+        raw_langs = profile.get("lingvo")
+    if isinstance(raw_langs, str):
+        raw_items: list[object] = [part.strip() for part in raw_langs.split(",")]
+    elif isinstance(raw_langs, list):
+        raw_items = raw_langs
+    else:
+        return []
+    langs: list[str] = []
+    for item in raw_items:
+        code = str(item).strip().lower()
+        if not re.fullmatch(r"[a-z]{2}", code):
+            continue
+        if code not in langs:
+            langs.append(code)
+    return langs
+
+
+def locale_preferences() -> list[str]:
+    langs = _profile_langs()
+    if langs:
+        return langs
+    return [_system_lang()]
+
+
+def ui_lang() -> str:
+    for code in locale_preferences():
+        if code in {"eo", "en", "fr"}:
+            return code
+    return "eo"
 
 
 def tr(eo: str, en: str, fr: str) -> str:

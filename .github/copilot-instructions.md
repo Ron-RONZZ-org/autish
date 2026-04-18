@@ -32,6 +32,13 @@
   User-facing help text and interactive hints should support Esperanto, English,
   and French locales where feasible, while command names/options and backend field
   semantics remain strictly Esperanto for portability and consistency.
+- **Locale resolution must prioritize `uzanto profilo lingvoj`.**
+  Resolve locale using `lingvoj` in user-specified order (first to last). Only
+  fall back to system locale when no valid profile language is configured.
+- **Wikidata fetches must follow user language preference order with fixed fallback.**
+  For `encik semantika` online metadata/search content, request and resolve text
+  using profile `lingvoj` order first; if not found, fall back to Esperanto (`eo`)
+  and then English (`en`).
 
 ---
 
@@ -102,6 +109,7 @@ autish/
 17. **Semantic-link help should be category-first and relevance-ranked** — for `encik semantika`, prefer subcommands by domain (e.g., `generala`, `persono`, `geografio`, `abstrakta`), list rdf/rdfs links first, then add the most relevant Wikidata properties as fallback.
 18. **`agordi` commands should persist to TOML under `~/.config/autish/`** — each command-level settings surface should map to a dedicated editable TOML file (e.g., `~/.config/autish/encik.toml`, `~/.config/autish/filmeto.toml`) so users can configure via CLI or direct file edits.
 19. **Encik semantic groups are user-editable CSV files** — store `encik semantika` groups in `~/.config/autish/semantika/*.csv` with columns `LIGILO,PRISKRIBO,ALIAZOJ`; each file corresponds to one semantic group/subcommand.
+20. **All command output must be clear, meaningful, succinct, and human-readable** — prefer resolved labels/text over raw IDs, and keep confirmations/results understandable at a glance.
 
 ---
 
