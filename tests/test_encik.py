@@ -9,6 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from autish.commands.encik import (
+    _contrast_accent_style,
     _entry_to_enc,
     _extract_markdown_ligilo_refs,
     _linked_graph_of,
@@ -160,6 +161,16 @@ class TestNormalizeUuidList:
         assert _normalize_uuid_list([]) == []
 
 
+class TestContrastAccentStyle:
+    def test_uses_blue_on_light_background(self, monkeypatch):
+        monkeypatch.setenv("COLORFGBG", "0;15")
+        assert _contrast_accent_style() == "blue"
+
+    def test_uses_bright_cyan_on_dark_background(self, monkeypatch):
+        monkeypatch.setenv("COLORFGBG", "15;0")
+        assert _contrast_accent_style() == "bright_cyan"
+
+
 class TestSemanticDirection:
     def test_reverse_superclassof_is_subclassof(self):
         assert _reverse_semantika_ligilo("rdfs:superClassOf") == "rdfs:subClassOf"
@@ -246,6 +257,17 @@ class TestParseEncFile:
         enc.write_text(
             'terminologio.eo = "Child"\ndifinio.eo = "Difino"\n'
             'superklaso = ["uuid-parent"]\n',
+            encoding="utf-8",
+        )
+        parsed = _parse_enc_file(enc)
+        assert parsed["superklaso"] == ["uuid-parent"]
+
+    def test_superklaso_legacy_uuid_first_pair(self, tmp_path):
+        enc = tmp_path / "legacy-superklaso.enc"
+        enc.write_text(
+            'terminologio.eo = "Child"\n'
+            'difinio.eo = "Difino"\n'
+            'superklaso = [["#uuid-parent", "Gepatra klaso"]]\n',
             encoding="utf-8",
         )
         parsed = _parse_enc_file(enc)
@@ -1376,6 +1398,25 @@ class TestEncikCLI:
         assert result.exit_code == 0, result.output
         assert "programaro" in result.output
 
+    def test_serci_lingvo_option_prioritizes_requested_language(self, tmp_path):
+        enc = tmp_path / "locale_pref.enc"
+        enc.write_text(
+            'terminologio.eo = "programaro"\n'
+            'terminologio.fr = "logiciel"\n'
+            'terminologio.en = "software"\n'
+            'difinio.eo = "aro de instrukcioj"\n'
+            'difinio.fr = "ensemble d instructions"\n'
+            'difinio.en = "set of instructions"\n',
+            encoding="utf-8",
+        )
+        add = runner.invoke(app, ["encik", "aldoni", str(enc)])
+        assert add.exit_code == 0, add.output
+
+        result = runner.invoke(app, ["encik", "serci", "software", "--lingvo", "fr,en"])
+        assert result.exit_code == 0, result.output
+        assert "logiciel" in result.output
+        assert "fr" in result.output
+
     def test_serci_single_result_keeps_entry_title_when_ligilo_present(self, tmp_path):
         parent = self._make_enc_file(tmp_path, "komputilo", "maŝino")
         r_parent = runner.invoke(app, ["encik", "aldoni", str(parent)])
@@ -2335,7 +2376,7 @@ class TestEncikCLI:
         )
         add = runner.invoke(app, ["encik", "aldoni", str(enc)])
         assert add.exit_code == 0, add.output
-        result = runner.invoke(app, ["encik", "vidi", "Dog", "-L", "en", "-a"])
+        result = runner.invoke(app, ["encik", "vidi", "Dog", "-l", "en", "-a"])
         assert result.exit_code == 0, result.output
         assert "Animal" in result.output
         assert "Aldona enhavo" in result.output
@@ -2704,6 +2745,69 @@ class TestEncikCLI:
         assert child_entry is not None
         assert child_entry.get("superklaso") == []
         assert [p["uuid"], "rdfs:subClassOf"] in (child_entry.get("ligilo") or [])
+
+    def test_encik_vidi_parses_legacy_superklaso_uuid_first_pair(self, tmp_path):
+        parent = tmp_path / "parent_legacy_super.enc"
+        parent.write_text(
+            'terminologio.eo = "Patra klaso"\ndifinio.eo = "Difino"\n',
+            encoding="utf-8",
+        )
+        add_parent = runner.invoke(app, ["encik", "aldoni", str(parent)])
+        assert add_parent.exit_code == 0, add_parent.output
+
+        import autish.commands.encik as enc_mod
+
+        p = enc_mod._find_by_title_exact("Patra klaso")
+        assert p is not None
+        child = tmp_path / "child_legacy_super.enc"
+        child.write_text(
+            'terminologio.eo = "Infana klaso"\n'
+            'difinio.eo = "Difino"\n'
+            f'superklaso = [["#{p["uuid"][:8]}", "Malnova etikedo"]]\n',
+            encoding="utf-8",
+        )
+        add_child = runner.invoke(app, ["encik", "aldoni", str(child)])
+        assert add_child.exit_code == 0, add_child.output
+
+        out = runner.invoke(app, ["encik", "vidi", "Infana klaso"])
+        assert out.exit_code == 0, out.output
+        assert "rdfs:subClassOf" in out.output
+        assert "Patra klaso" in out.output
+
+        child_entry = enc_mod._find_by_title_exact("Infana klaso")
+        assert child_entry is not None
+        assert [p["uuid"], "rdfs:subClassOf"] in (child_entry.get("ligilo") or [])
+
+    def test_encik_vidi_displays_legacy_stored_superklaso_pairs(
+        self, tmp_path, monkeypatch
+    ):
+        import autish.commands.encik as enc_mod
+
+        db_path = tmp_path / "encik.db"
+        monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
+
+        parent = _make_entry(
+            uuid=SAMPLE_UUID,
+            titolo="Hereda patro",
+            terminologio={"eo": "Hereda patro"},
+            difinoj={"eo": "Difino"},
+            difinio="Difino",
+        )
+        child = _make_entry(
+            uuid=CHILD_UUID,
+            titolo="Hereda infano",
+            terminologio={"eo": "Hereda infano"},
+            difinoj={"eo": "Difino"},
+            difinio="Difino",
+            superklaso=[[f"#{SAMPLE_UUID[:8]}", "Malnova etikedo"]],
+            ligilo=[],
+        )
+        _load_db_fixture([parent, child], db_path)
+
+        out = runner.invoke(app, ["encik", "vidi", "Hereda infano"])
+        assert out.exit_code == 0, out.output
+        assert "rdfs:subClassOf" in out.output
+        assert "Hereda patro" in out.output
 
     def test_encik_vidi_parent_shows_has_subclass_for_child(self, tmp_path):
         parent = tmp_path / "parent_has_sub.enc"

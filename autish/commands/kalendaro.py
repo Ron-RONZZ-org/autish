@@ -1424,7 +1424,7 @@ def serci(
     preciza: bool = typer.Option(
         False, "-p", "--preciza", help="Malŝalti malklaran kongruigon."
     ),
-    limo: int = typer.Option(50, "--limo", help="Maksimuma nombro da rezultoj."),
+    limo: int = typer.Option(50, "-lo", "--limo", help="Maksimuma nombro da rezultoj."),
 ) -> None:
     con = _connect()
     try:

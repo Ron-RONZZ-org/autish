@@ -3703,7 +3703,7 @@ def serci_mesagojn(
     konto: str | None = typer.Option(
         None, "-k", "--konto", help="Filtri laŭ konto-id aŭ retpoŝto."
     ),
-    limo: int = typer.Option(20, "-L", "--limo", help="Maksimuma nombro da rezultoj."),
+    limo: int = typer.Option(20, "-lo", "--limo", help="Maksimuma nombro da rezultoj."),
 ) -> None:
     """Serĉi mesaĝojn en loka retpoŝta datumbazo."""
     if not any([demando, de, subjekto, korpo, dosierujo, konto]):

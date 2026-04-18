@@ -1062,6 +1062,73 @@ def _render_internal_markdown_links(text: str, all_entries: list[dict] | None) -
     return _INTERNAL_LINK_RE.sub(_replace, text)
 
 
+def _render_ligilo_plain_text(
+    raw_ref: str, all_entries: list[dict] | None, *, show_ref: bool = True
+) -> str:
+    token = _normalize_inline_ref_token(raw_ref)
+    local_ref = token[1:] if token.startswith("#") else token
+    if all_entries is not None and local_ref:
+        linked = _find_entry(local_ref, all_entries)
+        if linked is not None:
+            linked_label = (
+                str(linked.get("teksto") or "").strip() or f"#{local_ref[:8]}"
+            )
+            if not show_ref:
+                return linked_label
+            short_uuid = str(linked.get("uuid") or "")[:8]
+            return f"{linked_label} (#{short_uuid})"
+    if token.lower().startswith("ec#"):
+        encik_ref = token[3:]
+        if not encik_ref:
+            return "ec#"
+        target = _find_encik_entry(encik_ref)
+        if target is None:
+            fallback = f"ec#{encik_ref[:8]}"
+            return fallback if show_ref else fallback
+        title = str(target.get("titolo") or "").strip() or f"ec#{encik_ref[:8]}"
+        if not show_ref:
+            return title
+        short_uuid = str(target.get("uuid") or "")[:8]
+        return f"{title} (ec#{short_uuid})"
+    return str(raw_ref or token)
+
+
+def _render_internal_plain_links(
+    text: str,
+    all_entries: list[dict] | None,
+    *,
+    show_ref: bool = False,
+) -> str:
+    raw_text = str(text or "")
+    if not raw_text:
+        return raw_text
+
+    def _replace(match: re.Match[str]) -> str:
+        label = match.group(1).strip()
+        target_token = _normalize_inline_ref_token(match.group(2))
+        if target_token.lower().startswith("ec#"):
+            return _render_ligilo_plain_text(
+                target_token, all_entries, show_ref=show_ref
+            )
+        raw_ref = target_token.lstrip("#")
+        if not raw_ref:
+            return label
+        if all_entries is None:
+            return label
+        target = _find_entry(raw_ref, all_entries)
+        if target is None:
+            return label
+        linked_label = (
+            str(target.get("teksto") or "").strip() or label or f"#{raw_ref[:8]}"
+        )
+        if not show_ref:
+            return linked_label
+        short_uuid = str(target.get("uuid") or raw_ref)[:8]
+        return f"{linked_label} (#{short_uuid})"
+
+    return _INTERNAL_LINK_RE.sub(_replace, raw_text)
+
+
 def _copy_to_clipboard(value: str, success_message: str) -> None:
     try:
         import pyperclip
@@ -2282,6 +2349,7 @@ def serci(
     ),
     limo: int = typer.Option(
         50,
+        "-lo",
         "--limo",
         help=tr(
             "Maksimuma nombro da rezultoj (defaŭlte 50).",
@@ -2700,8 +2768,14 @@ def importi(
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _entry_to_lines(entry: dict) -> list[str]:
-    """Convert an entry dict to a list of plain-text lines for the pager."""
+def _entry_to_lines(
+    entry: dict,
+    all_entries: list[dict] | None = None,
+    *,
+    montri_cxion: bool = True,
+) -> list[str]:
+    """Convert an entry dict to plain-text lines for the TUI pager."""
+    link_context = all_entries or [entry]
     uid_short = entry["uuid"][:8]
     lines: list[str] = [
         f"{entry['teksto']}  #{uid_short}",
@@ -2722,29 +2796,62 @@ def _entry_to_lines(entry: dict) -> list[str]:
     )
     tipo_str = kategorio + ("/" + tipo_value if tipo_value else "")
     _row("tipo:", tipo_str)
-    _row("temo:", entry.get("temo") or "")
-    _row("tono:", entry.get("tono") or "")
-    nivelo = entry.get("nivelo")
-    _row("nivelo:", f"{nivelo:.1f}" if nivelo is not None else "")
-    _row("aŭtoro:", entry.get("autoro") or "")
-    _row("verko:", entry.get("verko") or "")
+    _row(
+        "aŭtoro:",
+        _render_internal_plain_links(
+            str(entry.get("autoro") or ""), link_context, show_ref=False
+        ),
+    )
+    _row(
+        "verko:",
+        _render_internal_plain_links(
+            str(entry.get("verko") or ""), link_context, show_ref=False
+        ),
+    )
+    if montri_cxion:
+        _row(
+            "temo:",
+            _render_internal_plain_links(
+                str(entry.get("temo") or ""), link_context, show_ref=False
+            ),
+        )
+        _row(
+            "tono:",
+            _render_internal_plain_links(
+                str(entry.get("tono") or ""), link_context, show_ref=False
+            ),
+        )
+        nivelo = entry.get("nivelo")
+        _row("nivelo:", f"{nivelo:.1f}" if nivelo is not None else "")
 
     difinoj: list[str] = entry.get("difinoj") or []
     uzoj: list[str] = entry.get("uzoj") or []
     if difinoj:
         lines.append(f"  {'difinoj:':<14}")
         if len(difinoj) == 1:
-            lines.append(f"    {difinoj[0]}")
+            rendered_difino = _render_internal_plain_links(
+                difinoj[0], link_context, show_ref=False
+            )
+            lines.append(f"    {rendered_difino}")
             if uzoj and uzoj[0]:
-                lines.append(f"       /{uzoj[0]}/")
+                rendered_uzo = _render_internal_plain_links(
+                    uzoj[0], link_context, show_ref=False
+                )
+                lines.append(f"       /{rendered_uzo}/")
         else:
             for i, d in enumerate(difinoj, 1):
-                lines.append(f"    {i}. {d}")
+                rendered_difino = _render_internal_plain_links(
+                    d, link_context, show_ref=False
+                )
+                lines.append(f"    {i}. {rendered_difino}")
                 if i - 1 < len(uzoj) and uzoj[i - 1]:
-                    lines.append(f"       /{uzoj[i - 1]}/")
+                    rendered_uzo = _render_internal_plain_links(
+                        uzoj[i - 1], link_context, show_ref=False
+                    )
+                    lines.append(f"       /{rendered_uzo}/")
 
     etikedoj: dict[str, str] = entry.get("etikedoj") or {}
-    if etikedoj:
+    if montri_cxion and etikedoj:
         lines.append(f"  {'etikedoj:':<14}")
         for k, v in etikedoj.items():
             lines.append(f"    {k}: {v}")
@@ -2753,36 +2860,47 @@ def _entry_to_lines(entry: dict) -> list[str]:
     if ligiloj:
         rendered_links: list[str] = []
         for item in ligiloj:
-            raw_ref = str(item or "")
-            external = _render_encik_ligilo_summary(raw_ref)
-            rendered_links.append(external if external is not None else raw_ref)
+            raw_ref = str(item or "").strip()
+            if not raw_ref:
+                continue
+            rendered_links.append(
+                _render_ligilo_plain_text(raw_ref, link_context, show_ref=True)
+            )
         _row("ligiloj:", ", ".join(rendered_links))
 
-    lines.append("")
-    _row("kreita:", (entry.get("kreita_je") or "")[:19])
-    modifita = entry.get("modifita_je") or ""
-    kreita = entry.get("kreita_je") or ""
-    if modifita and modifita != kreita:
-        _row("modifita:", modifita[:19])
+    if montri_cxion:
+        lines.append("")
+        _row("kreita:", (entry.get("kreita_je") or "")[:19])
+        modifita = entry.get("modifita_je") or ""
+        kreita = entry.get("kreita_je") or ""
+        if modifita and modifita != kreita:
+            _row("modifita:", modifita[:19])
 
     return lines
 
 
-def _entries_to_lines(entries: list[dict]) -> list[str]:
-    """Convert a list of entries to pager-ready plain-text lines."""
+def _entries_to_lines(
+    entries: list[dict], all_entries: list[dict] | None = None
+) -> list[str]:
+    """Convert entries to pager-ready plain-text lines."""
     if not entries:
         return ["Neniu rezulto trovita. (No results found.)"]
+    link_context = all_entries or entries
+    show_ligiloj = any(bool(e.get("ligiloj")) for e in entries)
     col_uuid = 10
     col_teksto = 28
     col_lingvo = 8
     col_tipo = 18
     col_niv = 5
     col_dato = 12
+    col_ligiloj = 28
     header = (
         f"{'UUID':<{col_uuid}} {'Teksto':<{col_teksto}} "
         f"{'Lingvo':<{col_lingvo}} {'Tipo':<{col_tipo}} "
         f"{'Niv.':<{col_niv}} {'Dato':<{col_dato}}"
     )
+    if show_ligiloj:
+        header += f" {'Ligiloj':<{col_ligiloj}}"
     sep = "─" * len(header)
     lines = [header, sep]
     for e in entries:
@@ -2799,11 +2917,24 @@ def _entries_to_lines(entries: list[dict]) -> list[str]:
         nivelo = e.get("nivelo")
         niv_str = f"{nivelo:.1f}" if nivelo is not None else ""
         teksto = e["teksto"][:col_teksto]
-        lines.append(
+        row = (
             f"{uid_short:<{col_uuid}} {teksto:<{col_teksto}} "
             f"{(e.get('lingvo') or ''):<{col_lingvo}} {tipo_str:<{col_tipo}} "
             f"{niv_str:<{col_niv}} {date_str:<{col_dato}}"
         )
+        if show_ligiloj:
+            ligiloj = e.get("ligiloj") or []
+            rendered_links = "-"
+            if ligiloj:
+                rendered_links = " | ".join(
+                    _render_ligilo_plain_text(
+                        str(item or ""), link_context, show_ref=False
+                    )
+                    for item in ligiloj
+                    if str(item or "").strip()
+                )
+            row += f" {rendered_links[:col_ligiloj]:<{col_ligiloj}}"
+        lines.append(row)
     return lines
 
 
@@ -3112,8 +3243,15 @@ def _interactive_mode() -> None:
         save_modified_entry=_tui_save_modified,
         delete_entry=_tui_delete,
         undo=_undo_action,
-        render_entry=_entry_to_lines,
-        render_results=_entries_to_lines,
+        render_entry=lambda entry: _entry_to_lines(
+            entry, _load_entries(), montri_cxion=True
+        ),
+        render_entry_default=lambda entry: _entry_to_lines(
+            entry, _load_entries(), montri_cxion=False
+        ),
+        render_results=lambda entries: _entries_to_lines(
+            entries, all_entries=_load_entries()
+        ),
         detect_kategorio=_detect_kategorio,
         normalize_tipo=_normalize_tipo,
         normalize_tono=_normalize_tono,

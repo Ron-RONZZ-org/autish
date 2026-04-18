@@ -1005,7 +1005,7 @@ def serci(
         False, "-a", "--aldona", help="Montri ankaŭ views kaj abonantojn."
     ),
     limo: int = typer.Option(
-        20, "-l", "--limo", min=1, help="Maksimuma nombro de rezultoj."
+        20, "-lo", "--limo", min=1, help="Maksimuma nombro de rezultoj."
     ),
     kuketoj: str | None = typer.Option(
         None, "--kuketoj", help="Vojo al cookies.txt por YouTube aŭtentigo."
@@ -1143,7 +1143,7 @@ def vidi(
     celoj: list[str] = typer.Argument(..., help="UUID aŭ URL de filmeto(j)."),
     limo: int | None = typer.Option(
         None,
-        "-l",
+        "-lo",
         "--limo",
         min=1,
         help="Por playlist: elŝuti nur unuajn N elementojn.",
@@ -1226,7 +1226,7 @@ def elsuti(
     ),
     limo: int | None = typer.Option(
         None,
-        "-l",
+        "-lo",
         "--limo",
         min=1,
         help="Por playlist: elŝuti nur unuajn N elementojn.",

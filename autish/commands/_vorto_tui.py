@@ -21,6 +21,8 @@ import locale
 from collections.abc import Callable
 from difflib import SequenceMatcher
 
+from autish.commands._tui_editor_common import word_left as _word_left
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Key constants
 # ──────────────────────────────────────────────────────────────────────────────
@@ -31,6 +33,7 @@ _CR = ord("\r")
 _CTRL_C = 3
 _CTRL_D = 4
 _CTRL_H = 8   # legacy backspace in some terminals
+_CTRL_W = 23  # Ctrl+W (delete previous word in INSERT mode)
 _CTRL_R = 18  # Ctrl+R (redo / paste-register in insert)
 
 # Ctrl+Arrow — common xterm values (with keypad(True) these are in terminfo).
@@ -194,6 +197,12 @@ class LineEditor:
             if self.pos > 0:
                 del self.buf[self.pos - 1]
                 self.pos -= 1
+                self._dirty = True
+        elif key == _CTRL_W:
+            start_pos = _word_left(self.text, self.pos)
+            if start_pos < self.pos:
+                del self.buf[start_pos : self.pos]
+                self.pos = start_pos
                 self._dirty = True
         elif key == curses.KEY_DC:
             if self.pos < len(self.buf):
@@ -1369,6 +1378,7 @@ class VortoTUI:
         find_entry: Callable[[str, list[dict]], dict | None],
         now_iso: Callable[[], str],
         make_uuid: Callable[[], str],
+        render_entry_default: Callable[[dict], list[str]] | None = None,
         # Rubujo (recycle bin) callbacks — optional for backward compatibility
         load_rubujo: Callable[[], list[dict]] | None = None,
         render_rubujo_results: Callable[[list[dict]], list[str]] | None = None,
@@ -1381,6 +1391,7 @@ class VortoTUI:
         self._delete_entry = delete_entry
         self._undo = undo
         self._render_entry = render_entry
+        self._render_entry_default_cb = render_entry_default
         self._render_results = render_results
         self._detect_kategorio = detect_kategorio
         self._normalize_tipo = normalize_tipo
@@ -1426,6 +1437,7 @@ class VortoTUI:
         self._mode = "NORMAL"   # NORMAL | COMMAND | SEARCH
         self._cmd_buf = ""
         self._status_msg = ""
+        self._force_full_welcome_redraw = True
 
         self._welcome_loop()
 
@@ -1433,9 +1445,14 @@ class VortoTUI:
 
     def _welcome_loop(self) -> None:
         while True:
-            self._draw_welcome()
+            full_redraw = self._mode == "NORMAL" or getattr(
+                self, "_force_full_welcome_redraw", True
+            )
+            self._draw_welcome(full=full_redraw)
+            self._force_full_welcome_redraw = False
             key = _getch_unicode(self.stdscr)
             ch = chr(key) if 0 < key < 256 else ""
+            prev_mode = self._mode
 
             if self._mode == "COMMAND":
                 done = self._cmd_key(key, ch)
@@ -1473,24 +1490,26 @@ class VortoTUI:
                     self._run_pager(_HELP_LINES, title="Helpo")
                 elif key == curses.KEY_RESIZE:
                     pass  # just redraw on next iteration
+            if key == curses.KEY_RESIZE or self._mode != prev_mode:
+                self._force_full_welcome_redraw = True
 
     # ── drawing ──────────────────────────────────────────────────────────────
 
-    def _draw_welcome(self) -> None:
+    def _draw_welcome(self, *, full: bool = True) -> None:
         stdscr = self.stdscr
-        stdscr.erase()
         h, w = stdscr.getmaxyx()
+        if full:
+            stdscr.erase()
+            # Centre the welcome art vertically
+            art_h = len(_WELCOME_LINES)
+            top = max(0, (h - art_h - 2) // 2)  # -2 for status bar
 
-        # Centre the welcome art vertically
-        art_h = len(_WELCOME_LINES)
-        top = max(0, (h - art_h - 2) // 2)  # -2 for status bar
-
-        for i, line in enumerate(_WELCOME_LINES):
-            row = top + i
-            if row >= h - 1:
-                break
-            col = max(0, (w - len(line)) // 2)
-            _safe_addstr(stdscr, row, col, line[:w - 1], curses.A_DIM)
+            for i, line in enumerate(_WELCOME_LINES):
+                row = top + i
+                if row >= h - 1:
+                    break
+                col = max(0, (w - len(line)) // 2)
+                _safe_addstr(stdscr, row, col, line[:w - 1], curses.A_DIM)
 
         # Status / cmd / search bar at very bottom
         if self._mode == "COMMAND":
@@ -1594,7 +1613,16 @@ class VortoTUI:
     def _view_entry(self, entry: dict) -> None:
         """Open pager for a single entry; handle m (modify) and f/DELETE (delete)."""
         while True:
-            default_lines = self._render_entry_default(entry)
+            if self._render_entry_default_cb is not None:
+                default_lines = self._render_entry_default_cb(entry)
+                if not any("p:detaloj" in ln for ln in default_lines):
+                    default_lines = [
+                        *default_lines,
+                        "",
+                        "  p:detaloj  m:modifi  f:forigi  q:reen",
+                    ]
+            else:
+                default_lines = self._render_entry_default(entry)
             detail_lines = self._render_entry(entry)
             pager = Pager(
                 self.stdscr,

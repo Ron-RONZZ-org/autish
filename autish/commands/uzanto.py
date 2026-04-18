@@ -330,7 +330,7 @@ def profilo_vidi(
     naskig_loko: bool = typer.Option(
         False, "--naskig-loko", help="Show place of birth."
     ),
-    lingvoj: bool = typer.Option(False, "-L", "--lingvoj", help="Show languages."),
+    lingvoj: bool = typer.Option(False, "-l", "--lingvoj", help="Show languages."),
     organizo: bool = typer.Option(False, "-o", "--organizo", help="Show organisation."),
     organiza_identiga_numero: bool = typer.Option(
         False, "--organiza-identiga-numero", help="Show organisation identifier."
@@ -410,7 +410,7 @@ def profilo_modifi(
     ),
     lingvoj: str | None = typer.Option(
         None,
-        "-L",
+        "-l",
         "--lingvoj",
         help="Set languages (comma-separated 2-letter codes, e.g. 'en,fr').",
     ),

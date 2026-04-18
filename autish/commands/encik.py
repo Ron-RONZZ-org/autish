@@ -739,6 +739,36 @@ def _canonicalize_ligilo_ref(ref: str | None) -> str:
     return token
 
 
+def _looks_like_uuid_ref(token: str) -> bool:
+    raw = str(token or "").strip()
+    if raw.startswith("#"):
+        return True
+    if raw.lower().startswith(("ec#", "vt#")):
+        return True
+    candidate = _clean_uuid_ref(raw)
+    if not candidate:
+        return False
+    lowered = candidate.lower()
+    if re.fullmatch(r"[0-9a-f]{8}", lowered):
+        return True
+    if re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", lowered):
+        return True
+    return False
+
+
+def _canonicalize_superklaso_ref(ref: str | None) -> str:
+    candidate = _canonicalize_ligilo_ref(ref)
+    if not candidate:
+        return ""
+    lowered = candidate.lower()
+    if lowered.startswith("vt#"):
+        return ""
+    sem = _normalize_semantika_ligilo(candidate)
+    if _is_known_semantika_ligilo(sem):
+        return ""
+    return _clean_uuid_ref(candidate)
+
+
 def _find_by_title_exact(titolo: str) -> dict | None:
     conn = _get_conn()
     try:
@@ -761,7 +791,7 @@ def _build_subklaso_count_map(entries: list[dict]) -> dict[str, int]:
     uuids = {str(e.get("uuid") or "") for e in entries}
     out: dict[str, int] = {uid: 0 for uid in uuids if uid}
     for entry in entries:
-        for parent_ref in _normalize_uuid_list(entry.get("superklaso") or []):
+        for parent_ref in _normalise_superklaso_refs(entry.get("superklaso") or []):
             ref = str(parent_ref or "").strip()
             if not ref:
                 continue
@@ -1025,7 +1055,7 @@ _ENC_TEMPLATE = """\
 {enhavo}
 \"\"\"
 
-# Superklasoj: listo de ["Terminologio", "uuid"] paroj
+# Superklasoj (retro-kongrue): UUID-oj aŭ [Terminologio, UUID] paroj
 superklaso = {superklaso}
 
 # Ligiloj: listo de UUID-oj aŭ [UUID, semantika_tipo]
@@ -2458,32 +2488,67 @@ def _normalise_uuids(raw: list | str) -> list:
 
 def _normalise_superklaso_refs(raw: list | str) -> list[str]:
     if isinstance(raw, str):
-        cleaned = _clean_uuid_ref(raw)
+        cleaned = _canonicalize_superklaso_ref(raw)
         return [cleaned] if cleaned else []
     if not isinstance(raw, list):
         return []
     out: list[str] = []
     for item in raw:
         if isinstance(item, str):
-            cleaned = _clean_uuid_ref(item)
+            cleaned = _canonicalize_superklaso_ref(item)
             if cleaned:
                 out.append(cleaned)
             continue
         if isinstance(item, list):
+            first_raw = str(item[0]) if item else ""
+            second_raw = str(item[1]) if len(item) >= 2 else ""
+            first_clean = _canonicalize_superklaso_ref(first_raw)
+            second_clean = _canonicalize_superklaso_ref(second_raw)
+            first_sem = _is_known_semantika_ligilo(
+                _normalize_semantika_ligilo(first_raw)
+            )
+            second_sem = _is_known_semantika_ligilo(
+                _normalize_semantika_ligilo(second_raw)
+            )
+
             candidate = ""
-            if len(item) >= 2:
-                candidate = str(item[1])
-            elif item:
-                candidate = str(item[0])
-            cleaned = _clean_uuid_ref(candidate)
-            if cleaned:
-                out.append(cleaned)
+            if second_sem and first_clean:
+                candidate = first_clean
+            elif first_sem and second_clean:
+                candidate = second_clean
+            elif first_clean and second_clean:
+                first_resolved = _find_by_uuid(first_clean) is not None
+                second_resolved = _find_by_uuid(second_clean) is not None
+                if first_resolved and not second_resolved:
+                    candidate = first_clean
+                elif second_resolved and not first_resolved:
+                    candidate = second_clean
+                elif _looks_like_uuid_ref(second_raw):
+                    candidate = second_clean
+                elif _looks_like_uuid_ref(first_raw):
+                    candidate = first_clean
+                else:
+                    # Legacy .enc exported this pair as [Titolo, UUID].
+                    candidate = second_clean
+            else:
+                if second_clean:
+                    candidate = second_clean
+                elif first_clean:
+                    candidate = first_clean
+                else:
+                    for raw_part in item[2:]:
+                        normalized_part = _canonicalize_superklaso_ref(str(raw_part))
+                        if normalized_part:
+                            candidate = normalized_part
+                            break
+            if candidate:
+                out.append(candidate)
     return _normalize_uuid_list(out)
 
 
 def _merge_superklaso_into_ligilo(superklaso: list[str], ligilo: list) -> list:
     items = _normalize_ligilo_items(ligilo)
-    for parent_ref in _normalize_uuid_list(superklaso):
+    for parent_ref in _normalise_superklaso_refs(superklaso):
         has_pair = any(
             str(item.get("uuid") or "") == parent_ref
             and _normalize_semantika_ligilo(item.get("tipo")) == "rdfs:subClassOf"
@@ -2495,7 +2560,7 @@ def _merge_superklaso_into_ligilo(superklaso: list[str], ligilo: list) -> list:
 
 
 def _canonicalize_class_alias_fields(entry: dict) -> dict:
-    superklaso = _normalize_uuid_list(entry.get("superklaso") or [])
+    superklaso = _normalise_superklaso_refs(entry.get("superklaso") or [])
     ligilo = _serialize_ligilo_items(_normalize_ligilo_items(entry.get("ligilo") or []))
     entry["ligilo"] = _merge_superklaso_into_ligilo(superklaso, ligilo)
     entry["superklaso"] = []
@@ -2526,7 +2591,7 @@ def _build_class_relation_maps(
         if not uid:
             continue
 
-        for parent_ref in _normalize_uuid_list(entry.get("superklaso") or []):
+        for parent_ref in _normalise_superklaso_refs(entry.get("superklaso") or []):
             parent_uuid = _resolve_ref(parent_ref)
             if not parent_uuid:
                 continue
@@ -2575,11 +2640,15 @@ def _normalize_ligilo_items(raw: list | str) -> list[dict[str, str | None]]:
 def _display_ligilo_items(
     entry_or_ligilo: dict | list | str,
 ) -> list[dict[str, str | None]]:
-    raw_ligilo = (
-        entry_or_ligilo.get("ligilo") or []
-        if isinstance(entry_or_ligilo, dict)
-        else entry_or_ligilo
-    )
+    if isinstance(entry_or_ligilo, dict):
+        raw_ligilo = _merge_superklaso_into_ligilo(
+            _normalise_superklaso_refs(entry_or_ligilo.get("superklaso") or []),
+            _serialize_ligilo_items(
+                _normalize_ligilo_items(entry_or_ligilo.get("ligilo") or [])
+            ),
+        )
+    else:
+        raw_ligilo = entry_or_ligilo
     raw_items = _normalize_ligilo_items(raw_ligilo)
     deduped: list[dict[str, str | None]] = []
     seen: set[tuple[str, str | None]] = set()
@@ -2819,7 +2888,7 @@ def _collect_encik_incoming_refs(
         if source_uuid in target_uuids:
             continue
         source_title = str(source.get("titolo") or source_uuid[:8] or "-")
-        for parent_ref in _normalize_uuid_list(source.get("superklaso") or []):
+        for parent_ref in _normalise_superklaso_refs(source.get("superklaso") or []):
             if parent_ref in target_uuids:
                 warnings.append(
                     "- "
@@ -2874,7 +2943,7 @@ def _sync_bidirectional_relations_for_entry(
     )
     current_sup = [
         resolved
-        for raw in _normalize_uuid_list(current.get("superklaso") or [])
+        for raw in _normalise_superklaso_refs(current.get("superklaso") or [])
         if (resolved := _resolve_ref(raw))
     ]
     current["ligilo"] = _serialize_ligilo_items(current_lig_items)
@@ -3728,21 +3797,40 @@ def _load_user_language_preferences() -> tuple[list[str], bool]:
     return valid, invalid_found
 
 
+def _terminal_has_light_background() -> bool:
+    colorfgbg = str(os.environ.get("COLORFGBG") or "").strip()
+    if not colorfgbg:
+        return False
+    parts = [part for part in re.split(r"[;:]", colorfgbg) if part]
+    if not parts:
+        return False
+    try:
+        bg = int(parts[-1])
+    except ValueError:
+        return False
+    return bg in {7, 15} or bg >= 10
+
+
+def _contrast_accent_style() -> str:
+    """Return an accent color with improved contrast against terminal background."""
+    return "blue" if _terminal_has_light_background() else "bright_cyan"
+
+
 def _language_preference_hint() -> str:
     langs, _ = _load_user_language_preferences()
     ui_lang = langs[0] if langs and langs[0] in {"eo", "en", "fr"} else "eo"
     messages = {
         "eo": (
             "Konsilo: agordu lingvojn per "
-            "uzanto profilo modifi -L eo,en,fr por personecigi citaĵojn."
+            "uzanto profilo modifi -l eo,en,fr por personecigi citaĵojn."
         ),
         "en": (
             "Hint: set languages with "
-            "uzanto profilo modifi -L eo,en,fr to personalize quote display."
+            "uzanto profilo modifi -l eo,en,fr to personalize quote display."
         ),
         "fr": (
             "Astuce : définissez vos langues avec "
-            "uzanto profilo modifi -L eo,en,fr pour personnaliser les citations."
+            "uzanto profilo modifi -l eo,en,fr pour personnaliser les citations."
         ),
     }
     return messages.get(ui_lang, messages["eo"])
@@ -3763,13 +3851,26 @@ def _open_html_document(html_doc: str) -> str:
     return tmp_path
 
 
-def _entry_user_locale_title(entry: dict) -> str:
-    preferred_langs, _ = _load_user_language_preferences()
-    env_lang = (os.environ.get("LC_ALL") or os.environ.get("LANG") or "").split(".")[0]
-    env_lang = env_lang.split("_")[0].lower()
-    language_order = list(preferred_langs)
-    if re.fullmatch(r"[a-z]{2}", env_lang) and env_lang not in language_order:
-        language_order.append(env_lang)
+def _entry_user_locale_title(
+    entry: dict, *, preferred_langs: list[str] | None = None
+) -> str:
+    language_order: list[str] = []
+    if preferred_langs:
+        for raw_code in preferred_langs:
+            code = str(raw_code or "").strip().lower()
+            if re.fullmatch(r"[a-z]{2}", code) and code not in language_order:
+                language_order.append(code)
+    else:
+        profile_langs, _ = _load_user_language_preferences()
+        for code in profile_langs:
+            if code not in language_order:
+                language_order.append(code)
+        env_lang = (os.environ.get("LC_ALL") or os.environ.get("LANG") or "").split(
+            "."
+        )[0]
+        env_lang = env_lang.split("_")[0].lower()
+        if re.fullmatch(r"[a-z]{2}", env_lang) and env_lang not in language_order:
+            language_order.append(env_lang)
     terms_obj = entry.get("terminologio")
     terms = terms_obj if isinstance(terms_obj, dict) else {}
     for code in language_order:
@@ -3779,6 +3880,9 @@ def _entry_user_locale_title(entry: dict) -> str:
     eo_term = str(terms.get("eo") or "").strip()
     if eo_term:
         return eo_term
+    en_term = str(terms.get("en") or "").strip()
+    if en_term:
+        return en_term
     title = str(entry.get("titolo") or "").strip()
     if title:
         return title
@@ -3789,13 +3893,15 @@ def _entry_user_locale_title(entry: dict) -> str:
     return ""
 
 
-def _print_candidates(candidates: list[dict]) -> None:
+def _print_candidates(
+    candidates: list[dict], *, preferred_langs: list[str] | None = None
+) -> None:
     table = Table(show_header=True, header_style="dim", box=None)
     table.add_column("#", style="dim", width=3)
     table.add_column("UUID", style="dim", width=10)
     table.add_column("Titolo")
     for i, e in enumerate(candidates, 1):
-        display_title = _entry_user_locale_title(e)
+        display_title = _entry_user_locale_title(e, preferred_langs=preferred_langs)
         table.add_row(str(i), e["uuid"][:8], display_title)
     console.print(table)
 
@@ -4688,6 +4794,7 @@ def modifi(
     ),
     ligilo: list[str] | None = typer.Option(
         None,
+        "-L",
         "--ligilo",
         help=(
             "Anstataŭigi ligilo-liston (ripetebla). Formoj: UUID aŭ UUID:semantiko "
@@ -4833,7 +4940,7 @@ def modifi(
         entry["enhavo"] = enhavo
     if superklaso is not None:
         merged_from_super = _merge_superklaso_into_ligilo(
-            _normalize_uuid_list(superklaso),
+            _normalise_superklaso_refs(superklaso),
             _serialize_ligilo_items(_normalize_ligilo_items(entry.get("ligilo") or [])),
         )
         entry["ligilo"] = merged_from_super
@@ -4897,9 +5004,9 @@ def vidi(
     ),
     lingvo: str | None = typer.Option(
         None,
-        "-L",
+        "-l",
         "--lingvo",
-        help="Montri en difinita lingvo (ekz. eo, en, id). Ekzemplo: -L en",
+        help="Montri en difinita lingvo (ekz. eo, en, id). Ekzemplo: -l en",
     ),
     montri_cxion: bool = typer.Option(
         False,
@@ -5225,7 +5332,7 @@ def _print_semantika_kategorio(kategorio: str) -> None:
         header_style="bold",
         expand=False,
     )
-    table.add_column("LIGILO", style="cyan", no_wrap=True)
+    table.add_column("LIGILO", style=_contrast_accent_style(), no_wrap=True)
     table.add_column("PRISKRIBO", style="white")
     table.add_column("ALIAZOJ", style="dim")
     for row in rows:
@@ -5337,7 +5444,7 @@ def semantika_ligilo_serci(
     table = Table(show_header=True, header_style="bold", expand=False)
     table.add_column("FONTO", style="dim", no_wrap=True)
     table.add_column("GRUPO", style="dim", no_wrap=True)
-    table.add_column("LIGILO", style="cyan", no_wrap=True)
+    table.add_column("LIGILO", style=_contrast_accent_style(), no_wrap=True)
     table.add_column("PRISKRIBO")
     table.add_column("ALIAZOJ", style="dim")
     for row in combined:
@@ -5553,6 +5660,15 @@ def serci(
         None,
         help="Demando por serĉo (titolo defaŭlte, aŭ plena teksto kun -t).",
     ),
+    lingvo: str | None = typer.Option(
+        None,
+        "-l",
+        "--lingvo",
+        help=(
+            "Preferataj lingvokodoj por montri rezultojn (komo-disigitaj). "
+            "Ekzemplo: -l fr,en"
+        ),
+    ),
     teksto: bool = typer.Option(
         False,
         "-t",
@@ -5605,7 +5721,7 @@ def serci(
     ),
     ligilo_ref: str | None = typer.Option(
         None,
-        "-l",
+        "-L",
         "--ligilo",
         help="Montri rilatan mapon (super/sub/ligilo) de nodo en HTML.",
     ),
@@ -5630,7 +5746,7 @@ def serci(
     ),
     limo: int = typer.Option(
         5,
-        "-L",
+        "-lo",
         "--limo",
         help=(
             "Por -s/-S: maksimuma profundo (0 = senlima). Por -p: maksimumaj rezultoj."
@@ -5694,6 +5810,25 @@ def serci(
     if (kopii_uuid or semantika_kopii) and html:
         typer.echo("--kopii/--semantika-kopii ne kongruas kun --html.", err=True)
         raise typer.Exit(code=1)
+    preferred_search_langs: list[str] = []
+    if lingvo is not None:
+        try:
+            preferred_search_langs = _normalize_lingvo_codes(lingvo, field="--lingvo")
+        except ValueError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+
+    def _preferred_search_lang(entry: dict) -> str | None:
+        if not preferred_search_langs:
+            return None
+        terms_obj = entry.get("terminologio")
+        terms = terms_obj if isinstance(terms_obj, dict) else {}
+        defs_obj = entry.get("difinoj")
+        defs = defs_obj if isinstance(defs_obj, dict) else {}
+        for code in preferred_search_langs:
+            if str(terms.get(code) or "").strip() or str(defs.get(code) or "").strip():
+                return code
+        return None
 
     if semantiko:
         rel = _normalize_semantika_ligilo(semantiko)
@@ -5741,7 +5876,7 @@ def serci(
             )
         return
 
-    # For -s/-S/-l/-p we need to resolve the root node.
+    # For -s/-S/-L/-p we need to resolve the root node.
     # `encik serci -p <ref>` uses positional `demando` as the root reference.
     root_ref = subklasoj or superklasoj or ligilo_ref
     if root_ref is None and paralela:
@@ -5802,7 +5937,7 @@ def serci(
                 typer.echo(f"  #{e['uuid'][:8]}  {e['titolo']}")
             return
 
-        # ── -l / --ligilo ──────────────────────────────────────────────────
+        # ── -L / --ligilo ──────────────────────────────────────────────────
         if ligilo_ref is not None:
             graph_nodes, graph_edges = _linked_graph_of(root["uuid"], max_depth=depth)
             if not graph_nodes:
@@ -5824,7 +5959,9 @@ def serci(
                 raise typer.Exit(code=1)
             short_ref = f"#{entry_uuid[:8]}"
             if semantika_kopii:
-                display_title = _entry_user_locale_title(entry)
+                display_title = _entry_user_locale_title(
+                    entry, preferred_langs=preferred_search_langs
+                )
                 payload = f"[{display_title}]({short_ref})"
                 _copy_to_clipboard(payload, "Kopiis semantikan referencon al tondujo.")
                 return
@@ -5866,9 +6003,9 @@ def serci(
             return
         if len(candidates) == 1:
             _copy_selected_entry(candidates[0])
-            _display_entry(candidates[0])
+            _display_entry(candidates[0], lingvo=_preferred_search_lang(candidates[0]))
             return
-        _print_candidates(candidates)
+        _print_candidates(candidates, preferred_langs=preferred_search_langs)
         raw = typer.prompt(
             "Elektu numeron por vidi detalojn/kopii (aŭ Enter por preteriri)",
             default="",
@@ -5878,7 +6015,9 @@ def serci(
                 idx = int(raw.strip()) - 1
                 if 0 <= idx < len(candidates):
                     _copy_selected_entry(candidates[idx])
-                    _display_entry(candidates[idx])
+                    _display_entry(
+                        candidates[idx], lingvo=_preferred_search_lang(candidates[idx])
+                    )
             except ValueError:
                 pass
         return

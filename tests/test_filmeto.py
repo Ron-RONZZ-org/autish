@@ -97,7 +97,7 @@ def test_serci_limo_limits_results(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "_DATA_DIR", tmp_path)
     monkeypatch.setattr(mod, "_CACHE_FILE", tmp_path / "filmeto_cache.json")
     monkeypatch.setattr(mod, "YoutubeDL", _ManyYDL)
-    result = runner.invoke(app, ["filmeto", "serci", "Test", "-l", "3"])
+    result = runner.invoke(app, ["filmeto", "serci", "Test", "-lo", "3"])
     assert result.exit_code == 0, result.output
     assert "Test 0" in result.output
     assert "Test 1" in result.output
@@ -192,7 +192,9 @@ def test_serci_playlist_option_shows_playlist_table(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "_DATA_DIR", tmp_path)
     monkeypatch.setattr(mod, "_CACHE_FILE", tmp_path / "filmeto_cache.json")
     monkeypatch.setattr(mod, "YoutubeDL", _FakeYDL)
-    result = runner.invoke(app, ["filmeto", "serci", "Test", "--playlistoj", "-l", "3"])
+    result = runner.invoke(
+        app, ["filmeto", "serci", "Test", "--playlistoj", "-lo", "3"]
+    )
     assert result.exit_code == 0, result.output
     assert "Playlistoj" in result.output
     assert "Playlist One" in result.output
@@ -685,7 +687,7 @@ def test_elsuti_passes_playlist_limo(tmp_path, monkeypatch):
 
     monkeypatch.setattr(mod, "_collect_download_plan", _fake_plan)
     monkeypatch.setattr(mod, "_run_download", lambda *_a, **_k: [])
-    result = runner.invoke(app, ["filmeto", "elsuti", uid, "-l", "2"], input="j\n")
+    result = runner.invoke(app, ["filmeto", "elsuti", uid, "-lo", "2"], input="j\n")
     assert result.exit_code == 0, result.output
     assert called["limo"] == 2
 

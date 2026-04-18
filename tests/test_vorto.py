@@ -1454,6 +1454,26 @@ class TestEntryToLines:
         joined = "\n".join(lines)
         assert "vorto/adjektivo, substantivo-neŭtra" in joined
 
+    def test_internal_markdown_links_are_rendered_as_plain_text(self):
+        linked = _make_entry(uuid=SAMPLE_UUID2, teksto="bonjour")
+        entry = _make_entry(
+            difinoj=["rilata al [bonjour](#11111111)"],
+            uzoj=["uzo kun [bonjour](#11111111)"],
+        )
+        lines = _entry_to_lines(entry, all_entries=[entry, linked], montri_cxion=False)
+        joined = "\n".join(lines)
+        assert "[bonjour](" not in joined
+        assert "bonjour" in joined
+        assert "(#11111111)" not in joined
+
+    def test_ligiloj_are_rendered_with_human_readable_labels(self):
+        linked = _make_entry(uuid=SAMPLE_UUID2, teksto="bonjour")
+        entry = _make_entry(ligiloj=[SAMPLE_UUID2])
+        lines = _entry_to_lines(entry, all_entries=[entry, linked], montri_cxion=False)
+        joined = "\n".join(lines)
+        assert "ligiloj:" in joined
+        assert "bonjour (#11111111)" in joined
+
 
 class TestEntryPreviewHtml:
     def test_default_preview_hides_timestamps(self):
@@ -1497,6 +1517,15 @@ class TestEntriesToLines:
         assert "hello" in joined
         assert "saluton" in joined
 
+    def test_ligiloj_column_uses_human_readable_labels(self):
+        linked = _make_entry(uuid=SAMPLE_UUID2, teksto="bonjour")
+        entry = _make_entry(ligiloj=[SAMPLE_UUID2])
+        lines = _entries_to_lines([entry], all_entries=[entry, linked])
+        joined = "\n".join(lines)
+        assert "Ligiloj" in lines[0]
+        assert "bonjour" in joined
+        assert "#11111111" not in joined
+
 
 class TestLineEditor:
     """Unit tests for the LineEditor Vim-style text editor."""
@@ -1519,6 +1548,11 @@ class TestLineEditor:
         ed = self._make_editor("hello")
         ed.handle_key(127)  # backspace
         assert ed.text == "hell"
+
+    def test_ctrl_w_deletes_previous_word_in_insert(self):
+        ed = self._make_editor("saluton mondo")
+        ed.handle_key(23)  # Ctrl+W
+        assert ed.text == "saluton "
 
     def test_esc_switches_to_normal(self):
         ed = self._make_editor("hello")
@@ -1875,6 +1909,28 @@ class TestVortoTuiModifi:
         assert saved["entry"]["verko"] == "Candide:1759"
         assert saved["old"]["uzoj"] == ["malnova uzo"]
         assert saved["old"]["autoro"] == "Malnova"
+
+
+class TestVortoTuiWelcomeRendering:
+    def test_draw_welcome_partial_redraw_only_updates_status_line(self):
+        from unittest.mock import MagicMock
+
+        from autish.commands._vorto_tui import VortoTUI
+
+        tui = object.__new__(VortoTUI)
+        stdscr = MagicMock()
+        stdscr.getmaxyx.return_value = (24, 80)
+        tui.stdscr = stdscr
+        tui._mode = "COMMAND"
+        tui._cmd_buf = "serci testo"
+        tui._status_msg = ""
+
+        tui._draw_welcome(full=False)
+
+        stdscr.erase.assert_not_called()
+        status_call = stdscr.addstr.call_args_list[-1]
+        assert status_call.args[0] == 23
+        assert ":serci testo" in status_call.args[2]
 
 
 class TestPagerCharCursor:

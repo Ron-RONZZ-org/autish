@@ -39,6 +39,13 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 
+from autish.commands._tui_editor_common import (
+    word_left as _word_left,
+)
+from autish.commands._tui_editor_common import (
+    word_right as _word_right,
+)
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Key constants (reuse _vorto_tui conventions)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -189,25 +196,6 @@ def _is_ctrl_right(key: int) -> bool:
 def _unwrap_wrapped_mail_urls(text: str) -> str:
     """Join soft-wrapped URLs split by spaces/newlines in plain-text messages."""
     return re.sub(r"(https?://\S+)\s+(\S+)", r"\1\2", text)
-
-
-def _word_left(text: str, pos: int) -> int:
-    i = max(0, min(pos, len(text)))
-    while i > 0 and text[i - 1].isspace():
-        i -= 1
-    while i > 0 and not text[i - 1].isspace():
-        i -= 1
-    return i
-
-
-def _word_right(text: str, pos: int) -> int:
-    n = len(text)
-    i = max(0, min(pos, n))
-    while i < n and not text[i].isspace():
-        i += 1
-    while i < n and text[i].isspace():
-        i += 1
-    return i
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -1,7 +1,5 @@
-# feature enhancement
+# feature enhancements
 
-- unify option alias
-  - `-L` for `--ligilo`, `-l` for `--lingvo` and `-lo` for `--limo`
-    - everywhere in autish
-    - Update `copilot-instructions.md` and your memory to save this behaviour as default in this repo
-- add `-l/--lingvo {comma-separated LANGCODEs}` option in `encik serci ` to display results in the specified language(s) if possible, in order of preference of specification
+- legacy `.enc` files still contain `superklaso`. The parser must interpret those legacy links correctly and display accordingly.
+
+- `vorto` interactive mode: typing in the command bar sometimes cause screen blinking. Fix it !

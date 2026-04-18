@@ -15,6 +15,8 @@
   a non-verb name is unavoidable for backward compatibility or domain meaning.
 - **Python source code (variables, functions, modules) uses English `snake_case`.**
 - Short single-letter CLI flags may be any intuitive letter (e.g. `-p` for password).
+- **Option alias normalization is mandatory across commands.**
+  Use `-L` for `--ligilo`, `-l` for `--lingvo`/`--lingvoj`, and `-lo` for `--limo`.
 - **Esperanto locale consistency is mandatory.**
   Always prefer correct Esperanto field names and labels (`difino`, `difinoj`, `ligilo`,
   `superklaso`, `subklaso`, `helpo`, etc.). If user input or legacy aliases are non-Esperanto
@@ -110,6 +112,7 @@ autish/
 18. **`agordi` commands should persist to TOML under `~/.config/autish/`** — each command-level settings surface should map to a dedicated editable TOML file (e.g., `~/.config/autish/encik.toml`, `~/.config/autish/filmeto.toml`) so users can configure via CLI or direct file edits.
 19. **Encik semantic groups are user-editable CSV files** — store `encik semantika` groups in `~/.config/autish/semantika/*.csv` with columns `LIGILO,PRISKRIBO,ALIAZOJ`; each file corresponds to one semantic group/subcommand.
 20. **All command output must be clear, meaningful, succinct, and human-readable** — prefer resolved labels/text over raw IDs, and keep confirmations/results understandable at a glance.
+21. **CLI colors must preserve contrast on light and dark terminals** — avoid fixed low-contrast accents; choose/adapt styles based on terminal background so key fields (e.g., `LIGILO`) remain readable.
 
 ---
 

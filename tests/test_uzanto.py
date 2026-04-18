@@ -144,7 +144,7 @@ class TestProfiloModifi:
     def test_set_lingvoj(self, isolated_profile):
         with patch(_NO_MASTER, return_value=None):
             result = runner.invoke(
-                app, ["uzanto", "profilo", "modifi", "-L", "en,fr"]
+                app, ["uzanto", "profilo", "modifi", "-l", "en,fr"]
             )
         assert result.exit_code == 0
         content = (isolated_profile / "uzanto_profilo.toml").read_text(encoding="utf-8")

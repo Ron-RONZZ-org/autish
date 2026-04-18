@@ -535,7 +535,7 @@ def serci(
         None, "--naskig-loko", help="Filtri laŭ naskiĝloko."
     ),
     lingvo: list[str] | None = typer.Option(
-        None, "-L", "--lingvo", help="Filtri laŭ lingvo-kodo (ripetebla)."
+        None, "-l", "--lingvo", help="Filtri laŭ lingvo-kodo (ripetebla)."
     ),
     retpostadreso: str | None = typer.Option(
         None, "--retpostadreso", help="Filtri laŭ ĉefa retpoŝto."
@@ -762,7 +762,7 @@ def aldoni(
         None, "--naskig-loko", help="Naskiĝloko."
     ),
     lingvoj: str | None = typer.Option(
-        None, "-L", "--lingvoj", help="Lingvoj (ekz. en,fr)."
+        None, "-l", "--lingvoj", help="Lingvoj (ekz. en,fr)."
     ),
     organizo: str | None = typer.Option(None, "-o", "--organizo", help="Organizo."),
     organiza_identiga_numero: str | None = typer.Option(
@@ -948,7 +948,7 @@ def modifi(
     familia_nomo: str | None = typer.Option(None, "-F", "--familia-nomo"),
     naskig_dato: str | None = typer.Option(None, "-d", "--naskig-dato"),
     naskig_loko: str | None = typer.Option(None, "--naskig-loko"),
-    lingvoj: str | None = typer.Option(None, "-L", "--lingvoj"),
+    lingvoj: str | None = typer.Option(None, "-l", "--lingvoj"),
     organizo: str | None = typer.Option(None, "-o", "--organizo"),
     organiza_identiga_numero: str | None = typer.Option(
         None, "--organiza-identiga-numero"
