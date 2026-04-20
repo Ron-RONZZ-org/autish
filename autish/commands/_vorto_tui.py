@@ -829,7 +829,7 @@ class Pager:
     def run(self) -> str:
         """Block until exit.
 
-        Returns: 'back', 'quit', 'modify', 'delete', or 'open_entry'.
+        Returns: 'back', 'quit', 'modify', 'delete', 'delete_entry', or 'open_entry'.
         """
         curses.curs_set(0)
         while True:
@@ -984,7 +984,7 @@ class Pager:
             if self.entry:
                 extra = "  m:modifi  f:forigi"
             elif self.entries:
-                extra = "  Enter:malfermi"
+                extra = "  Enter:malfermi  x:forigi"
             toggle = "  p:detaloj" if self._detail_lines else ""
             status = (
                 f"{pfx} [NORMAL]  "
@@ -1039,6 +1039,12 @@ class Pager:
                 if 0 <= idx < len(self.entries):
                     self.selected_entry = self.entries[idx]
                     return "open_entry"
+
+        elif ch == "x" and self.entries:
+            idx = self.row - self._entry_line_offset
+            idx = min(max(idx, 0), len(self.entries) - 1)
+            self.selected_entry = self.entries[idx]
+            return "delete_entry"
 
         elif ch == "j" or key == curses.KEY_DOWN:
             self.row = min(n - 1, self.row + count)
@@ -1495,7 +1501,7 @@ class VortoTUI:
 
     # ── drawing ──────────────────────────────────────────────────────────────
 
-    def _draw_welcome(self, *, full: bool = True) -> None:
+    def _draw_welcome(self, *, full: bool = True, manage_cursor: bool = True) -> None:
         stdscr = self.stdscr
         h, w = stdscr.getmaxyx()
         if full:
@@ -1512,10 +1518,13 @@ class VortoTUI:
                 _safe_addstr(stdscr, row, col, line[:w - 1], curses.A_DIM)
 
         # Status / cmd / search bar at very bottom
+        cursor_col: int | None = None
         if self._mode == "COMMAND":
-            status = f":{self._cmd_buf}█"
+            status = f":{self._cmd_buf}"
+            cursor_col = len(status)
         elif self._mode == "SEARCH":
-            status = f"/{self._cmd_buf}█"
+            status = f"/{self._cmd_buf}"
+            cursor_col = len(status)
         else:
             status = (
                 self._status_msg
@@ -1523,6 +1532,21 @@ class VortoTUI:
             )
 
         _safe_addstr(stdscr, h - 1, 0, status[:w - 1].ljust(w - 1), curses.A_REVERSE)
+        if manage_cursor:
+            if cursor_col is None:
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
+            else:
+                try:
+                    curses.curs_set(1)
+                except curses.error:
+                    pass
+                try:
+                    stdscr.move(h - 1, min(cursor_col, max(0, w - 2)))
+                except curses.error:
+                    pass
 
         stdscr.refresh()
 
@@ -1826,24 +1850,27 @@ class VortoTUI:
             query = query[:-2].rstrip()
             precise = True
 
-        fuzzy_used = False
-        if query:
-            low = query.lower()
-            found = [e for e in entries if low in e["teksto"].lower()][:50]
-            if not found and not precise:
-                fuzzy_used = True
-                scored: list[tuple[float, dict]] = []
-                for entry in entries:
-                    text = (entry.get("teksto") or "").lower()
-                    if not text:
-                        continue
-                    ratio = SequenceMatcher(None, low, text).ratio()
-                    if ratio >= 0.62:
-                        scored.append((ratio, entry))
-                scored.sort(key=lambda item: item[0], reverse=True)
-                found = [entry for _, entry in scored[:50]]
-        else:
-            found = entries[:50]
+        def _compute_found(items: list[dict]) -> tuple[list[dict], bool]:
+            fuzzy = False
+            if query:
+                low = query.lower()
+                current = [e for e in items if low in e["teksto"].lower()][:50]
+                if not current and not precise:
+                    fuzzy = True
+                    scored: list[tuple[float, dict]] = []
+                    for item in items:
+                        text = (item.get("teksto") or "").lower()
+                        if not text:
+                            continue
+                        ratio = SequenceMatcher(None, low, text).ratio()
+                        if ratio >= 0.62:
+                            scored.append((ratio, item))
+                    scored.sort(key=lambda pair: pair[0], reverse=True)
+                    current = [item for _, item in scored[:50]]
+                return current, fuzzy
+            return items[:50], fuzzy
+
+        found, fuzzy_used = _compute_found(entries)
         lines = self._render_results(found)
         title = f"Serĉi: {query!r}" if query else "Ĉiuj vortoj (maks 50)"
         if fuzzy_used:
@@ -1859,11 +1886,36 @@ class VortoTUI:
                 entries=found,
                 entry_line_offset=2,
             )
+            start_row = min(len(lines) - 1, 2) if lines else 0
+            while start_row < len(lines):
+                row_text = str(lines[start_row] or "").strip()
+                if row_text and row_text.strip("─-"):
+                    break
+                start_row += 1
+            pager.row = min(start_row, max(0, len(lines) - 1))
+            pager.scroll_top = max(0, pager.row - 1)
             result = pager.run()
             curses.curs_set(0)
             if result == "open_entry" and pager.selected_entry is not None:
                 self._view_entry(pager.selected_entry)
                 # Re-show search results after returning from entry view
+            elif result == "delete_entry" and pager.selected_entry is not None:
+                entry = pager.selected_entry
+                confirmed = self._prompt_confirm(
+                    f"Forigi  #{entry['uuid'][:8]}  \"{entry['teksto']}\"? (j/N)"
+                )
+                if confirmed:
+                    self._delete_entry(entry)
+                    self._status_msg = (
+                        f"Sendis al rubujo: #{entry['uuid'][:8]}  \"{entry['teksto']}\""
+                    )
+                    entries = self._load_entries()
+                    found, fuzzy_used = _compute_found(entries)
+                    lines = self._render_results(found)
+                    if not found:
+                        break
+                else:
+                    self._status_msg = "Nuligita."
             else:
                 break
 
@@ -2039,16 +2091,30 @@ class VortoTUI:
         """Draw the welcome screen + a prompt at the bottom; return typed text."""
         buf = ""
         curses.curs_set(1)
+        full_redraw = True
         while True:
-            self._draw_welcome()
+            self._draw_welcome(full=full_redraw, manage_cursor=False)
+            full_redraw = False
             h, w = self.stdscr.getmaxyx()
-            line = f"{prompt}: {buf}█"
+            line = f"{prompt}: {buf}"
             _safe_addstr(
                 self.stdscr, h - 1, 0, line[:w - 1].ljust(w - 1), curses.A_REVERSE
             )
+            cursor_col = min(len(f"{prompt}: {buf}"), max(0, w - 2))
+            try:
+                curses.curs_set(1)
+            except curses.error:
+                pass
+            try:
+                self.stdscr.move(h - 1, cursor_col)
+            except curses.error:
+                pass
             self.stdscr.refresh()
             key = _getch_unicode(self.stdscr)
             ch = chr(key) if 0 < key < 256 else ""
+            if key == curses.KEY_RESIZE:
+                full_redraw = True
+                continue
             if key in (_ENTER, _CR):
                 curses.curs_set(0)
                 return buf.strip()
@@ -2063,8 +2129,10 @@ class VortoTUI:
     def _prompt_confirm(self, prompt: str) -> bool:
         """Ask J/n or j/N at the bottom; Enter follows the shown default."""
         default_yes = "(J/n)" in prompt or "(j/n)" in prompt
+        full_redraw = True
         while True:
-            self._draw_welcome()
+            self._draw_welcome(full=full_redraw, manage_cursor=False)
+            full_redraw = False
             h, w = self.stdscr.getmaxyx()
             _safe_addstr(
                 self.stdscr, h - 1, 0, prompt[:w - 1].ljust(w - 1), curses.A_REVERSE
@@ -2072,6 +2140,9 @@ class VortoTUI:
             self.stdscr.refresh()
             key = _getch_unicode(self.stdscr)
             ch = chr(key) if 0 < key < 256 else ""
+            if key == curses.KEY_RESIZE:
+                full_redraw = True
+                continue
             if key in (_ENTER, _CR):
                 return default_yes
             if ch in ("j", "y"):

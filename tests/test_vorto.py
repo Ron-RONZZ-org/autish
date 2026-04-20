@@ -92,15 +92,24 @@ class TestDetectKategorio:
 
 class TestNormalizeTipo:
     def test_full_name_unchanged(self):
-        assert _normalize_tipo("substantivo") == ["substantivo-neŭtra"]
+        assert _normalize_tipo("substantivo") == ["substantivo"]
         assert _normalize_tipo("substantivo-ina") == ["substantivo-ina"]
         assert _normalize_tipo("substantivo-vira") == ["substantivo-vira"]
+        assert _normalize_tipo("substantivo-plurala") == ["substantivo-plurala"]
+        assert _normalize_tipo("substantivo-ina-plurala") == ["substantivo-ina-plurala"]
+        assert _normalize_tipo("substantivo-vira-plurala") == [
+            "substantivo-vira-plurala"
+        ]
         assert _normalize_tipo("refleksiva-verbo") == ["refleksiva-verbo"]
 
     def test_abbreviation_expanded(self):
-        assert _normalize_tipo("su") == ["substantivo-neŭtra"]
+        assert _normalize_tipo("su") == ["substantivo"]
+        assert _normalize_tipo("sn") == ["substantivo-neŭtra"]
         assert _normalize_tipo("si") == ["substantivo-ina"]
         assert _normalize_tipo("sv") == ["substantivo-vira"]
+        assert _normalize_tipo("sp") == ["substantivo-plurala"]
+        assert _normalize_tipo("sip") == ["substantivo-ina-plurala"]
+        assert _normalize_tipo("svp") == ["substantivo-vira-plurala"]
         assert _normalize_tipo("sui") == ["substantivo-ina"]
         assert _normalize_tipo("suv") == ["substantivo-vira"]
         assert _normalize_tipo("suf") == ["substantivo-ina"]
@@ -126,18 +135,19 @@ class TestNormalizeTipo:
         assert _normalize_tipo("custom") == ["custom"]
 
     def test_case_insensitive(self):
-        assert _normalize_tipo("SU") == ["substantivo-neŭtra"]
+        assert _normalize_tipo("SU") == ["substantivo"]
+        assert _normalize_tipo("SN") == ["substantivo-neŭtra"]
         assert _normalize_tipo("Verbo") == ["verbo"]
 
     def test_multiple_tipos_comma_separated(self):
-        assert _normalize_tipo("aj,su") == ["adjektivo", "substantivo-neŭtra"]
+        assert _normalize_tipo("aj,su") == ["adjektivo", "substantivo"]
         assert _normalize_tipo("vt, aj") == ["verbo-transitiva", "adjektivo"]
 
     def test_multiple_tipos_semicolon_separated(self):
-        assert _normalize_tipo("aj;su") == ["adjektivo", "substantivo-neŭtra"]
+        assert _normalize_tipo("aj;su") == ["adjektivo", "substantivo"]
 
     def test_no_duplicates_in_multiple_tipos(self):
-        assert _normalize_tipo("aj,aj,su") == ["adjektivo", "substantivo-neŭtra"]
+        assert _normalize_tipo("aj,aj,su") == ["adjektivo", "substantivo"]
 
 
 class TestNormalizeTono:
@@ -290,7 +300,7 @@ class TestAldoni:
             )
         entry = mock_save.call_args[0][0][0]
         assert entry["lingvo"] == "en"
-        assert entry["tipo"] == ["substantivo-neŭtra"]
+        assert entry["tipo"] == ["substantivo"]
         assert entry["nivelo"] == 3.0
         assert "a greeting" in entry["difinoj"]
 
@@ -612,6 +622,13 @@ class TestVidi:
         assert result.exit_code == 0
         assert "hello" in result.output
 
+    def test_vidi_teksto_option_alias_works(self):
+        entry = _make_entry(teksto="saluton")
+        with patch(_LOAD, return_value=[entry]):
+            result = runner.invoke(app, ["vorto", "vidi", "-T", "saluton"])
+        assert result.exit_code == 0, result.output
+        assert "saluton" in result.output
+
     def test_vidi_kopii_copies_short_uuid(self, monkeypatch):
         entry = _make_entry()
         copied: dict[str, str] = {}
@@ -764,6 +781,21 @@ class TestVidi:
         assert "bonjour" in ligilo_cell.plain
         assert "#11111111" not in ligilo_cell.plain
         assert any("link file://" in str(span.style) for span in ligilo_cell.spans)
+
+    def test_display_results_renders_inline_teksto_links_without_uuid(self):
+        linked = _make_entry(uuid=SAMPLE_UUID2, teksto="frontalement")
+        entry = _make_entry(
+            teksto="Sa vie [frontalement](#11111111) ...",
+            ligiloj=[],
+        )
+        with patch("autish.commands.vorto.console.print") as mock_print:
+            _display_results([entry], all_entries=[entry, linked], numerate=False)
+        table = mock_print.call_args[0][0]
+        teksto_cell = table.columns[1]._cells[0]
+        assert isinstance(teksto_cell, Text)
+        assert "frontalement" in teksto_cell.plain
+        assert "#11111111" not in teksto_cell.plain
+        assert any("link file://" in str(span.style) for span in teksto_cell.spans)
 
     def test_display_entry_single_definition_is_not_numbered(self):
         entry = _make_entry(difinoj=["nur unu difino"], uzoj=["unu uzo"])
@@ -955,6 +987,15 @@ class TestSerci:
         assert "hello" in result.output
         assert "saluton" not in result.output
 
+    def test_text_filter_ignores_accents_by_default(self):
+        accented_entries = [
+            _make_entry(uuid=SAMPLE_UUID, teksto="ĵurnalo", lingvo="eo", nivelo=1.0)
+        ]
+        with patch(_LOAD, return_value=accented_entries):
+            result = runner.invoke(app, ["vorto", "serci", "jurnalo"])
+        assert result.exit_code == 0, result.output
+        assert "ĵurnalo" in result.output
+
     def test_single_result_displays_entry_directly(self):
         with patch(_LOAD, return_value=self.entries):
             result = runner.invoke(app, ["vorto", "serci", "hello"])
@@ -1011,6 +1052,29 @@ class TestSerci:
         assert copied["value"] == "[saluton](#11111111)"
         assert "saluton  #11111111" in result.output
 
+    def test_serci_semantika_kopii_strips_parenthesized_parts_in_title(
+        self, monkeypatch
+    ):
+        copied: dict[str, str] = {}
+        entries = [
+            _make_entry(
+                uuid=SAMPLE_UUID,
+                teksto="Teorio (speciala) de lumo (malambiguigo)",
+            )
+        ]
+
+        def _fake_copy(value: str) -> None:
+            copied["value"] = value
+
+        monkeypatch.setattr("pyperclip.copy", _fake_copy)
+        with patch(_LOAD, return_value=entries):
+            result = runner.invoke(
+                app,
+                ["vorto", "serci", "Teorio", "--semantika-kopii"],
+            )
+        assert result.exit_code == 0, result.output
+        assert copied["value"] == "[Teorio de lumo](#aaaaaaaa)"
+
     def test_serci_copy_selection_view_is_numbered(self):
         with (
             patch(_LOAD, return_value=self.entries),
@@ -1023,6 +1087,16 @@ class TestSerci:
             )
         assert result.exit_code == 0, result.output
         assert mock_display_results.call_args.kwargs.get("numerate") is True
+
+    def test_serci_semantika_kopii_no_results_skips_prompt(self):
+        with patch(_LOAD, return_value=self.entries):
+            result = runner.invoke(
+                app,
+                ["vorto", "serci", "zzzzzzzzzzzz", "--semantika-kopii"],
+            )
+        assert result.exit_code == 0, result.output
+        assert "Neniu rezulto trovita." in result.output
+        assert "Elektu numeron por kopii" not in result.output
 
     def test_lingvo_filter(self):
         with patch(_LOAD, return_value=self.entries):
@@ -1526,6 +1600,14 @@ class TestEntriesToLines:
         assert "bonjour" in joined
         assert "#11111111" not in joined
 
+    def test_teksto_column_renders_inline_links_as_labels(self):
+        linked = _make_entry(uuid=SAMPLE_UUID2, teksto="frontalement")
+        entry = _make_entry(teksto="Sa vie [frontalement](#11111111) ...", ligiloj=[])
+        lines = _entries_to_lines([entry], all_entries=[entry, linked])
+        joined = "\n".join(lines)
+        assert "frontalement" in joined
+        assert "#11111111" not in joined
+
 
 class TestLineEditor:
     """Unit tests for the LineEditor Vim-style text editor."""
@@ -1717,6 +1799,26 @@ class TestPager:
         p = self._make_pager()
         result = p._normal_key(ord("q"), "q")
         assert result == "back"
+
+    def test_x_in_results_selects_current_entry_for_delete(self):
+        from unittest.mock import MagicMock
+
+        from autish.commands._vorto_tui import Pager
+
+        entries = [
+            _make_entry(uuid=SAMPLE_UUID, teksto="alpha"),
+            _make_entry(uuid=SAMPLE_UUID2, teksto="beta"),
+        ]
+        lines = _entries_to_lines(entries)
+        stdscr = MagicMock()
+        stdscr.getmaxyx.return_value = (24, 80)
+        pager = Pager(stdscr, lines, entries=entries, entry_line_offset=2)
+        pager.row = 3  # second data row (after header + separator)
+
+        result = pager._normal_key(ord("x"), "x")
+
+        assert result == "delete_entry"
+        assert pager.selected_entry is entries[1]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1931,6 +2033,120 @@ class TestVortoTuiWelcomeRendering:
         status_call = stdscr.addstr.call_args_list[-1]
         assert status_call.args[0] == 23
         assert ":serci testo" in status_call.args[2]
+
+    def test_prompt_inline_uses_partial_redraw_while_typing(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import autish.commands._vorto_tui as tui_mod
+        from autish.commands._vorto_tui import VortoTUI
+
+        tui = object.__new__(VortoTUI)
+        stdscr = MagicMock()
+        stdscr.getmaxyx.return_value = (24, 80)
+        tui.stdscr = stdscr
+
+        draw_calls: list[tuple[bool, bool]] = []
+
+        def _fake_draw(*, full: bool = True, manage_cursor: bool = True) -> None:
+            draw_calls.append((full, manage_cursor))
+
+        tui._draw_welcome = _fake_draw  # type: ignore[assignment]
+        keys = iter([ord("a"), ord("b"), ord("\n")])
+        monkeypatch.setattr(tui_mod, "_getch_unicode", lambda _win: next(keys))
+        monkeypatch.setattr(tui_mod.curses, "curs_set", lambda _value: None)
+
+        assert tui._prompt_inline("Demando") == "ab"
+        assert draw_calls[0] == (True, False)
+        assert any(full is False and manage is False for full, manage in draw_calls[1:])
+
+
+class TestVortoTuiSearchPager:
+    def test_do_serci_starts_on_first_content_line(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import autish.commands._vorto_tui as tui_mod
+        from autish.commands._vorto_tui import VortoTUI
+
+        entry = _make_entry(uuid=SAMPLE_UUID, teksto="alpha")
+        observed_rows: list[int] = []
+
+        def _fake_run(self) -> str:
+            observed_rows.append(self.row)
+            return "back"
+
+        monkeypatch.setattr(tui_mod.Pager, "run", _fake_run)
+        monkeypatch.setattr(tui_mod.curses, "curs_set", lambda _value: None)
+
+        tui = VortoTUI(
+            load_entries=lambda: [entry],
+            save_new_entry=lambda _entry: None,
+            save_modified_entry=lambda _entry, _old: None,
+            delete_entry=lambda _entry: None,
+            undo=lambda: "",
+            render_entry=lambda _entry: [],
+            render_results=lambda rows: _entries_to_lines(rows),
+            detect_kategorio=lambda _text: "vorto",
+            normalize_tipo=lambda raw: [raw] if raw else None,
+            normalize_tono=lambda raw: raw,
+            parse_etikedo=lambda _items: {},
+            find_entry=lambda _uid, _entries: None,
+            now_iso=lambda: "2024-01-01T00:00:00+00:00",
+            make_uuid=lambda: SAMPLE_UUID2,
+        )
+        tui.stdscr = MagicMock()
+
+        tui._do_serci("alpha")
+
+        assert observed_rows
+        assert observed_rows[0] == 2
+
+    def test_do_serci_x_deletes_selected_entry_with_confirmation(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import autish.commands._vorto_tui as tui_mod
+        from autish.commands._vorto_tui import VortoTUI
+
+        db_entries = [_make_entry(uuid=SAMPLE_UUID, teksto="alpha")]
+        deleted: list[str] = []
+        run_calls = {"count": 0}
+
+        def _fake_run(self) -> str:
+            if run_calls["count"] == 0:
+                run_calls["count"] += 1
+                self.selected_entry = self.entries[0] if self.entries else None
+                return "delete_entry"
+            return "back"
+
+        def _delete(entry: dict) -> None:
+            deleted.append(entry["uuid"])
+            db_entries[:] = [e for e in db_entries if e["uuid"] != entry["uuid"]]
+
+        monkeypatch.setattr(tui_mod.Pager, "run", _fake_run)
+        monkeypatch.setattr(tui_mod.curses, "curs_set", lambda _value: None)
+
+        tui = VortoTUI(
+            load_entries=lambda: list(db_entries),
+            save_new_entry=lambda _entry: None,
+            save_modified_entry=lambda _entry, _old: None,
+            delete_entry=_delete,
+            undo=lambda: "",
+            render_entry=lambda _entry: [],
+            render_results=lambda rows: _entries_to_lines(rows),
+            detect_kategorio=lambda _text: "vorto",
+            normalize_tipo=lambda raw: [raw] if raw else None,
+            normalize_tono=lambda raw: raw,
+            parse_etikedo=lambda _items: {},
+            find_entry=lambda _uid, _entries: None,
+            now_iso=lambda: "2024-01-01T00:00:00+00:00",
+            make_uuid=lambda: SAMPLE_UUID2,
+        )
+        tui.stdscr = MagicMock()
+        tui._prompt_confirm = lambda _msg: True  # type: ignore[assignment]
+
+        tui._do_serci("alpha")
+
+        assert deleted == [SAMPLE_UUID]
+        assert not db_entries
 
 
 class TestPagerCharCursor:

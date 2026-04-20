@@ -20,6 +20,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+import unicodedata
 import uuid as _uuid_mod
 import webbrowser
 from datetime import datetime, timedelta, timezone
@@ -202,9 +203,16 @@ def _dict_to_params(entry: dict) -> tuple:
 
 _TIPO_MAP: dict[str, str] = {
     # word subtypes
-    "su": "substantivo-neŭtra",
-    "substantivo": "substantivo-neŭtra",
+    "su": "substantivo",
+    "substantivo": "substantivo",
+    "sn": "substantivo-neŭtra",
     "substantivo-neŭtra": "substantivo-neŭtra",
+    "sp": "substantivo-plurala",
+    "substantivo-plurala": "substantivo-plurala",
+    "sip": "substantivo-ina-plurala",
+    "substantivo-ina-plurala": "substantivo-ina-plurala",
+    "svp": "substantivo-vira-plurala",
+    "substantivo-vira-plurala": "substantivo-vira-plurala",
     "sui": "substantivo-ina",
     "si": "substantivo-ina",
     "suf": "substantivo-ina",
@@ -428,9 +436,9 @@ def _detect_kategorio(teksto: str) -> str:
 
 def _normalize_tipo(tipo: str | None) -> list[str] | None:
     """Normalize tipo string into a list of normalized tipo values.
-    
+
     Accepts comma or semicolon-separated tipos, e.g.:
-    - "aj,su" → ["adjektivo", "substantivo-neŭtra"]
+    - "aj,su" → ["adjektivo", "substantivo"]
     - "vt;aj" → ["verbo-transitiva", "adjektivo"]
     """
     if not tipo:
@@ -477,6 +485,13 @@ def _apply_french_ligatures(text: str) -> str:
 def _normalize_oe(text: str) -> str:
     """Fold œ/Œ → oe/OE for case-insensitive search comparisons."""
     return text.replace("œ", "oe").replace("Œ", "OE")
+
+
+def _fold_search_text(text: str) -> str:
+    folded_oe = _normalize_oe(str(text or ""))
+    normalized = unicodedata.normalize("NFKD", folded_oe)
+    stripped = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return stripped.casefold()
 
 
 def _normalize_multiline_text(text: str) -> str:
@@ -1143,6 +1158,20 @@ def _copy_to_clipboard(value: str, success_message: str) -> None:
     typer.echo(success_message)
 
 
+def _strip_title_disambiguation(title: str) -> str:
+    base = str(title or "").strip()
+    if not base:
+        return ""
+    cleaned = base
+    while True:
+        updated = re.sub(r"\([^()]*\)", " ", cleaned)
+        if updated == cleaned:
+            break
+        cleaned = updated
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    return cleaned or base
+
+
 def _copy_entry_reference(entry: dict, *, semantika: bool = False) -> None:
     entry_uuid = str(entry.get("uuid") or "")
     if not entry_uuid:
@@ -1151,6 +1180,7 @@ def _copy_entry_reference(entry: dict, *, semantika: bool = False) -> None:
     short_ref = f"#{entry_uuid[:8]}"
     if semantika:
         label = str(entry.get("teksto") or "").strip() or short_ref
+        label = _strip_title_disambiguation(label)
         payload = f"[{label}]({short_ref})"
         _copy_to_clipboard(payload, "Kopiis semantikan referencon al tondujo.")
         return
@@ -1308,12 +1338,12 @@ def _fuzzy_text_matches(entries: list[dict], query: str, limit: int = 50) -> lis
 
     Treats 'oe' and 'œ' as equivalent and ignores letter case.
     """
-    q = _normalize_oe(query.strip().lower())
+    q = _fold_search_text(query.strip())
     if not q:
         return []
     scored: list[tuple[float, dict]] = []
     for entry in entries:
-        text = _normalize_oe((entry.get("teksto") or "").lower())
+        text = _fold_search_text(entry.get("teksto") or "")
         if not text:
             continue
         ratio = SequenceMatcher(None, q, text).ratio()
@@ -1412,6 +1442,42 @@ def _render_ligilo_cli_text(
     return Text(raw_token or token)
 
 
+def _render_internal_cli_text(text: str, all_entries: list[dict] | None) -> Text:
+    raw_text = str(text or "")
+    if not raw_text:
+        return Text("")
+    rendered = Text()
+    pos = 0
+    for match in _INTERNAL_LINK_RE.finditer(raw_text):
+        start, end = match.span()
+        if start > pos:
+            rendered.append(raw_text[pos:start])
+        target_token = _normalize_inline_ref_token(match.group(2))
+        if target_token.lower().startswith("ec#"):
+            rendered.append_text(
+                _render_ligilo_cli_text(target_token, all_entries, show_ref=False)
+            )
+            pos = end
+            continue
+        raw_ref = target_token.lstrip("#")
+        if all_entries is None or not raw_ref:
+            rendered.append(match.group(1).strip() or raw_ref)
+            pos = end
+            continue
+        target = _find_entry(raw_ref, all_entries)
+        if target is None:
+            rendered.append(match.group(1).strip() or raw_ref)
+            pos = end
+            continue
+        preview_path = _write_entry_preview_file(target, all_entries)
+        label = str(target.get("teksto") or "").strip() or match.group(1).strip()
+        rendered.append(label or f"#{raw_ref[:8]}", style=f"link file://{preview_path}")
+        pos = end
+    if pos < len(raw_text):
+        rendered.append(raw_text[pos:])
+    return rendered
+
+
 def _display_entry(
     entry: dict,
     all_entries: list[dict] | None = None,
@@ -1420,8 +1486,10 @@ def _display_entry(
 ) -> None:
     """Render one entry using a Rich panel."""
     uid_short = entry["uuid"][:8]
-    header = Text()
-    header.append(str(entry["teksto"]), style="bold")
+    header = _render_internal_cli_text(str(entry.get("teksto") or ""), all_entries)
+    if not header.plain:
+        header = Text(str(entry.get("teksto") or ""))
+    header.stylize("bold")
     header.append(f"  #{uid_short}", style="dim")
     lines: list[str] = []
 
@@ -1557,7 +1625,7 @@ def _display_results(
         row_cells.extend(
             [
                 uid_short,
-                e["teksto"],
+                _render_internal_cli_text(str(e.get("teksto") or ""), link_context),
                 e.get("lingvo") or "",
                 tipo_full,
                 f"{nivelo:.1f}" if nivelo is not None else "",
@@ -1709,8 +1777,10 @@ def aldoni(
         None,
         "-t",
         "--tipo",
-        help="Subtype (comma-separated for multiple): substantivo-neŭtra/su, "
-        "substantivo-ina/si, substantivo-vira/sv, verbo/ve, "
+        help="Subtype (comma-separated for multiple): substantivo/su, "
+        "substantivo-neŭtra/sn, substantivo-plurala/sp, "
+        "substantivo-ina/si, substantivo-ina-plurala/sip, "
+        "substantivo-vira/sv, substantivo-vira-plurala/svp, verbo/ve, "
         "verbo-transitiva/vt, verbo-nerekta-transitiva/vnt, verbo-netransitiva/vn, "
         "refleksiva-verbo/vr, "
         "adjektivo/aj, adverbo/av, "
@@ -1931,6 +2001,12 @@ def vidi(
             "Example: vorto vidi #952f2079"
         ),
     ),
+    teksto_ref: str | None = typer.Option(
+        None,
+        "-T",
+        "--teksto",
+        help='Teksta referenco por vidi eniron. Ekzemplo: --teksto "saluton"',
+    ),
     inverse: bool = typer.Option(
         False, "-i", "--inversa", help="List oldest 50 first (only without UUID)."
     ),
@@ -1958,23 +2034,27 @@ def vidi(
 ) -> None:
     """View a wordbank entry, or list the latest 50 entries when called
     without argument."""
+    if uid is not None and teksto_ref is not None:
+        typer.echo("Uzu aŭ pozician referencon aŭ --teksto, ne ambaŭ.", err=True)
+        raise typer.Exit(code=1)
+    lookup_ref = uid if uid is not None else teksto_ref
     if kopii_uuid and semantika_kopii:
         typer.echo("Uzu nur unu el --kopii aŭ --semantika-kopii.", err=True)
         raise typer.Exit(code=1)
     if (kopii_uuid or semantika_kopii) and html:
         typer.echo("--kopii/--semantika-kopii ne kongruas kun --html.", err=True)
         raise typer.Exit(code=1)
-    if uid is None and (kopii_uuid or semantika_kopii):
+    if lookup_ref is None and (kopii_uuid or semantika_kopii):
         typer.echo(
             "--kopii/--semantika-kopii postulas UUID aŭ tekstan referencon.",
             err=True,
         )
         raise typer.Exit(code=1)
-    if uid is None and html:
+    if lookup_ref is None and html:
         typer.echo("--html postulas UUID aŭ tekstan referencon.", err=True)
         raise typer.Exit(code=1)
     entries = _load_entries()
-    if uid is None:
+    if lookup_ref is None:
         # Show latest (or oldest) 50
         if inverse:
             results = entries[:50]
@@ -1983,13 +2063,13 @@ def vidi(
         typer.echo(f"{len(results)} rezulto(j).")
         _display_results(results, all_entries=entries)
         return
-    lookup_uid = uid[1:] if uid.startswith("#") else uid
+    lookup_uid = lookup_ref[1:] if lookup_ref.startswith("#") else lookup_ref
     entry = _find_entry(lookup_uid, entries)
     if entry is None:
         # No exact match — try fuzzy/closest matches (max 5)
         closest = _fuzzy_text_matches(entries, lookup_uid, limit=5)
         if not closest:
-            typer.echo(f"Eniro ne trovita: {uid!r}", err=True)
+            typer.echo(f"Eniro ne trovita: {lookup_ref!r}", err=True)
             raise typer.Exit(code=1)
         if len(closest) == 1:
             typer.echo(
@@ -2007,7 +2087,9 @@ def vidi(
             _display_entry(closest[0], entries, montri_cxion=montri_cxion)
             return
         # Multiple approximate matches — ask user to pick one
-        typer.echo(f"Ekzakta kongruo ne trovita por {uid!r}. Proksimaj rezultoj:")
+        typer.echo(
+            f"Ekzakta kongruo ne trovita por {lookup_ref!r}. Proksimaj rezultoj:"
+        )
         for i, match in enumerate(closest, 1):
             typer.echo(
                 f"  {i}. [{match['uuid'][:8]}] {match['teksto']}"
@@ -2442,8 +2524,10 @@ def serci(
                 raise typer.Exit(code=1) from exc
             results = [e for e in results if pattern.search(e["teksto"])]
         else:
-            low = teksto.lower()
-            results = [e for e in results if low in e["teksto"].lower()]
+            low = _fold_search_text(teksto)
+            results = [
+                e for e in results if low in _fold_search_text(e.get("teksto") or "")
+            ]
             if not results and not preciza:
                 fuzzy_used = True
                 results = _fuzzy_text_matches(entries=entries, query=teksto, limit=limo)
@@ -2520,6 +2604,8 @@ def serci(
         all_entries=entries,
         numerate=bool(kopii_uuid or semantika_kopii),
     )
+    if not results:
+        return
     if not (kopii_uuid or semantika_kopii):
         return
     raw = typer.prompt("Elektu numeron por kopii (aŭ Enter por nuligi)", default="")
@@ -2916,7 +3002,9 @@ def _entries_to_lines(
         date_str = (e.get("kreita_je") or "")[:10]
         nivelo = e.get("nivelo")
         niv_str = f"{nivelo:.1f}" if nivelo is not None else ""
-        teksto = e["teksto"][:col_teksto]
+        teksto = _render_internal_plain_links(
+            str(e.get("teksto") or ""), link_context, show_ref=False
+        )[:col_teksto]
         row = (
             f"{uid_short:<{col_uuid}} {teksto:<{col_teksto}} "
             f"{(e.get('lingvo') or ''):<{col_lingvo}} {tipo_str:<{col_tipo}} "

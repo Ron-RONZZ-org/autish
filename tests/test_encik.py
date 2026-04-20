@@ -831,6 +831,44 @@ class TestUuidRefExtraction:
             for src, dst, rel, sem in edges
         )
 
+    def test_linked_graph_hides_generic_if_semantic_exists_between_same_nodes(
+        self, tmp_path, monkeypatch
+    ):
+        import autish.commands.encik as enc_mod
+
+        db_path = tmp_path / "encik.db"
+        monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
+        monkeypatch.setattr(enc_mod, "_DATA_DIR", tmp_path)
+        _load_db_fixture(
+            [
+                _make_entry(
+                    uuid=SAMPLE_UUID,
+                    titolo="Root",
+                    ligilo=[CHILD_UUID],
+                ),
+                _make_entry(
+                    uuid=CHILD_UUID,
+                    titolo="Child",
+                    ligilo=[[SAMPLE_UUID, "rdf:type"]],
+                ),
+            ],
+            db_path,
+        )
+
+        _nodes, edges = _linked_graph_of(SAMPLE_UUID, max_depth=2)
+        assert any(
+            rel == "ligilo"
+            and _sem == "rdf:type"
+            and {src, dst} == {SAMPLE_UUID, CHILD_UUID}
+            for src, dst, rel, _sem in edges
+        )
+        assert not any(
+            rel == "ligilo"
+            and sem is None
+            and {src, dst} == {SAMPLE_UUID, CHILD_UUID}
+            for src, dst, rel, sem in edges
+        )
+
     def test_preserves_nested_markdown_list_indentation_in_roundtrip(self, tmp_path):
         entry = _make_entry(
             titolo="Nested List",
@@ -1165,6 +1203,14 @@ class TestEncikCLI:
         assert result.exit_code == 0
         assert "Philos" in result.output
 
+    def test_serci_ignores_accents_by_default(self, tmp_path):
+        enc = self._make_enc_file(tmp_path, "Ĵurnalo", "Difino")
+        add = runner.invoke(app, ["encik", "aldoni", str(enc)])
+        assert add.exit_code == 0, add.output
+        result = runner.invoke(app, ["encik", "serci", "Jurnalo"])
+        assert result.exit_code == 0, result.output
+        assert "Ĵurnalo" in result.output
+
     def test_serci_kopii_copies_uuid_for_single_match(self, tmp_path, monkeypatch):
         enc = self._make_enc_file(tmp_path, "SoloNode", "Difino")
         add = runner.invoke(app, ["encik", "aldoni", str(enc)])
@@ -1242,6 +1288,62 @@ class TestEncikCLI:
         )
         assert result.exit_code == 0, result.output
         assert copied["value"] == f"[Loka Titolo](#{found['uuid'][:8]})"
+
+    def test_serci_semantika_kopii_strips_trailing_disambiguation_parentheses(
+        self, tmp_path, monkeypatch
+    ):
+        enc = tmp_path / "disambiguation_copy.enc"
+        enc.write_text(
+            'terminologio.eo = "Rivero (malambiguigo)"\n'
+            'difinio.eo = "Difino"\n',
+            encoding="utf-8",
+        )
+        add = runner.invoke(app, ["encik", "aldoni", str(enc)])
+        assert add.exit_code == 0, add.output
+        import autish.commands.encik as enc_mod
+
+        found = enc_mod._find_by_title_exact("Rivero (malambiguigo)")
+        assert found is not None
+        copied: dict[str, str] = {}
+
+        def _fake_copy(value: str) -> None:
+            copied["value"] = value
+
+        monkeypatch.setattr("pyperclip.copy", _fake_copy)
+        result = runner.invoke(
+            app,
+            ["encik", "serci", "Rivero (malambiguigo)", "--semantika-kopii"],
+        )
+        assert result.exit_code == 0, result.output
+        assert copied["value"] == f"[Rivero](#{found['uuid'][:8]})"
+
+    def test_serci_semantika_kopii_strips_parentheses_anywhere_in_title(
+        self, tmp_path, monkeypatch
+    ):
+        enc = tmp_path / "middle_parentheses_copy.enc"
+        enc.write_text(
+            'terminologio.eo = "Teorio (speciala) de lumo"\n'
+            'difinio.eo = "Difino"\n',
+            encoding="utf-8",
+        )
+        add = runner.invoke(app, ["encik", "aldoni", str(enc)])
+        assert add.exit_code == 0, add.output
+        import autish.commands.encik as enc_mod
+
+        found = enc_mod._find_by_title_exact("Teorio (speciala) de lumo")
+        assert found is not None
+        copied: dict[str, str] = {}
+
+        def _fake_copy(value: str) -> None:
+            copied["value"] = value
+
+        monkeypatch.setattr("pyperclip.copy", _fake_copy)
+        result = runner.invoke(
+            app,
+            ["encik", "serci", "Teorio", "--semantika-kopii"],
+        )
+        assert result.exit_code == 0, result.output
+        assert copied["value"] == f"[Teorio de lumo](#{found['uuid'][:8]})"
 
     def test_serci_semantika_kopii_multiple_matches_uses_selected(
         self, tmp_path, monkeypatch

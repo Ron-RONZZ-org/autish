@@ -28,6 +28,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -784,7 +785,19 @@ def _find_by_title_exact(titolo: str) -> dict | None:
 def _count_matches(text: str, needle: str) -> int:
     if not text or not needle:
         return 0
-    return len(re.findall(re.escape(needle), text.lower()))
+    folded_text = _fold_search_text(text)
+    folded_needle = _fold_search_text(needle)
+    if not folded_text or not folded_needle:
+        return 0
+    return len(re.findall(re.escape(folded_needle), folded_text))
+
+
+def _fold_search_text(text: str) -> str:
+    raw = str(text or "")
+    raw = raw.replace("œ", "oe").replace("Œ", "OE")
+    normalized = unicodedata.normalize("NFKD", raw)
+    stripped = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return stripped.casefold()
 
 
 def _build_subklaso_count_map(entries: list[dict]) -> dict[str, int]:
@@ -813,7 +826,7 @@ def _search_entries(
     prefer_newest: bool = True,
     prefer_high_level: bool = True,
 ) -> list[dict]:
-    needle = query.strip().lower()
+    needle = _fold_search_text(query.strip())
     if not needle:
         return []
     entries = _load_all()
@@ -3893,6 +3906,20 @@ def _entry_user_locale_title(
     return ""
 
 
+def _strip_title_disambiguation(title: str) -> str:
+    base = str(title or "").strip()
+    if not base:
+        return ""
+    cleaned = base
+    while True:
+        updated = re.sub(r"\([^()]*\)", " ", cleaned)
+        if updated == cleaned:
+            break
+        cleaned = updated
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    return cleaned or base
+
+
 def _print_candidates(
     candidates: list[dict], *, preferred_langs: list[str] | None = None
 ) -> None:
@@ -3920,14 +3947,20 @@ def _copy_to_clipboard(value: str, success_message: str) -> None:
     typer.echo(success_message)
 
 
-def _copy_entry_reference(entry: dict, *, semantika: bool = False) -> None:
+def _copy_entry_reference(
+    entry: dict,
+    *,
+    semantika: bool = False,
+    preferred_langs: list[str] | None = None,
+) -> None:
     entry_uuid = str(entry.get("uuid") or "")
     if not entry_uuid:
         typer.echo("Nevalida nodo: mankas UUID por kopii.", err=True)
         raise typer.Exit(code=1)
     short_ref = f"#{entry_uuid[:8]}"
     if semantika:
-        display_title = _entry_user_locale_title(entry)
+        display_title = _entry_user_locale_title(entry, preferred_langs=preferred_langs)
+        display_title = _strip_title_disambiguation(display_title)
         payload = f"[{display_title}]({short_ref})"
         _copy_to_clipboard(payload, "Kopiis semantikan referencon al tondujo.")
         return
@@ -4206,6 +4239,19 @@ def _linked_graph_of(
                 if target_uuid not in visited:
                     visited.add(target_uuid)
                     queue.append((target_uuid, depth + 1))
+    semantic_pairs: set[tuple[str, str]] = {
+        tuple(sorted((src, dst)))
+        for src, dst, rel, sem in edges
+        if rel == "ligilo" and _normalize_semantika_ligilo(sem)
+    }
+    if semantic_pairs:
+        filtered_edges: list[tuple[str, str, str, str | None]] = []
+        for src, dst, rel, sem in edges:
+            if rel == "ligilo" and not _normalize_semantika_ligilo(sem):
+                if tuple(sorted((src, dst))) in semantic_pairs:
+                    continue
+            filtered_edges.append((src, dst, rel, sem))
+        edges = filtered_edges
     nodes = [by_uuid[uid] for uid in visited if uid in by_uuid]
     nodes.sort(key=lambda e: str(e.get("titolo") or "").lower())
     return nodes, edges
@@ -5953,19 +5999,11 @@ def serci(
         def _copy_selected_entry(entry: dict) -> None:
             if not kopii_uuid and not semantika_kopii:
                 return
-            entry_uuid = str(entry.get("uuid") or "")
-            if not entry_uuid:
-                typer.echo("Nevalida nodo: mankas UUID por kopii.", err=True)
-                raise typer.Exit(code=1)
-            short_ref = f"#{entry_uuid[:8]}"
-            if semantika_kopii:
-                display_title = _entry_user_locale_title(
-                    entry, preferred_langs=preferred_search_langs
-                )
-                payload = f"[{display_title}]({short_ref})"
-                _copy_to_clipboard(payload, "Kopiis semantikan referencon al tondujo.")
-                return
-            _copy_to_clipboard(short_ref, f"Kopiis UUID al tondujo: {short_ref}")
+            _copy_entry_reference(
+                entry,
+                semantika=semantika_kopii,
+                preferred_langs=preferred_search_langs,
+            )
 
         if preciza:
             needle = demando.strip().lower()
