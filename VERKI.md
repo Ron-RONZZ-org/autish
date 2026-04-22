@@ -93,7 +93,7 @@ verki generi -i "..." -sd ./mia_stilo.txt
 
 Transpasi dosieron kun agorda informo:
 ```bash
-verki generi -i "..." -k ./kunteksto.md
+verki generi -i "..." -K ./kunteksto.md
 ```
 
 Ekzempla `kunteksto.md`:
@@ -116,7 +116,9 @@ Amplekso: artikolo por blogo
 | `-s` | `--stilo` | Priskribo de stilo. | neniuj |
 | `-se` | `--stilo-ekzemplo` | Teksta stilo-provo. | neniuj |
 | `-sd` | `--stilo-dosiero` | Vojo al dosiero kun stilo. | neniuj |
-| `-k` | `--kunteksto-dosiero` | Vojo al aldona kunteksto. | neniuj |
+| `-K` | `--kunteksto-dosiero` | Vojo al aldona kunteksto. | neniuj |
+| `-k` | `--kopii` | Kopii la rezulton al la sistema tondujo (clipboard). | neniuj |
+| `-E` | `--eksporti` | Eksporti la rezulton al dosiero. | neniuj |
 | `-m` | `--modelo` | HF modelo ID. | google/flan-t5-base |
 | `-p` | `--provizanto` | AI-provizanto. | huggingface |
 | `-a` | `--api-slosilo` | API-ŝlosilo (se ne en profilo). | neniuj |

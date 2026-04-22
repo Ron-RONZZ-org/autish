@@ -7,6 +7,7 @@ from pathlib import Path
 
 import typer
 
+from autish.commands.kp import _copy as _kp_copy
 from autish.commands.uzanto import _load_profile
 from autish.services.providers.huggingface import HuggingFaceProvider
 from autish.services.verki import VerkiRequest, VerkiService, VerkiServiceError
@@ -74,9 +75,7 @@ def _build_verki_service(
 ) -> VerkiService:
     provider_name = provizanto.strip().lower()
     if provider_name != "huggingface":
-        raise ValueError(
-            "Nesubtenata provizanto. Nuntempe subtenata: huggingface."
-        )
+        raise ValueError("Nesubtenata provizanto. Nuntempe subtenata: huggingface.")
     token = _resolve_hf_token(api_slosilo)
     if not token:
         raise ValueError(
@@ -103,8 +102,7 @@ def generi(
         "-t",
         "--teksto",
         help=(
-            "Fonta teksto por reskribo "
-            "(ekz. --teksto 'Mi volas pli klaran version.')."
+            "Fonta teksto por reskribo (ekz. --teksto 'Mi volas pli klaran version.')."
         ),
     ),
     teksto_dosiero: Path | None = typer.Option(
@@ -147,16 +145,25 @@ def generi(
         None,
         "-sd",
         "--stilo-dosiero",
-        help=(
-            "Vojo al dosiero kun persona stilo-provo "
-            "(ekz. -sd ./mia_stilo.txt)."
-        ),
+        help=("Vojo al dosiero kun persona stilo-provo (ekz. -sd ./mia_stilo.txt)."),
     ),
     kunteksto_dosiero: Path | None = typer.Option(
         None,
-        "-k",
+        "-K",
         "--kunteksto-dosiero",
-        help="Vojo al aldona kunteksto (ekz. -k ./kunteksto.md).",
+        help="Vojo al aldona kunteksto (ekz. -K ./kunteksto.md).",
+    ),
+    kopii: bool = typer.Option(
+        False,
+        "-k",
+        "--kopii",
+        help="Kopii la rezulton al la sistema tondujo (clipboard).",
+    ),
+    eksporti: Path | None = typer.Option(
+        None,
+        "-E",
+        "--eksporti",
+        help="Eksporti la rezulton al dosiero (kreos parent-dosierojn).",
     ),
     modelo: str = typer.Option(
         "google/flan-t5-base",
@@ -230,6 +237,22 @@ def generi(
         typer.echo(f"Eraro: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
+    # Export to file if requested
+    if eksporti:
+        target = Path(eksporti)
+        if target.is_dir():
+            target = target / "verki_output.txt"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(output, encoding="utf-8")
+        typer.echo(f"[v] Skribita al {target}", err=True)
+
+    # Copy to clipboard if requested
+    if kopii:
+        try:
+            _kp_copy(output)
+        except Exception as exc:
+            typer.echo(f"[!] Ne povis kopii al tondujo: {exc}", err=True)
+
     typer.echo(output)
 
 
@@ -272,8 +295,7 @@ def modelo(
     token = _resolve_hf_token(api_slosilo)
     if not token:
         typer.echo(
-            "Eraro: Mankas API-slosilo. Uzu -a aŭ agordu HF_TOKEN/uzanto "
-            "profilo.",
+            "Eraro: Mankas API-slosilo. Uzu -a aŭ agordu HF_TOKEN/uzanto profilo.",
             err=True,
         )
         raise typer.Exit(code=1)

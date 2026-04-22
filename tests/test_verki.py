@@ -131,6 +131,8 @@ def test_verki_cli_rejects_conflicting_text_inputs(tmp_path: Path):
 def test_verki_cli_missing_hf_token_shows_clear_error(monkeypatch):
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.delenv("HUGGINGFACE_API_TOKEN", raising=False)
+    import autish.commands.verki as mod
+    monkeypatch.setattr(mod, "_load_profile", lambda quiet=True: {})
     result = runner.invoke(
         app, ["verki", "generi", "--instrukcio", "Kreu mallongan saluton"]
     )
@@ -272,3 +274,54 @@ def test_huggingface_provider_handles_http_errors(monkeypatch):
     provider = HuggingFaceProvider(model="google/flan-t5-base", token="hf_test")
     with pytest.raises(VerkiProviderError, match="401"):
         provider.generate(GenerationRequest(prompt="x"))
+
+
+def test_verki_cli_exports_output_file(monkeypatch, tmp_path: Path):
+    import autish.commands.verki as mod
+
+    class _FakeService:
+        def verki(self, request: VerkiRequest) -> str:
+            return "Eksportita teksto."
+
+    monkeypatch.setattr(mod, "_build_verki_service", lambda **_kwargs: _FakeService())
+    out_file = tmp_path / "out.txt"
+    result = runner.invoke(
+        app,
+        [
+            "verki",
+            "generi",
+            "--instrukcio",
+            "Eksportu",
+            "--eksporti",
+            str(out_file),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert out_file.exists()
+    assert out_file.read_text(encoding="utf-8") == "Eksportita teksto."
+    assert "Eksportita teksto." in result.output
+
+
+def test_verki_cli_copies_output_to_clipboard(monkeypatch):
+    import autish.commands.verki as mod
+
+    class _FakeService:
+        def verki(self, request: VerkiRequest) -> str:
+            return "Kopiita teksto."
+
+    monkeypatch.setattr(mod, "_build_verki_service", lambda **_kwargs: _FakeService())
+    captured = {}
+    monkeypatch.setattr(mod, "_kp_copy", lambda text: captured.setdefault("text", text))
+    result = runner.invoke(
+        app,
+        [
+            "verki",
+            "generi",
+            "--instrukcio",
+            "Kopi test",
+            "--kopii",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured.get("text") == "Kopiita teksto."
+    assert "Kopiita teksto." in result.output
