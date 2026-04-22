@@ -64,6 +64,7 @@ _STANDARD_FIELDS: tuple[str, ...] = (
     "organiza_identiga_numero",
     "telefonnumeroj",
     "retposhtadresoj",
+    "api_slosilo_huggingface",
 )
 
 
@@ -341,6 +342,9 @@ def profilo_vidi(
     retposhtadresoj: bool = typer.Option(
         False, "--retposhtadresoj", help="Show stored email addresses."
     ),
+    api_slosilo: bool = typer.Option(
+        False, "-a", "--api-slosilo", help="Show stored API keys (masked)."
+    ),
     kampo: str | None = typer.Option(
         None, "-k", "--kampo", help="Show a specific custom field by KEY."
     ),
@@ -358,6 +362,7 @@ def profilo_vidi(
         "organiza_identiga_numero": organiza_identiga_numero,
         "telefonnumeroj": telefonnumeroj,
         "retposhtadresoj": retposhtadresoj,
+        "api_slosilo_huggingface": api_slosilo,
     }
     selected = [k for k, v in flags.items() if v]
 
@@ -381,7 +386,11 @@ def profilo_vidi(
         for key in _STANDARD_FIELDS:
             val = profile.get(key)
             if val is not None:
-                display = _display_profile_value(val)
+                # Mask API keys
+                if key == "api_slosilo_huggingface" and val:
+                    display = "••••" + val[-4:] if len(val) > 4 else "••••"
+                else:
+                    display = _display_profile_value(val)
                 table.add_row(key.replace("_", "-"), display)
         custom = profile.get("kampoj", {})
         for k, v in custom.items():
@@ -392,7 +401,10 @@ def profilo_vidi(
     # Show only selected fields
     for key in selected:
         val = profile.get(key)
-        display = _display_profile_value(val) if val is not None else "—"
+        if key == "api_slosilo_huggingface" and val:
+            display = "••••" + val[-4:] if len(val) > 4 else "••••"
+        else:
+            display = _display_profile_value(val) if val is not None else "—"
         console.print(f"{key.replace('_', '-')}: {display}")
 
 
@@ -429,6 +441,12 @@ def profilo_modifi(
         None,
         "--retposhtadreso",
         help="Repeat as adreso:etikedo[:prima], e.g. user@example.com:labora:prima",
+    ),
+    api_slosilo_huggingface: str | None = typer.Option(
+        None,
+        "-a",
+        "--api-slosilo-huggingface",
+        help="Set Hugging Face API key.",
     ),
     kampo: list[str] | None = typer.Option(
         None,
@@ -476,6 +494,11 @@ def profilo_modifi(
         except ValueError as exc:
             typer.echo(f"[!] {exc}", err=True)
             raise typer.Exit(1) from exc
+    if api_slosilo_huggingface is not None:
+        if api_slosilo_huggingface.strip():
+            profile["api_slosilo_huggingface"] = api_slosilo_huggingface.strip()
+        else:
+            profile.pop("api_slosilo_huggingface", None)
 
     if kampo:
         if "kampoj" not in profile:

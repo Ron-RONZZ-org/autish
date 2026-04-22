@@ -21,7 +21,12 @@ import locale
 from collections.abc import Callable
 from difflib import SequenceMatcher
 
-from autish.commands._tui_editor_common import word_left as _word_left
+from autish.commands._tui_editor_common import (
+    word_left as _word_left,
+)
+from autish.commands._tui_editor_common import (
+    word_right as _word_right,
+)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Key constants
@@ -83,7 +88,44 @@ def _getch_unicode(win) -> int:
     except curses.error:
         return -1
     if isinstance(wch, str):
-        return ord(wch) if len(wch) == 1 else -1
+        if len(wch) != 1:
+            return -1
+        if ord(wch) != _ESC:
+            return ord(wch)
+
+        # Some terminals emit raw escape sequences for Ctrl+Arrow (e.g. ESC [ 1 ; 5 C)
+        # that curses may not translate into KEY_CLEFT/KEY_CRIGHT.
+        tail: list[str] = []
+        try:
+            win.nodelay(True)
+            while len(tail) < 8:
+                try:
+                    nxt = win.get_wch()
+                except curses.error:
+                    break
+                if isinstance(nxt, str) and len(nxt) == 1:
+                    tail.append(nxt)
+                else:
+                    break
+        finally:
+            try:
+                win.nodelay(False)
+            except curses.error:
+                pass
+
+        if not tail:
+            return _ESC
+
+        seq = "\x1b" + "".join(tail)
+        if seq in ("\x1b[1;5D", "\x1b[5D"):
+            return _CTRL_LEFT
+        if seq in ("\x1b[1;5C", "\x1b[5C"):
+            return _CTRL_RIGHT
+
+        # Unknown escape sequence: preserve original behavior by pushing back bytes.
+        for ch_back in reversed(tail):
+            curses.unget_wch(ch_back)
+        return _ESC
     return wch  # already int (function key)
 
 
@@ -142,11 +184,8 @@ class LineEditor:
         n = len(self.buf)
         if p >= n - 1:
             return max(0, n - 1)
-        while p < n and not self.buf[p].isspace():
-            p += 1
-        while p < n and self.buf[p].isspace():
-            p += 1
-        return min(p, max(0, n - 1))
+        moved = _word_right(self.text, p)
+        return min(moved, max(0, n - 1))
 
     def _word_end(self, p: int) -> int:
         n = len(self.buf)
@@ -163,12 +202,7 @@ class LineEditor:
     def _word_back(self, p: int) -> int:
         if p <= 0:
             return 0
-        p -= 1
-        while p > 0 and self.buf[p].isspace():
-            p -= 1
-        while p > 0 and not self.buf[p - 1].isspace():
-            p -= 1
-        return p
+        return _word_left(self.text, p)
 
     def _visual_range(self) -> tuple[int, int]:
         return min(self.visual_start, self.pos), max(self.visual_start, self.pos) + 1
@@ -470,7 +504,8 @@ class LineEditor:
             if self.mode == "INSERT":
                 attr = curses.A_UNDERLINE
             elif self.mode == "VISUAL":
-                attr = curses.A_STANDOUT
+                # Neovim-like visual mode: only selected text is highlighted.
+                attr = curses.A_NORMAL
             else:
                 attr = curses.A_BOLD
         else:
@@ -479,6 +514,20 @@ class LineEditor:
         _safe_addstr(win, row, col, displayed, attr)
 
         if focused:
+            if self.mode == "VISUAL" and self.buf:
+                s, e = self._visual_range()
+                for idx in range(s, e):
+                    char_in_view = idx - view_start
+                    if 0 <= char_in_view < width:
+                        rstrip_len = len(displayed.rstrip())
+                        char = (
+                            displayed[char_in_view]
+                            if char_in_view < rstrip_len
+                            else " "
+                        )
+                        _safe_addstr(
+                            win, row, col + char_in_view, char, curses.A_STANDOUT
+                        )
             cursor_col = col + min(self.pos - view_start, width - 1)
             # In NORMAL/VISUAL mode draw a block cursor on the character
             if self.mode in ("NORMAL", "VISUAL") and self.buf:
@@ -1029,6 +1078,13 @@ class Pager:
             return None
         if ch == "q":
             return "back"
+        if ch == ":":
+            next_key = _getch_unicode(self.stdscr)
+            next_ch = chr(next_key) if 0 < next_key < 256 else ""
+            if next_ch.lower() == "q":
+                return "back"
+            self._yank_status = f"Nekonata komando: :{next_ch}" if next_ch else ""
+            return None
         if key in (_CTRL_C, _CTRL_D):
             return "quit"
 
@@ -1067,6 +1123,18 @@ class Pager:
         elif ch == "l" or key == curses.KEY_RIGHT:
             cur_line = self.lines[self.row] if self.lines else ""
             self.char_pos = min(max(0, len(cur_line) - 1), self.char_pos + count)
+        elif key == _CTRL_LEFT:
+            cur_line = self.lines[self.row] if self.lines else ""
+            self.char_pos = _word_left(cur_line, self.char_pos)
+        elif key == _CTRL_RIGHT:
+            cur_line = self.lines[self.row] if self.lines else ""
+            if cur_line:
+                self.char_pos = min(
+                    max(0, len(cur_line) - 1),
+                    _word_right(cur_line, self.char_pos),
+                )
+            else:
+                self.char_pos = 0
         elif ch == "0" or key == curses.KEY_HOME:
             self.char_pos = 0
             self.col = 0
@@ -1189,6 +1257,16 @@ class Pager:
                 self.char_pos = max(0, self.char_pos - 1)
             elif ch == "l" or key == curses.KEY_RIGHT:
                 self.char_pos = min(max(0, len(cur_line) - 1), self.char_pos + 1)
+            elif key == _CTRL_LEFT:
+                self.char_pos = _word_left(cur_line, self.char_pos)
+            elif key == _CTRL_RIGHT:
+                if cur_line:
+                    self.char_pos = min(
+                        max(0, len(cur_line) - 1),
+                        _word_right(cur_line, self.char_pos),
+                    )
+                else:
+                    self.char_pos = 0
             elif ch == "w":
                 # word forward
                 p = self.char_pos

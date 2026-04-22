@@ -1,0 +1,50 @@
+# new commands
+
+- `etikedo` manage labels for `todo` and `taglibro`
+  - `etikedo aldoni TEXT`: add etikedo
+   - markdown parsing
+   - support to link to `encik` with `[](ec#)` and  `vorto`  with `[](vt#)`
+   - automatic uuid assignment
+  - `etikedo modifi {UUID} {nova-teksto}`
+  - `etikedo forigi {UUID}|{teksto}`
+  - `etikedo serci {teksto}`
+    - `serci` fuzzy match logic and user selection similar to `encik`
+  - `etikedo vidi {teksto}|{UUID}`
+    - pass to `serci` automatically if no exact match
+- `todo`
+  - `aldoni {titolo-TEKSTO}` add todo task
+    - `--priskribo/-p TEXT`
+      - markdown parsing
+      - support to link to `encik` with `[](ec#)` and  `vorto`  with `[](vt#)`
+    - `--etikedo/-e {UUID}` : add labels
+      - repeat flag for multiple (save this as default behaviour)
+    - `--prioritato/-p INT`
+      - recommended range (0,100), but other values accepted
+      - accept also python formula for dynamic priority
+        - variables: monato(30 tagoj): `M`, tago: `D`, horo: `H`, minuto `M`
+        - example expressions:
+          - `-p "min(20+2*D,70)"` > initial priority 20, with each day passed priority augment by 2 with cap of 70
+          - `-p "30+5*(H-10)" > initial priority 30, since the 10th hour after creation priority augment by 5 every hour
+  - `serci`: filter by every available field
+    - priority: `--prioritato/-p MIN,MAX`
+      - if single value parsed interpret as MIN
+    - show everything if no argument parsed
+  - `vidi {UUID}|{titolo}`
+     - `serci` fuzzy match logic and user selection similar to `encik`
+  - `modifi {UUID}|{titolo}`, `forigi {UUID}|{titolo}`
+      - `serci` fuzzy match logic and user selection similar to `encik`
+- `taglibro`: write entries based diary 
+   - full markdown parsing in all TEXT fields
+   - support to link to `encik` with `[](ec#)` and  `vorto`  with `[](vt#)`
+  - `aldoni {titolo}`
+    - `--etikedo/-e {UUID}`
+    - `--priskribo/-p TEXT`
+    - `--tempo/-t YYYYMMDD_HHMM`
+      - by default NOW
+      - partial date interpretation logic similar to in `kalendaro`
+  - `modifi {UUID}`
+  - `forigi {UUID}`
+  - `vidi {UUID}`
+  - `serci`: filter by every available field
+   - fuzzy match logic and user selection similar to `encik`
+

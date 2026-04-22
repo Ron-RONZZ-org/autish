@@ -204,7 +204,7 @@ class TestVortoImporti:
         mock_con.commit = MagicMock()
         with (
             patch(_VORTO_LOAD, return_value=[]),
-            patch(_VORTO_SAVE) as mock_save,
+            patch(_VORTO_SAVE),
             patch(_VORTO_CONFIRM, return_value=True),
             patch(_VORTO_GET_DB, return_value=mock_con),
         ):

@@ -14,7 +14,11 @@
   Use imperative/base forms like `agordi` instead of noun forms like `agordo`, unless
   a non-verb name is unavoidable for backward compatibility or domain meaning.
 - **Python source code (variables, functions, modules) uses English `snake_case`.**
-- Short single-letter CLI flags may be any intuitive letter (e.g. `-p` for password).
+- **Short CLI flag alias convention (priority order):**
+  1. First letter of long option name in lowercase (e.g. `-i` for `--instrukcio`)
+  2. First letter in uppercase if lowercase conflicts (e.g. `-L` for `--ligilo`)
+  3. First letter of each word in sequence if further specificity needed (e.g. `-td` for `--teksto-dosiero`)
+  Use this fallback strategy consistently to avoid conflicts while keeping aliases readable.
 - **Option alias normalization is mandatory across commands.**
   Use `-L` for `--ligilo`, `-l` for `--lingvo`/`--lingvoj`, and `-lo` for `--limo`.
 - **Esperanto locale consistency is mandatory.**
@@ -112,7 +116,7 @@ autish/
 18. **`agordi` commands should persist to TOML under `~/.config/autish/`** — each command-level settings surface should map to a dedicated editable TOML file (e.g., `~/.config/autish/encik.toml`, `~/.config/autish/filmeto.toml`) so users can configure via CLI or direct file edits.
 19. **Encik semantic groups are user-editable CSV files** — store `encik semantika` groups in `~/.config/autish/semantika/*.csv` with columns `LIGILO,PRISKRIBO,ALIAZOJ`; each file corresponds to one semantic group/subcommand.
 20. **All command output must be clear, meaningful, succinct, and human-readable** — prefer resolved labels/text over raw IDs, and keep confirmations/results understandable at a glance.
-21. **CLI colors must preserve contrast on light and dark terminals** — avoid fixed low-contrast accents; choose/adapt styles based on terminal background so key fields (e.g., `LIGILO`) remain readable.
+21. **CLI colors must preserve contrast on light/dark terminals and in grayscale/BW filters** — avoid fixed low-contrast accents and hue-only cues; adapt styles to terminal background so key fields (e.g., `LIGILO`) remain clearly readable even without color perception.
 
 ---
 
