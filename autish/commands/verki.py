@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import typer
+import tempfile
 
 from autish.commands.kp import _copy as _kp_copy
 from autish.commands.uzanto import _load_profile
@@ -195,11 +196,18 @@ def generi(
         "--temperaturo",
         help="Kreema grado inter 0 kaj 2 (ekz. -tm 0.4).",
     ),
+    debug: bool = typer.Option(
+        False,
+        "-d",
+        "--debug",
+        help="Save raw HTTP response to /tmp as JSON and print the path for debugging.",
+    ),
 ) -> None:
     """Generate or rewrite text with AI."""
     if not instrukcio:
         typer.echo("Eraro: --instrukcio estas deviga.", err=True)
         raise typer.Exit(code=1)
+    debug_path: str | None = None
     try:
         source_text = _resolve_text_input(
             inline_value=teksto,
@@ -215,6 +223,12 @@ def generi(
             validaj = ", ".join(sorted(_VALIDAJ_LONGOJ))
             raise ValueError(f"Nevalida --longo valoro. Uzu unu el: {validaj}.")
         context = _read_text_file(kunteksto_dosiero) if kunteksto_dosiero else None
+
+        # Create debug file path early so the provider can write to it.
+        if debug:
+            with tempfile.NamedTemporaryFile(delete=False, prefix="verki_debug_", suffix=".json", dir="/tmp") as _f:
+                debug_path = _f.name
+
         service = _build_verki_service(
             provizanto=provizanto,
             modelo=modelo,
@@ -231,9 +245,16 @@ def generi(
             kunteksto=context,
             maksimumaj_tokenoj=maksimumaj_tokenoj,
             temperaturo=temperaturo,
+            debug_path=debug_path,
         )
         output = service.verki(request)
+        # Inform user where raw response was saved (if debugging)
+        if debug and debug_path:
+            typer.echo(f"[debug] raw HF response saved to: {debug_path}", err=True)
     except (ValueError, VerkiServiceError) as exc:
+        # If debug file was requested, try to print its path for investigation
+        if debug and debug_path:
+            typer.echo(f"[debug] raw HF response (partial/error) may be at: {debug_path}", err=True)
         typer.echo(f"Eraro: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 

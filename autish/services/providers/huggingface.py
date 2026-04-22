@@ -139,6 +139,40 @@ def _parse_generated_text(raw_json: str) -> str:
     raise VerkiProviderError("Nekonata respondo-formo de Hugging Face.")
 
 
+def _save_debug(path: str | None, url: str, status: int | None, headers: Any, body: str) -> None:
+    """Save a debugging JSON file with basic meta and the raw body.
+
+    The function is intentionally best-effort and will not raise on failure.
+    Authorization headers are redacted before saving to avoid leaking tokens.
+    """
+    if not path:
+        return
+    try:
+        hdrs = {}
+        try:
+            if hasattr(headers, "items"):
+                hdrs = dict(headers.items())
+            elif isinstance(headers, dict):
+                hdrs = dict(headers)
+            else:
+                hdrs = {"raw": str(headers)}
+        except Exception:
+            hdrs = {"raw": str(headers)}
+        # Redact Authorization header if present
+        for k in list(hdrs.keys()):
+            try:
+                if k.lower() == "authorization":
+                    hdrs[k] = "REDACTED"
+            except Exception:
+                continue
+        meta = {"url": url, "status": status, "headers": hdrs, "body": body}
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(meta, fh, ensure_ascii=False, indent=2)
+    except Exception:
+        # Best-effort only
+        return
+
+
 class HuggingFaceProvider(TextGenerationProvider):
     """Minimal Hugging Face Inference API client."""
 
@@ -208,10 +242,34 @@ class HuggingFaceProvider(TextGenerationProvider):
                     with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                         enc = resp.headers.get_content_charset() or "utf-8"
                         raw = resp.read().decode(enc, errors="replace")
+                        # Save raw router response when debugging is enabled
+                        if getattr(request, "debug_path", None):
+                            try:
+                                _save_debug(
+                                    request.debug_path,
+                                    chat_url,
+                                    getattr(resp, "getcode", lambda: None)(),
+                                    resp.headers,
+                                    raw,
+                                )
+                            except Exception:
+                                pass
                         return _parse_generated_text(raw)
                 except urllib.error.HTTPError as exc:
                     # Read body to detect host-side blocking (Cloudflare, etc.)
                     detail = exc.read().decode("utf-8", errors="replace")
+                    # Save router error detail when debugging
+                    if getattr(request, "debug_path", None):
+                        try:
+                            _save_debug(
+                                request.debug_path,
+                                chat_url,
+                                getattr(exc, "code", None),
+                                getattr(exc, "headers", None),
+                                detail,
+                            )
+                        except Exception:
+                            pass
                     low = detail.lower()
                     if (
                         exc.code == 403
@@ -264,9 +322,33 @@ class HuggingFaceProvider(TextGenerationProvider):
             ) as response:
                 encoding = response.headers.get_content_charset() or "utf-8"
                 raw_json = response.read().decode(encoding, errors="replace")
+                # Save raw model endpoint response when debugging is enabled
+                if getattr(request, "debug_path", None):
+                    try:
+                        _save_debug(
+                            request.debug_path,
+                            self._url,
+                            getattr(response, "getcode", lambda: None)(),
+                            response.headers,
+                            raw_json,
+                        )
+                    except Exception:
+                        pass
                 return _parse_generated_text(raw_json)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
+            # Save detail for debugging when enabled
+            if getattr(request, "debug_path", None):
+                try:
+                    _save_debug(
+                        request.debug_path,
+                        self._url,
+                        getattr(exc, "code", None),
+                        getattr(exc, "headers", None),
+                        detail,
+                    )
+                except Exception:
+                    pass
             message = _extract_error_message(detail) or str(exc.reason)
 
             if (

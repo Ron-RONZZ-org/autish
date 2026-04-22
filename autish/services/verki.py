@@ -29,6 +29,8 @@ class VerkiRequest:
     kunteksto: str | None = None
     maksimumaj_tokenoj: int = 512
     temperaturo: float = 0.7
+    # Optional path where providers should save raw HTTP response for debugging
+    debug_path: str | None = None
 
 
 class VerkiService:
@@ -87,6 +89,7 @@ class VerkiService:
             prompt=prompt,
             max_new_tokens=request.maksimumaj_tokenoj,
             temperature=request.temperaturo,
+            debug_path=request.debug_path,
         )
         try:
             output = self._provider.generate(generation_request)

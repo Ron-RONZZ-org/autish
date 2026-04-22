@@ -12,11 +12,17 @@ class VerkiProviderError(RuntimeError):
 
 @dataclass(frozen=True)
 class GenerationRequest:
-    """Normalized backend request payload for text generation."""
+    """Normalized backend request payload for text generation.
+
+    debug_path: optional path to save raw HTTP response for debugging. When
+    provided the provider should write the raw response body (and basic meta)
+    to this file. This field is optional and defaults to None.
+    """
 
     prompt: str
     max_new_tokens: int = 512
     temperature: float = 0.7
+    debug_path: str | None = None
 
 
 class TextGenerationProvider(Protocol):
