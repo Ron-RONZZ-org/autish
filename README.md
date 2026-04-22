@@ -30,6 +30,8 @@ All keywords are in **Esperanto** to lower the barrier for non-English speakers.
 | `autish bluhdento malkonekti` | Disconnect a Bluetooth device |
 | `autish sistemo` | Print system information |
 | `autish kp` | Copy last command output to clipboard |
+| `autish verki generi` | AI-assisted text generation and rewriting; see [VERKI.md](VERKI.md) |
+| `autish verki modelo` | Browse available AI models |
 
 ---
 

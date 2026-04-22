@@ -64,6 +64,10 @@ disko = "autish.commands.disko:app"
 usb = "autish.commands.usb:app"
 filmeto = "autish.commands.filmeto:app"
 kalendaro = "autish.commands.kalendaro:app"
+etikedo = "autish.commands.etikedo:app"
+todo = "autish.commands.todo:app"
+taglibro = "autish.commands.taglibro:app"
+verki = "autish.commands.verki:app"
 
 [tool.ruff]
 line-length = 88

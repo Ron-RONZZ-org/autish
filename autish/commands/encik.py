@@ -5,6 +5,7 @@ Usage:
     encik aldoni <file.enc>     — add a new knowledge node from an .enc file
     encik vidi <titolo|UUID>    — view an existing node
     encik modifi <title|UUID>   — edit an existing node in $EDITOR as a temp .enc file
+    encik eksporti <title|UUID> <celvojo> — export one node to .enc
     encik agordi                — manage display settings in ~/.config/autish/encik.toml
     encik serci <demando>       — search nodes (title by default)
     encik semantika-serci "<kondiĉoj>" — search by typed semantic value conditions
@@ -789,7 +790,22 @@ def _count_matches(text: str, needle: str) -> int:
     folded_needle = _fold_search_text(needle)
     if not folded_text or not folded_needle:
         return 0
-    return len(re.findall(re.escape(folded_needle), folded_text))
+    def _collapse_spaces(value: str) -> str:
+        return " ".join(str(value or "").split())
+
+    def _strip_parenthesized(value: str) -> str:
+        return _collapse_spaces(re.sub(r"\([^)]*\)", " ", value))
+
+    folded_needle_compact = _collapse_spaces(folded_needle)
+    folded_text_compact = _collapse_spaces(folded_text)
+    direct = len(re.findall(re.escape(folded_needle_compact), folded_text_compact))
+    stripped = len(
+        re.findall(
+            re.escape(_collapse_spaces(folded_needle)),
+            _strip_parenthesized(folded_text),
+        )
+    )
+    return max(direct, stripped)
 
 
 def _fold_search_text(text: str) -> str:
@@ -850,21 +866,43 @@ def _search_entries(
         match_count = sum(_count_matches(p, needle) for p in pool if p)
         if match_count <= 0:
             continue
+        compactness_candidates: list[int] = []
+        for part in pool:
+            folded_part = _fold_search_text(part)
+            if not folded_part:
+                continue
+            folded_part_compact = " ".join(folded_part.split())
+            folded_part_no_paren = " ".join(
+                re.sub(r"\([^)]*\)", " ", folded_part).split()
+            )
+            needle_compact = " ".join(needle.split())
+            if needle_compact in folded_part_compact:
+                compactness_candidates.append(
+                    max(0, len(folded_part_compact) - len(needle_compact))
+                )
+            if needle_compact in folded_part_no_paren:
+                compactness_candidates.append(
+                    max(0, len(folded_part_no_paren) - len(needle_compact))
+                )
         e_copy = dict(e)
         e_copy["_match_count"] = match_count
+        e_copy["_compactness"] = (
+            min(compactness_candidates) if compactness_candidates else 10**9
+        )
         e_copy["_subklaso_count"] = int(sub_count_map.get(str(e.get("uuid") or ""), 0))
         e_copy["_time"] = str(e.get("modifita_je") or e.get("kreita_je") or "")
         scored.append(e_copy)
 
     def _sort_key(item: dict) -> tuple:
         match_key = -int(item.get("_match_count", 0))
+        compactness_key = int(item.get("_compactness", 10**9))
         level_val = int(item.get("_subklaso_count", 0))
         level_key = -level_val if prefer_high_level else level_val
         time_val = str(item.get("_time") or "")
         time_key = (
             "".join(chr(255 - ord(c)) for c in time_val) if prefer_newest else time_val
         )
-        return (match_key, level_key, time_key)
+        return (match_key, compactness_key, level_key, time_key)
 
     scored.sort(key=_sort_key)
     return scored[:max_results]
@@ -1132,7 +1170,7 @@ def _entry_to_enc(entry: dict) -> str:
                     # Output jaro as integer without quotes
                     items.append(f"{k} = {v}")
                 else:
-                    items.append(f"{k} = {json.dumps(v)}")
+                    items.append(f"{k} = {json.dumps(v, ensure_ascii=False)}")
             parts.append(f"{{{', '.join(items)}}}")
         return "[" + ", ".join(parts) + "]"
 
@@ -1144,7 +1182,9 @@ def _entry_to_enc(entry: dict) -> str:
             items = []
             for k in ("teksto", "autoro", "verko", "jaro", "lingvo"):
                 if c.get(k) is not None and str(c.get(k)).strip():
-                    items.append(f"{k} = {json.dumps(str(c.get(k)))}")
+                    items.append(
+                        f"{k} = {json.dumps(str(c.get(k)), ensure_ascii=False)}"
+                    )
             parts.append(f"{{{', '.join(items)}}}")
         return "[" + ", ".join(parts) + "]"
 
@@ -1188,7 +1228,9 @@ def _entry_to_enc(entry: dict) -> str:
                 safe = value.replace('"""', '\\"""')
                 lines.append(f'{prefix}.{lang} = """\n{safe}\n"""')
             else:
-                lines.append(f"{prefix}.{lang} = {json.dumps(value)}")
+                lines.append(
+                    f"{prefix}.{lang} = {json.dumps(value, ensure_ascii=False)}"
+                )
         return "\n".join(lines)
 
     return _ENC_TEMPLATE.format(
@@ -1210,6 +1252,24 @@ def _invalid_edit_dir() -> Path:
 
 def _invalid_edit_path(uuid: str) -> Path:
     return _invalid_edit_dir() / f"{uuid}.enc"
+
+
+def _safe_export_basename(raw: str, fallback: str) -> str:
+    normalized = unicodedata.normalize("NFKD", str(raw or "").strip())
+    ascii_ready = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    candidate = re.sub(r"[^A-Za-z0-9._-]+", "-", ascii_ready).lower()
+    candidate = re.sub(r"-{2,}", "-", candidate).strip("-._")
+    return candidate or fallback
+
+
+def _resolve_export_path(raw_path: str, *, default_filename: str, suffix: str) -> Path:
+    path = Path(raw_path).expanduser()
+    raw_text = str(raw_path or "").strip()
+    if (path.exists() and path.is_dir()) or raw_text.endswith(("/", "\\")):
+        path = path / default_filename
+    if path.suffix.lower() != suffix.lower():
+        path = path.with_suffix(suffix)
+    return path.resolve()
 
 
 def _fix_inline_table_commas(text: str) -> str:
@@ -4699,19 +4759,42 @@ def aldoni(
         False,
         "-k",
         "--kopii",
-        help="Kopii #xxxxxxxx de la aldonita/modifita nodo al tondujo.",
+        help=(
+            "Kopii mallongan UUID-referencon (#xxxxxxxx) de la trovita nodo al tondujo "
+            "(ĉe pluraj rezultoj: la interage elektita)."
+        ),
     ),
     semantika_kopii: bool = typer.Option(
         False,
         "-sk",
         "--semantika-kopii",
-        help="Kopii [titolo](#xxxxxxxx) de la aldonita/modifita nodo al tondujo.",
+        help=(
+            "Kopii semantikan referencon en formo [titolo](#xxxxxxxx) al tondujo "
+            "(ĉe pluraj rezultoj: la interage elektita)."
+        ),
+    ),
+    vidi_poste: bool = typer.Option(
+        False,
+        "-v",
+        "--vidi",
+        help="Montri la aldonitan/modifitan nodon post konservado.",
+    ),
+    html: bool = typer.Option(
+        False,
+        "-H",
+        "--html",
+        help=(
+            "Kun --vidi: montri la aldonitan/modifitan nodon kiel HTML en "
+            "la defaŭlta retumilo."
+        ),
     ),
 ) -> None:
     """Aldoni novan nodon el .enc dosiero."""
     if kopii_uuid and semantika_kopii:
         typer.echo("Uzu nur unu el --kopii aŭ --semantika-kopii.", err=True)
         raise typer.Exit(code=1)
+    if html and not vidi_poste:
+        vidi_poste = True
     path = Path(dosiero).expanduser().resolve()
     if not path.exists():
         typer.echo(f"Dosiero ne trovita: {path}", err=True)
@@ -4764,6 +4847,13 @@ def aldoni(
         typer.echo(f'Modifis #{existing["uuid"][:8]}  "{existing["titolo"]}"')
         if kopii_uuid or semantika_kopii:
             _copy_entry_reference(existing, semantika=semantika_kopii)
+        if vidi_poste:
+            if html:
+                html_doc = _render_entry_html(existing)
+                out_path = _open_html_document(html_doc)
+                typer.echo(f"Malfermas en retumilo: {out_path}")
+            else:
+                _display_entry(existing)
         return
 
     now = _now_iso()
@@ -4779,6 +4869,13 @@ def aldoni(
     typer.echo(f'Aldonis #{entry["uuid"][:8]}  "{entry["titolo"]}"')
     if kopii_uuid or semantika_kopii:
         _copy_entry_reference(entry, semantika=semantika_kopii)
+    if vidi_poste:
+        if html:
+            html_doc = _render_entry_html(entry)
+            out_path = _open_html_document(html_doc)
+            typer.echo(f"Malfermas en retumilo: {out_path}")
+        else:
+            _display_entry(entry)
 
 
 @app.command("modifi")
@@ -5108,6 +5205,41 @@ def vidi(
     if kopii_uuid or semantika_kopii:
         _copy_entry_reference(entry, semantika=semantika_kopii)
     _display_entry(entry, lingvo=lingvo, montri_cxion=montri_cxion)
+
+
+@app.command("eksporti")
+def eksporti(
+    ref: str = typer.Argument(
+        ...,
+        help=(
+            "UUID, #UUID, aŭ titolo por eksporti unu nodon. "
+            'Ekzemplo: encik eksporti "#e0a5d3b7" ~/eliro/nodo.enc'
+        ),
+    ),
+    celvojo: str = typer.Argument(
+        ...,
+        help=(
+            "Cel dosiero aŭ dosierujo por .enc eligo. "
+            "Ekzemplo: ~/eliro/fiziko.enc"
+        ),
+    ),
+) -> None:
+    """Eksporti unu encik-nodon al .enc dosiero."""
+    entry = _resolve_entry(ref, interactive=True, precise=False)
+    if entry is None:
+        typer.echo(f"Nodo ne trovita: {ref!r}", err=True)
+        raise typer.Exit(code=1)
+    short_uuid = str(entry.get("uuid") or "")[:8]
+    title = str(entry.get("titolo") or "").strip()
+    default_name = f"{_safe_export_basename(title, short_uuid or 'encik')}.enc"
+    out_path = _resolve_export_path(
+        celvojo,
+        default_filename=default_name,
+        suffix=".enc",
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(_entry_to_enc(entry), encoding="utf-8")
+    typer.echo(f'Eksportis #{short_uuid}  "{title}" al {out_path}.')
 
 
 def _semantika_language_priority(languages: list[str]) -> list[str]:
@@ -5699,6 +5831,27 @@ def semantika_serci(
     _print_candidates(matches)
 
 
+def _parse_semantiko_link_filters(raw: str) -> list[tuple[str, str | None]]:
+    clauses = [part.strip() for part in str(raw or "").split(";") if part.strip()]
+    if not clauses:
+        raise ValueError("Nevalida --semantiko valoro.")
+    parsed: list[tuple[str, str | None]] = []
+    for idx, clause in enumerate(clauses, start=1):
+        rel_token, sep, raw_target = clause.partition(" ")
+        rel = _normalize_semantika_ligilo(rel_token.strip())
+        if not rel or not _is_known_semantika_ligilo(rel):
+            raise ValueError(
+                f"Nevalida --semantiko valoro en kondiĉo {idx}: {rel_token!r}."
+            )
+        target = raw_target.strip() if sep else None
+        if sep and not target:
+            raise ValueError(
+                f"Nevalida --semantiko kondiĉo {idx}: mankas celnodo post ligilo."
+            )
+        parsed.append((rel, target or None))
+    return parsed
+
+
 @app.command("serci")
 def serci(
     ctx: typer.Context,
@@ -5773,10 +5926,12 @@ def serci(
     ),
     semantiko: str | None = typer.Option(
         None,
+        "-sm",
         "--semantiko",
         help=(
-            "Filtri laŭ semantika ligilo (ekz: rdf:type, rdfs:subClassOf, "
-            "owl:disjointWith, wdt:P50). Plena listo: encik semantika."
+            "Filtri laŭ semantika ligilo aŭ kondiĉoj "
+            "(ekz: rdf:type aŭ \"rdf:type #9be93895; wdt:P361 #1a2b3c4d\"). "
+            "Plena listo: encik semantika."
         ),
     ),
     al_ref: str | None = typer.Option(
@@ -5791,7 +5946,7 @@ def serci(
         help="Serĉi paralelajn klasojn (nodoj kun sama superklaso).",
     ),
     limo: int = typer.Option(
-        5,
+        20,
         "-lo",
         "--limo",
         help=(
@@ -5877,49 +6032,103 @@ def serci(
         return None
 
     if semantiko:
-        rel = _normalize_semantika_ligilo(semantiko)
-        if not rel or not _is_known_semantika_ligilo(rel):
+        try:
+            filters = _parse_semantiko_link_filters(semantiko)
+        except ValueError as exc:
             typer.echo("Nevalida --semantiko valoro.", err=True)
+            typer.echo(str(exc), err=True)
             typer.echo(_semantika_help_hint(), err=True)
-            raise typer.Exit(code=1)
-        target_uuid: str | None = None
+            raise typer.Exit(code=1) from exc
+
         if al_ref:
-            target = _resolve_entry(al_ref, interactive=False, precise=preciza)
-            if target is None:
-                typer.echo(f"Cela nodo ne trovita por --al: {al_ref!r}", err=True)
+            if len(filters) != 1:
+                typer.echo(
+                    "--al kongruas nur kun unu --semantiko ligilo-kondiĉo.",
+                    err=True,
+                )
                 raise typer.Exit(code=1)
-            target_uuid = str(target["uuid"])
-        matches: list[tuple[dict, str]] = []
+            rel, existing_target = filters[0]
+            if existing_target is not None:
+                typer.echo(
+                    "Uzu aŭ --al aŭ celreferencon en --semantiko, ne ambaŭ.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            filters = [(rel, al_ref)]
+
+        resolved_filters: list[tuple[str, str | None]] = []
+        for rel, target_ref in filters:
+            if target_ref is None:
+                resolved_filters.append((rel, None))
+                continue
+            target_entry = _resolve_entry(
+                target_ref, interactive=False, precise=preciza
+            )
+            if target_entry is None:
+                typer.echo(
+                    f"Cela nodo ne trovita por --semantiko: {target_ref!r}",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            resolved_filters.append((rel, str(target_entry["uuid"])))
+
+        matches: list[tuple[dict, list[tuple[str, str]]]] = []
         for entry in _load_all():
-            for link in _normalize_ligilo_items(entry.get("ligilo") or []):
-                if link.get("tipo") != rel:
-                    continue
-                to_uuid = str(link.get("uuid") or "")
-                resolved = _find_by_uuid(to_uuid)
-                if not resolved:
-                    continue
-                resolved_uuid = str(resolved["uuid"])
-                if target_uuid and resolved_uuid != target_uuid:
-                    continue
-                matches.append((entry, resolved_uuid))
+            links = _normalize_ligilo_items(entry.get("ligilo") or [])
+            matched_links: list[tuple[str, str]] = []
+            ok = True
+            for rel, target_uuid in resolved_filters:
+                rel_hits: list[str] = []
+                for link in links:
+                    if link.get("tipo") != rel:
+                        continue
+                    to_uuid = str(link.get("uuid") or "")
+                    resolved = _find_by_uuid(to_uuid)
+                    if not resolved:
+                        continue
+                    resolved_uuid = str(resolved["uuid"])
+                    if target_uuid and resolved_uuid != target_uuid:
+                        continue
+                    rel_hits.append(resolved_uuid)
+                if not rel_hits:
+                    ok = False
+                    break
+                matched_links.append((rel, rel_hits[0]))
+            if ok:
+                matches.append((entry, matched_links))
+
         if not matches:
             typer.echo("Neniu semantika ligilo trovita.")
             return
+
         if html:
+            if len(resolved_filters) != 1:
+                typer.echo(
+                    "--html por --semantiko subtenas nur unu ligilo-kondiĉon.",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+            only_rel = resolved_filters[0][0]
+            html_matches = [(entry, links[0][1]) for entry, links in matches]
             root, graph_nodes, graph_edges = _render_semantika_matches_html(
-                rel, matches
+                only_rel, html_matches
             )
             html_doc = _render_linked_graph_html(root, graph_nodes, graph_edges)
             out_path = _open_html_document(html_doc)
             typer.echo(f"Malfermas semantikan mapon en retumilo: {out_path}")
             return
-        typer.echo(f"Semantikaj ligiloj ({rel}):")
-        for source, to_uuid in matches:
-            target_title = _resolve_uuid_to_title(to_uuid)
-            typer.echo(
-                f"  #{source['uuid'][:8]} {source['titolo']} -> "
-                f"{rel} -> {target_title} #{to_uuid[:8]}"
-            )
+
+        if len(resolved_filters) == 1:
+            typer.echo(f"Semantikaj ligiloj ({resolved_filters[0][0]}):")
+        else:
+            typer.echo("Semantikaj ligiloj (AND-kondiĉoj):")
+        for source, link_hits in matches:
+            for rel, to_uuid in link_hits:
+                target_title = _resolve_uuid_to_title(to_uuid)
+                typer.echo(
+                    f"  #{source['uuid'][:8]} {source['titolo']} -> "
+                    f"{rel} -> {target_title} #{to_uuid[:8]}"
+                )
         return
 
     # For -s/-S/-L/-p we need to resolve the root node.
@@ -5973,7 +6182,7 @@ def serci(
         # ── -p / --paralela ────────────────────────────────────────────────
         if paralela:
             # Use paralela_limo as the default when limo hasn't been explicitly set
-            max_r = paralela_limo if limo == 5 else abs(limo)
+            max_r = paralela_limo if limo == 20 else abs(limo)
             results = _paralela_of(root["uuid"], max_results=max_r)
             if not results:
                 typer.echo(f"Neniu paralela nodo trovita por '{root['titolo']}'.")

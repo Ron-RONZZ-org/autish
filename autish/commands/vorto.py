@@ -8,6 +8,8 @@ Usage:
     vorto serci  [teksto]    — search entries
     vorto forigi <uuid>      — delete an entry
     vorto malfari            — undo the last change (up to 10)
+    vorto eksporti <dosiero> — export all entries as JSON
+    vorto eksporti <ref> <celvojo> — export one entry as TOML
 
 Data is stored in an SQLite database at ~/.local/share/autish/vorto.db.
 The undo stack (last 10 operations) is kept in the same database.
@@ -2430,13 +2432,13 @@ def serci(
         ),
     ),
     limo: int = typer.Option(
-        50,
+        10,
         "-lo",
         "--limo",
         help=tr(
-            "Maksimuma nombro da rezultoj (defaŭlte 50).",
-            "Max number of results (default 50).",
-            "Nombre maximum de résultats (50 par défaut).",
+            "Maksimuma nombro da rezultoj (defaŭlte 10).",
+            "Max number of results (default 10).",
+            "Nombre maximum de résultats (10 par défaut).",
         ),
     ),
     ordo: str = typer.Option(
@@ -2496,7 +2498,7 @@ def serci(
             typer.echo(f"Eniro ne trovita por --ligilo: {ligilo_ref!r}", err=True)
             raise typer.Exit(code=1)
         # Keep existing --limo default for regular search, but default to 1 hop here.
-        depth = 1 if limo == 50 else abs(limo)
+        depth = 1 if limo == 10 else abs(limo)
         results = _ligilo_hops_of(str(root.get("uuid") or ""), entries, max_depth=depth)
         if norm_ordo := ordo.lower():
             if norm_ordo in ("dato", "d"):
@@ -2749,9 +2751,175 @@ def malfari() -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def _safe_export_basename(raw: str, fallback: str) -> str:
+    normalized = unicodedata.normalize("NFKD", str(raw or "").strip())
+    ascii_ready = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    candidate = re.sub(r"[^A-Za-z0-9._-]+", "-", ascii_ready).lower()
+    candidate = re.sub(r"-{2,}", "-", candidate).strip("-._")
+    return candidate or fallback
+
+
+def _resolve_export_path(
+    raw_path: str,
+    *,
+    default_filename: str,
+    suffix: str | None = None,
+) -> Path:
+    path = Path(raw_path).expanduser()
+    raw_text = str(raw_path or "").strip()
+    if (path.exists() and path.is_dir()) or raw_text.endswith(("/", "\\")):
+        path = path / default_filename
+    if suffix and path.suffix.lower() != suffix.lower():
+        path = path.with_suffix(suffix)
+    return path.resolve()
+
+
+def _entry_to_toml_text(entry: dict) -> str:
+    def _json_string(value: object) -> str:
+        return json.dumps(str(value or ""), ensure_ascii=False)
+
+    def _json_list(items: list[object]) -> str:
+        return json.dumps([str(item) for item in items], ensure_ascii=False)
+
+    lines: list[str] = [
+        f"uuid = {_json_string(entry.get('uuid'))}",
+        f"teksto = {_json_string(entry.get('teksto'))}",
+        f"lingvo = {_json_string(entry.get('lingvo'))}",
+        f"kategorio = {_json_string(entry.get('kategorio'))}",
+    ]
+
+    tipo = entry.get("tipo")
+    if isinstance(tipo, list):
+        lines.append(f"tipo = {_json_list(tipo)}")
+    else:
+        lines.append(f"tipo = {_json_string(tipo)}")
+
+    lines.extend(
+        [
+            f"temo = {_json_string(entry.get('temo'))}",
+            f"tono = {_json_string(entry.get('tono'))}",
+        ]
+    )
+    nivelo = entry.get("nivelo")
+    if isinstance(nivelo, (int, float)):
+        lines.append(f"nivelo = {float(nivelo)}")
+    lines.extend(
+        [
+            f"difinoj = {_json_list(entry.get('difinoj') or [])}",
+            f"uzoj = {_json_list(entry.get('uzoj') or [])}",
+            f"ligiloj = {_json_list(entry.get('ligiloj') or [])}",
+            f"autoro = {_json_string(entry.get('autoro'))}",
+            f"verko = {_json_string(entry.get('verko'))}",
+            f"kreita_je = {_json_string(entry.get('kreita_je'))}",
+            f"modifita_je = {_json_string(entry.get('modifita_je'))}",
+        ]
+    )
+    etikedoj = entry.get("etikedoj") or {}
+    if isinstance(etikedoj, dict) and etikedoj:
+        lines.append("")
+        lines.append("[etikedoj]")
+        for key, value in sorted(etikedoj.items()):
+            key_text = json.dumps(str(key), ensure_ascii=False)
+            lines.append(f"{key_text} = {_json_string(value)}")
+    return "\n".join(lines) + "\n"
+
+
+def _select_entry_for_export(reference: str, entries: list[dict]) -> dict | None:
+    raw_ref = str(reference or "").strip()
+    if not raw_ref:
+        return None
+    if raw_ref.lower().startswith("vt#"):
+        raw_ref = "#" + raw_ref[3:]
+    lookup = raw_ref[1:] if raw_ref.startswith("#") else raw_ref
+
+    def _dedupe(candidates: list[dict]) -> list[dict]:
+        seen: set[str] = set()
+        ordered: list[dict] = []
+        for candidate in candidates:
+            uid = str(candidate.get("uuid") or "")
+            if not uid or uid in seen:
+                continue
+            seen.add(uid)
+            ordered.append(candidate)
+        return ordered
+
+    def _prompt_pick(candidates: list[dict], message: str) -> dict | None:
+        if not candidates:
+            return None
+        typer.echo(message)
+        _display_results(candidates, all_entries=entries, numerate=True)
+        raw = typer.prompt(
+            "Elektu numeron por eksporti (aŭ Enter por nuligi)",
+            default="",
+        )
+        if not raw.strip():
+            typer.echo("Nuligita.")
+            raise typer.Exit(code=0)
+        try:
+            idx = int(raw.strip()) - 1
+        except ValueError:
+            typer.echo("Nevalida elekto.", err=True)
+            raise typer.Exit(code=1) from None
+        if idx < 0 or idx >= len(candidates):
+            typer.echo("Nevalida elekto.", err=True)
+            raise typer.Exit(code=1)
+        return candidates[idx]
+
+    by_uuid_exact = [e for e in entries if str(e.get("uuid") or "") == lookup]
+    if len(by_uuid_exact) == 1:
+        return by_uuid_exact[0]
+
+    by_uuid_prefix = [
+        e for e in entries if lookup and str(e.get("uuid") or "").startswith(lookup)
+    ]
+    by_text_exact = [
+        e
+        for e in entries
+        if str(e.get("teksto") or "").strip().lower() == lookup.lower()
+    ]
+    exact_candidates = _dedupe([*by_uuid_exact, *by_uuid_prefix, *by_text_exact])
+    if exact_candidates:
+        if len(exact_candidates) == 1:
+            return exact_candidates[0]
+        return _prompt_pick(exact_candidates, f"Pluraj kandidatoj por {reference!r}:")
+
+    folded_lookup = _fold_search_text(lookup)
+    contains_candidates = _dedupe(
+        [
+            e
+            for e in entries
+            if folded_lookup
+            and folded_lookup in _fold_search_text(str(e.get("teksto") or ""))
+        ]
+    )[:20]
+    fuzzy_candidates = _fuzzy_text_matches(entries, lookup, limit=20)
+    candidates = (
+        contains_candidates if contains_candidates else _dedupe(fuzzy_candidates)
+    )
+    if not candidates:
+        return None
+    return _prompt_pick(
+        candidates,
+        f"Ekzakta kongruo ne trovita por {reference!r}. Proksimaj rezultoj:",
+    )
+
+
 @app.command("eksporti")
 def eksporti(
-    dosiero: str = typer.Argument(..., help="Output file path (e.g. vorto.json)."),
+    celo_aux_ref: str = typer.Argument(
+        ...,
+        help=(
+            "Cel dosiero por plena eksporto (ekz: vorto.json), aŭ referenco por unuopa "
+            "eksporto (ekz: #952f2079 aŭ saluton)."
+        ),
+    ),
+    celvojo: str | None = typer.Argument(
+        None,
+        help=(
+            "Nedeviga celvojo por unuopa eksporto al TOML. "
+            "Ekzemplo: vorto eksporti #952f2079 ~/eliro/mia_vorto.toml"
+        ),
+    ),
     pasvorto: str | None = typer.Option(
         None,
         "-p",
@@ -2759,13 +2927,45 @@ def eksporti(
         help="Optional password to encrypt the export.",
     ),
 ) -> None:
-    """Export all wordbook entries to a JSON file (optionally encrypted)."""
+    """Eksporti ĉiujn enirojn (JSON) aŭ unu eniron (TOML)."""
     from autish.commands._crypto import encrypt  # noqa: PLC0415
 
+    # One-entry export mode: vorto eksporti <UUID|TEKSTO> <celvojo>
+    if celvojo is not None:
+        if pasvorto:
+            typer.echo(
+                "--pasvorto estas disponebla nur por plena JSON-eksporto.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        entries = _load_entries()
+        entry = _select_entry_for_export(celo_aux_ref, entries)
+        if entry is None:
+            typer.echo(f"Eniro ne trovita: {celo_aux_ref!r}", err=True)
+            raise typer.Exit(1)
+        short_uuid = str(entry.get("uuid") or "")[:8]
+        text_label = str(entry.get("teksto") or "").strip()
+        default_base = _safe_export_basename(text_label, short_uuid or "vorto")
+        default_name = f"{default_base}.toml"
+        out_path = _resolve_export_path(
+            celvojo,
+            default_filename=default_name,
+            suffix=".toml",
+        )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(_entry_to_toml_text(entry), encoding="utf-8")
+        typer.echo(f'Eksportis #{short_uuid}  "{text_label}" al {out_path}.')
+        return
+
+    # Full export mode (backward compatible): vorto eksporti <dosiero>
     entries = _load_entries()
     payload = json.dumps(entries, ensure_ascii=False, indent=2).encode("utf-8")
-
-    out_path = Path(dosiero)
+    out_path = _resolve_export_path(
+        celo_aux_ref,
+        default_filename="vorto_export.json",
+        suffix=None,
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     if pasvorto:
         data = encrypt(payload, pasvorto)
         out_path.write_bytes(data)

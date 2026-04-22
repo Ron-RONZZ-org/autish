@@ -351,6 +351,35 @@ class TestKontaktoFlow:
         assert res.exit_code == 0
         assert "hello@ronzz.org" in res.output
 
+    def test_kontakto_serci_includes_manually_added_retposhtadreso(
+        self, isolated_retposto_db
+    ):
+        add = runner.invoke(
+            app,
+            [
+                "kontakto",
+                "aldoni",
+                "-n",
+                "Manual Mail",
+                "-o",
+                "Org",
+                "-r",
+                "manual@example.com:labora:prima",
+            ],
+        )
+        assert add.exit_code == 0, add.output
+
+        by_query = runner.invoke(app, ["kontakto", "serci", "manual@example.com"])
+        assert by_query.exit_code == 0, by_query.output
+        assert "manual@example.com" in by_query.output
+
+        by_filter = runner.invoke(
+            app,
+            ["kontakto", "serci", "--retpostadreso", "manual@example.com"],
+        )
+        assert by_filter.exit_code == 0, by_filter.output
+        assert "manual@example.com" in by_filter.output
+
     def test_kontakto_serci_filters_by_postadreso(self, isolated_retposto_db):
         runner.invoke(
             app,

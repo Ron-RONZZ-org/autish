@@ -2857,6 +2857,24 @@ class TestSpamPaneTui:
         confirm_mock.assert_not_called()
         assert updated == [(33, {"spamo": 0})]
 
+    def test_spam_pane_accepts_colon_q_alias(self):
+        tui = _make_tui_for_keys()
+        tui.stdscr = _FakeStdScr(keys=[ord(":")])
+
+        with patch.object(tui, "_prompt_inline", return_value="q") as prompt_mock:
+            tui._show_spam_pane()
+
+        prompt_mock.assert_called_once()
+
+    def test_simple_pager_accepts_colon_q_alias(self):
+        tui = _make_tui_for_keys()
+        tui.stdscr = _FakeStdScr(keys=[ord(":")])
+
+        with patch.object(tui, "_prompt_inline", return_value="q") as prompt_mock:
+            tui._run_pager_lines(["uno", "du"], "Testo")
+
+        prompt_mock.assert_called_once()
+
 
 class TestConfirmPrompt:
     def test_prompt_confirm_waits_for_user_keystroke(self):

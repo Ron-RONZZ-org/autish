@@ -1129,6 +1129,16 @@ class TestSerci:
         assert result.exit_code == 0
         assert "3 rezulto" in result.output
 
+    def test_serci_default_limo_is_10(self):
+        many = [
+            _make_entry(uuid=str(uuid.uuid4()), teksto=f"match{i}")
+            for i in range(25)
+        ]
+        with patch(_LOAD, return_value=many):
+            result = runner.invoke(app, ["vorto", "serci", "match"])
+        assert result.exit_code == 0
+        assert "10 rezulto" in result.output
+
     def test_ligilo_search_default_one_hop(self):
         a = _make_entry(uuid=SAMPLE_UUID, teksto="a", ligiloj=[SAMPLE_UUID2])
         b = _make_entry(uuid=SAMPLE_UUID2, teksto="b", ligiloj=[SAMPLE_UUID])
@@ -1697,6 +1707,16 @@ class TestLineEditor:
         ed.handle_key(ord("v"))
         assert ed.mode == "VISUAL"
 
+    def test_visual_delete_matches_selected_range(self):
+        ed = self._make_editor("abcdef", insert=False)
+        ed.pos = 1
+        ed.handle_key(ord("v"))
+        ed.handle_key(ord("l"))
+        ed.handle_key(ord("l"))
+        ed.handle_key(ord("d"))
+        # Selected bcd (indices 1..3) should be removed, no extra character.
+        assert ed.text == "aef"
+
     def test_enter_returns_done_in_insert(self):
         ed = self._make_editor("")
         result = ed.handle_key(ord("\n"))
@@ -1800,6 +1820,20 @@ class TestPager:
         result = p._normal_key(ord("q"), "q")
         assert result == "back"
 
+    def test_colon_q_alias_returns_back(self):
+        from unittest.mock import MagicMock
+
+        from autish.commands._vorto_tui import Pager
+
+        stdscr = MagicMock()
+        stdscr.getmaxyx.return_value = (24, 80)
+        stdscr.get_wch.return_value = ord("q")
+        pager = Pager(stdscr, ["line"], title="test")
+
+        result = pager._normal_key(ord(":"), ":")
+
+        assert result == "back"
+
     def test_x_in_results_selects_current_entry_for_delete(self):
         from unittest.mock import MagicMock
 
@@ -1819,6 +1853,46 @@ class TestPager:
 
         assert result == "delete_entry"
         assert pager.selected_entry is entries[1]
+
+    def test_getch_unicode_decodes_ctrl_right_escape_sequence(self):
+        from unittest.mock import MagicMock
+
+        import autish.commands._vorto_tui as tui_mod
+
+        stdscr = MagicMock()
+        stdscr.get_wch.side_effect = [
+            "\x1b",
+            "[",
+            "1",
+            ";",
+            "5",
+            "C",
+            tui_mod.curses.error(),
+        ]
+
+        key = tui_mod._getch_unicode(stdscr)
+
+        assert key == tui_mod._CTRL_RIGHT
+
+    def test_getch_unicode_decodes_ctrl_left_escape_sequence(self):
+        from unittest.mock import MagicMock
+
+        import autish.commands._vorto_tui as tui_mod
+
+        stdscr = MagicMock()
+        stdscr.get_wch.side_effect = [
+            "\x1b",
+            "[",
+            "1",
+            ";",
+            "5",
+            "D",
+            tui_mod.curses.error(),
+        ]
+
+        key = tui_mod._getch_unicode(stdscr)
+
+        assert key == tui_mod._CTRL_LEFT
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1867,6 +1941,107 @@ class TestVidiNoArg:
         assert "0 rezulto" in result.output
 
 
+class TestEksporti:
+    def test_eksporti_full_json_still_supported(self, tmp_path):
+        out_path = tmp_path / "vorto.json"
+        with patch(_LOAD, return_value=[_make_entry()]):
+            result = runner.invoke(app, ["vorto", "eksporti", str(out_path)])
+        assert result.exit_code == 0, result.output
+        assert out_path.exists()
+        content = out_path.read_text(encoding="utf-8")
+        assert '"teksto": "hello"' in content
+
+    def test_eksporti_single_entry_to_toml_by_uuid(self, tmp_path):
+        out_path = tmp_path / "unuopa.toml"
+        entry = _make_entry(teksto="saluton")
+        with patch(_LOAD, return_value=[entry]):
+            result = runner.invoke(
+                app,
+                ["vorto", "eksporti", SAMPLE_UUID, str(out_path)],
+            )
+        assert result.exit_code == 0, result.output
+        assert out_path.exists()
+        content = out_path.read_text(encoding="utf-8")
+        assert 'teksto = "saluton"' in content
+        assert f'uuid = "{SAMPLE_UUID}"' in content
+
+    def test_eksporti_single_entry_uses_selection_when_no_exact_match(
+        self, tmp_path
+    ):
+        out_path = tmp_path / "fuzzy.toml"
+        first = _make_entry(uuid=SAMPLE_UUID, teksto="saluton")
+        second = _make_entry(uuid=SAMPLE_UUID2, teksto="salubrigi")
+        with patch(_LOAD, return_value=[first, second]):
+            result = runner.invoke(
+                app,
+                ["vorto", "eksporti", "salu", str(out_path)],
+                input="2\n",
+            )
+        assert result.exit_code == 0, result.output
+        content = out_path.read_text(encoding="utf-8")
+        assert 'teksto = "salubrigi"' in content
+        assert f'uuid = "{SAMPLE_UUID2}"' in content
+
+    def test_eksporti_single_entry_directory_path_appends_default_filename(
+        self, tmp_path
+    ):
+        entry = _make_entry(uuid=SAMPLE_UUID, teksto="tre longa teksto")
+        with patch(_LOAD, return_value=[entry]):
+            result = runner.invoke(
+                app,
+                ["vorto", "eksporti", SAMPLE_UUID, str(tmp_path)],
+            )
+        assert result.exit_code == 0, result.output
+        exported = list(tmp_path.glob("*.toml"))
+        assert exported
+        content = exported[0].read_text(encoding="utf-8")
+        assert f'uuid = "{SAMPLE_UUID}"' in content
+
+    def test_eksporti_single_entry_omits_empty_etikedoj_table(self, tmp_path):
+        out_path = tmp_path / "sen-etikedoj.toml"
+        entry = _make_entry(uuid=SAMPLE_UUID, teksto="sen-etikedoj", etikedoj={})
+        with patch(_LOAD, return_value=[entry]):
+            result = runner.invoke(
+                app,
+                ["vorto", "eksporti", SAMPLE_UUID, str(out_path)],
+            )
+        assert result.exit_code == 0, result.output
+        content = out_path.read_text(encoding="utf-8")
+        assert "[etikedoj]" not in content
+
+    def test_eksporti_single_entry_default_filename_transliterates_accents(
+        self, tmp_path
+    ):
+        entry = _make_entry(uuid=SAMPLE_UUID, teksto="façade système")
+        with patch(_LOAD, return_value=[entry]):
+            result = runner.invoke(
+                app,
+                ["vorto", "eksporti", SAMPLE_UUID, str(tmp_path)],
+            )
+        assert result.exit_code == 0, result.output
+        exported = list(tmp_path.glob("*.toml"))
+        assert exported
+        assert "facade-systeme" in exported[0].name
+
+    def test_eksporti_single_entry_keeps_utf8_text_human_readable(self, tmp_path):
+        out_path = tmp_path / "utf8.toml"
+        entry = _make_entry(
+            uuid=SAMPLE_UUID,
+            teksto="système",
+            difinoj=["français façade"],
+        )
+        with patch(_LOAD, return_value=[entry]):
+            result = runner.invoke(
+                app,
+                ["vorto", "eksporti", SAMPLE_UUID, str(out_path)],
+            )
+        assert result.exit_code == 0, result.output
+        content = out_path.read_text(encoding="utf-8")
+        assert "système" in content
+        assert "français façade" in content
+        assert "\\u00" not in content
+
+
 class TestHelpCommand:
     """Tests for the autish help command."""
 
@@ -1912,6 +2087,33 @@ class TestLineEditorViewStart:
         ed.render(win, row=1, col=5, width=20, focused=True)
         # view_start should have moved back to 5 (at cursor)
         assert ed._view_start <= ed.pos
+
+    def test_visual_render_highlights_only_selected_range(self):
+        from unittest.mock import MagicMock
+
+        import autish.commands._vorto_tui as tui_mod
+
+        ed = self._make_editor("abcdef", insert=False)
+        ed.mode = "VISUAL"
+        ed.visual_start = 1
+        ed.pos = 3
+        win = MagicMock()
+
+        ed.render(win, row=1, col=0, width=20, focused=True)
+
+        calls = win.addstr.call_args_list
+        assert calls
+        # Base line render should stay readable instead of highlighting everything.
+        assert calls[0].args[3] != tui_mod.curses.A_STANDOUT
+
+        selected_cols = {
+            c.args[1]
+            for c in calls
+            if len(c.args) >= 4
+            and c.args[0] == 1
+            and c.args[3] == tui_mod.curses.A_STANDOUT
+        }
+        assert {1, 2, 3}.issubset(selected_cols)
 
 
 class TestFormEditorModeInit:
@@ -2186,6 +2388,22 @@ class TestPagerCharCursor:
         p.char_pos = 2  # last char of "abc"
         p._normal_key(ord("l"), "l")
         assert p.char_pos == 2  # can't go past end
+
+    def test_ctrl_right_jumps_to_next_word(self):
+        import autish.commands._vorto_tui as tui_mod
+
+        p = self._make_pager(["unu du tri"])
+        p.char_pos = 0
+        p._normal_key(tui_mod._CTRL_RIGHT, "")
+        assert p.char_pos == 4
+
+    def test_ctrl_left_jumps_to_previous_word(self):
+        import autish.commands._vorto_tui as tui_mod
+
+        p = self._make_pager(["unu du tri"])
+        p.char_pos = 7
+        p._normal_key(tui_mod._CTRL_LEFT, "")
+        assert p.char_pos == 4
 
     def test_zero_resets_char_pos_and_col(self):
         p = self._make_pager()

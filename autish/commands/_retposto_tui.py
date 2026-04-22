@@ -4550,6 +4550,13 @@ class RetpostoTUI:
             ch = chr(key) if 0 < key < 256 else ""
             if ch == "q" or key in (_ESC, _CTRL_C, _CTRL_D):
                 break
+            if ch == ":":
+                cmd = self._prompt_inline("Komando").strip().lower()
+                if cmd in ("q", "quit", "eliru", "exit"):
+                    break
+                if cmd in ("h", "help", "helpo"):
+                    self._show_help()
+                continue
             if ch == "j" or key == curses.KEY_DOWN:
                 cursor = min(cursor + 1, n - 1)
             elif ch == "k" or key == curses.KEY_UP:
@@ -4705,7 +4712,9 @@ class RetpostoTUI:
             if ch == "q" or key in (_ESC, _CTRL_C, _CTRL_D):
                 break
             if ch == ":":
-                cmd = self._prompt_inline("Komando")
+                cmd = self._prompt_inline("Komando").strip().lower()
+                if cmd in ("q", "quit", "eliru", "exit"):
+                    break
                 if cmd in ("h", "help", "helpo"):
                     self._show_help()
                 continue
@@ -4873,7 +4882,9 @@ class RetpostoTUI:
             if ch == "q" or key in (_CTRL_C, _CTRL_D):
                 return
             if ch == ":":
-                cmd = self._prompt_inline("Komando")
+                cmd = self._prompt_inline("Komando").strip().lower()
+                if cmd in ("q", "quit", "eliru", "exit"):
+                    return
                 if cmd in ("h", "help", "helpo"):
                     self._show_help()
                 continue
@@ -5005,6 +5016,11 @@ class RetpostoTUI:
             ch = chr(key) if 0 < key < 256 else ""
             if ch == "q" or key in (_ESC, _CTRL_C, _CTRL_D):
                 break
+            if ch == ":":
+                cmd = self._prompt_inline("Komando").strip().lower()
+                if cmd in ("q", "quit", "eliru", "exit"):
+                    break
+                continue
             if ch == "j" or key == curses.KEY_DOWN:
                 row = min(row + 1, max(0, len(lines) - h + 2))
             elif ch == "k" or key == curses.KEY_UP:

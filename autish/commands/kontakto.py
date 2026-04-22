@@ -177,7 +177,7 @@ def _search_contact_match(contact: dict, query: str) -> bool:
         return True
     if q in (contact.get("familia_nomo") or "").lower():
         return True
-    if q in (contact.get("retposto") or "").lower():
+    if any(q in email.lower() for email in _contact_email_values(contact)):
         return True
     if q in (contact.get("organizo") or "").lower():
         return True
@@ -190,6 +190,36 @@ def _search_contact_match(contact: dict, query: str) -> bool:
     if any(q in str(v).lower() for v in (contact.get("kampoj") or {}).values()):
         return True
     return False
+
+
+def _contact_email_values(contact: dict) -> list[str]:
+    values: list[str] = []
+    primary = str(contact.get("retposto") or "").strip()
+    if primary:
+        values.append(primary)
+    extra_values: list[str] = []
+    for item in contact.get("retposhtadresoj") or []:
+        if isinstance(item, dict):
+            value = str(item.get("valoro") or "").strip()
+            if value:
+                extra_values.append(value)
+        elif isinstance(item, str) and item.strip():
+            extra_values.append(item.strip())
+    values.extend(extra_values)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for value in values:
+        low = value.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        unique.append(value)
+    return unique
+
+
+def _contact_primary_email(contact: dict) -> str:
+    emails = _contact_email_values(contact)
+    return emails[0] if emails else ""
 
 
 def _contact_full_name(contact: dict) -> str:
@@ -447,7 +477,7 @@ def listigi() -> None:
         table.add_row(
             f"#{str(c.get('uuid') or '')[:8]}",
             c.get("nomo") or "",
-            c.get("retposto") or "",
+            _contact_primary_email(c),
             "1" if int(c.get("konfirmita") or 0) else "0",
             ", ".join(c.get("kategorioj") or []),
         )
@@ -476,7 +506,7 @@ def vidi(
         ("organizo", row.get("organizo"), True, False),
         ("nomo", row.get("nomo"), True, False),
         ("familia-nomo", row.get("familia_nomo"), True, True),
-        ("retpoŝto", row.get("retposto"), False, False),
+        ("retpoŝto", _contact_primary_email(row), False, False),
         ("telefonnumero", row.get("telefono"), False, False),
         ("naskiĝdato", row.get("naskig_dato"), False, False),
         ("naskiĝloko", row.get("naskig_loko"), False, False),
@@ -538,7 +568,7 @@ def serci(
         None, "-l", "--lingvo", help="Filtri laŭ lingvo-kodo (ripetebla)."
     ),
     retpostadreso: str | None = typer.Option(
-        None, "--retpostadreso", help="Filtri laŭ ĉefa retpoŝto."
+        None, "--retpostadreso", help="Filtri laŭ ĉefa aŭ aldonita retpoŝto."
     ),
     organizo: str | None = typer.Option(
         None, "-o", "--organizo", help="Filtri laŭ organizo."
@@ -612,12 +642,17 @@ def serci(
             threshold=0.7 if fuzzy else 1.0,
         ):
             return False
-        if retpostadreso and not _fuzzy_contains(
-            retpostadreso,
-            str(contact.get("retposto") or ""),
-            threshold=0.7 if fuzzy else 1.0,
-        ):
-            return False
+        if retpostadreso:
+            mail_values = _contact_email_values(contact)
+            if not any(
+                _fuzzy_contains(
+                    retpostadreso,
+                    mail,
+                    threshold=0.7 if fuzzy else 1.0,
+                )
+                for mail in mail_values
+            ):
+                return False
         if organizo and not _fuzzy_contains(
             organizo,
             str(contact.get("organizo") or ""),
@@ -739,7 +774,7 @@ def serci(
                 str(c.get("organizo") or ""),
                 str(c.get("nomo") or ""),
                 str(c.get("familia_nomo") or ""),
-                str(c.get("retposto") or ""),
+                _contact_primary_email(c),
                 str(c.get("telefono") or ""),
                 f"#{str(c.get('uuid') or '')[:8]}",
             ]

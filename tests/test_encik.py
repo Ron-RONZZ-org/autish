@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -1397,6 +1398,53 @@ class TestEncikCLI:
         assert copied["value"].startswith("#")
         assert len(copied["value"]) == 9
 
+    def test_aldoni_vidi_displays_entry(self, tmp_path):
+        enc = self._make_enc_file(tmp_path, "ViduPoste", "Posta difino")
+        result = runner.invoke(app, ["encik", "aldoni", str(enc), "--vidi"])
+        assert result.exit_code == 0, result.output
+        assert 'Aldonis #' in result.output
+        assert "ViduPoste" in result.output
+        assert "difino:" in result.output
+
+    def test_aldoni_html_opens_browser_view(self, tmp_path, monkeypatch):
+        import autish.commands.encik as enc_mod
+
+        enc = self._make_enc_file(tmp_path, "HtmlPost", "Html difino")
+        opened: dict[str, str] = {}
+
+        def _fake_open(doc: str) -> str:
+            opened["html"] = doc
+            return "/tmp/encik-post.html"
+
+        monkeypatch.setattr(enc_mod, "_open_html_document", _fake_open)
+        result = runner.invoke(app, ["encik", "aldoni", str(enc), "--html"])
+        assert result.exit_code == 0, result.output
+        assert "Malfermas en retumilo: /tmp/encik-post.html" in result.output
+        assert "<html" in opened["html"].lower()
+
+    def test_aldoni_html_and_kopii_are_compatible(self, tmp_path, monkeypatch):
+        import autish.commands.encik as enc_mod
+
+        enc = self._make_enc_file(tmp_path, "HtmlCopy", "Html+copy difino")
+        opened: dict[str, str] = {}
+        copied: dict[str, str] = {}
+
+        def _fake_open(doc: str) -> str:
+            opened["html"] = doc
+            return "/tmp/encik-post-copy.html"
+
+        def _fake_copy(value: str) -> None:
+            copied["value"] = value
+
+        monkeypatch.setattr(enc_mod, "_open_html_document", _fake_open)
+        monkeypatch.setattr("pyperclip.copy", _fake_copy)
+        result = runner.invoke(app, ["encik", "aldoni", str(enc), "--html", "--kopii"])
+        assert result.exit_code == 0, result.output
+        assert copied["value"].startswith("#")
+        assert "Kopiis UUID al tondujo" in result.output
+        assert "Malfermas en retumilo: /tmp/encik-post-copy.html" in result.output
+        assert "<html" in opened["html"].lower()
+
     def test_modifi_semantika_kopii_copies_reference(self, tmp_path, monkeypatch):
         enc = self._make_enc_file(tmp_path, "CopyMod", "Difino")
         add = runner.invoke(app, ["encik", "aldoni", str(enc)])
@@ -1560,6 +1608,146 @@ class TestEncikCLI:
         # Help text should contain the command name
         assert "serci" in result.output.lower() or "Usage" in result.output
 
+    def test_eksporti_writes_single_entry_enc(self, tmp_path, monkeypatch):
+        import autish.commands.encik as enc_mod
+
+        db_path = tmp_path / "encik.db"
+        entry = _make_entry(
+            uuid="12345678-0000-0000-0000-000000000000",
+            titolo="Eksporta Nodo",
+            difinio="Nodo por eksporto.",
+            terminologio={"eo": "Eksporta Nodo"},
+            difinoj={"eo": "Nodo por eksporto."},
+        )
+        _load_db_fixture([entry], db_path)
+        monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
+
+        out_path = tmp_path / "nodo.enc"
+        result = runner.invoke(
+            app, ["encik", "eksporti", "Eksporta Nodo", str(out_path)]
+        )
+
+        assert result.exit_code == 0, result.output
+        assert out_path.exists()
+        content = out_path.read_text(encoding="utf-8")
+        assert 'terminologio.eo = "Eksporta Nodo"' in content
+        assert 'difino.eo = "Nodo por eksporto."' in content
+
+    def test_eksporti_prompts_selection_when_reference_is_ambiguous(
+        self, tmp_path, monkeypatch
+    ):
+        import autish.commands.encik as enc_mod
+
+        db_path = tmp_path / "encik.db"
+        first = _make_entry(
+            uuid="aaaaaaaa-0000-0000-0000-000000000000",
+            titolo="Suno A",
+            difinio="Unua varianto.",
+            terminologio={"eo": "Suno A"},
+            difinoj={"eo": "Unua varianto."},
+        )
+        second = _make_entry(
+            uuid="bbbbbbbb-0000-0000-0000-000000000000",
+            titolo="Suno B",
+            difinio="Dua varianto.",
+            terminologio={"eo": "Suno B"},
+            difinoj={"eo": "Dua varianto."},
+        )
+        _load_db_fixture([first, second], db_path)
+        monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
+
+        out_path = tmp_path / "suno.enc"
+        result = runner.invoke(
+            app,
+            ["encik", "eksporti", "Suno", str(out_path)],
+            input="2\n",
+        )
+
+        assert result.exit_code == 0, result.output
+        content = out_path.read_text(encoding="utf-8")
+        assert 'terminologio.eo = "Suno B"' in content
+
+    def test_eksporti_directory_path_appends_default_filename(
+        self, tmp_path, monkeypatch
+    ):
+        import autish.commands.encik as enc_mod
+
+        db_path = tmp_path / "encik.db"
+        entry = _make_entry(
+            uuid="cccccccc-0000-0000-0000-000000000000",
+            titolo="Direktoro Nodo",
+            difinio="Dosieruja eksporto.",
+            terminologio={"eo": "Direktoro Nodo"},
+            difinoj={"eo": "Dosieruja eksporto."},
+        )
+        _load_db_fixture([entry], db_path)
+        monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
+
+        result = runner.invoke(
+            app,
+            ["encik", "eksporti", "Direktoro Nodo", str(tmp_path)],
+        )
+
+        assert result.exit_code == 0, result.output
+        exported = [p for p in tmp_path.glob("*.enc") if p.name != "encik.db"]
+        assert exported
+        content = exported[0].read_text(encoding="utf-8")
+        assert 'terminologio.eo = "Direktoro Nodo"' in content
+
+    def test_eksporti_default_filename_transliterates_accents(
+        self, tmp_path, monkeypatch
+    ):
+        import autish.commands.encik as enc_mod
+
+        db_path = tmp_path / "encik.db"
+        entry = _make_entry(
+            uuid="dddddddd-0000-0000-0000-000000000000",
+            titolo="Système d'exploitation Linux",
+            difinio="Difino",
+            terminologio={"fr": "Système d'exploitation Linux"},
+            difinoj={"fr": "Difino"},
+        )
+        _load_db_fixture([entry], db_path)
+        monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
+
+        result = runner.invoke(
+            app,
+            ["encik", "eksporti", "Système d'exploitation Linux", str(tmp_path)],
+        )
+
+        assert result.exit_code == 0, result.output
+        exported = [p for p in tmp_path.glob("*.enc") if p.name != "encik.db"]
+        assert exported
+        assert "systeme-d-exploitation-linux" in exported[0].name
+
+    def test_eksporti_keeps_utf8_content_human_readable(
+        self, tmp_path, monkeypatch
+    ):
+        import autish.commands.encik as enc_mod
+
+        db_path = tmp_path / "encik.db"
+        entry = _make_entry(
+            uuid="eeeeeeee-0000-0000-0000-000000000000",
+            titolo="système d'exploitation Linux",
+            difinio="système de base",
+            terminologio={"fr": "système d'exploitation Linux"},
+            difinoj={"fr": "système de base"},
+        )
+        _load_db_fixture([entry], db_path)
+        monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
+
+        out_path = tmp_path / "utf8.enc"
+        result = runner.invoke(
+            app,
+            ["encik", "eksporti", "système d'exploitation Linux", str(out_path)],
+        )
+
+        assert result.exit_code == 0, result.output
+        content = out_path.read_text(encoding="utf-8")
+        assert 'terminologio.fr = "système d\'exploitation Linux"' in content
+        assert 'difino.fr = "système de base"' in content
+        assert "\\u00" not in content
+
     def test_serci_subklasoj(self, tmp_path):
         # Animal -> Mammal
         parent_enc = tmp_path / "animal.enc"
@@ -1687,6 +1875,67 @@ class TestEncikCLI:
         )
         assert miss.exit_code == 0, miss.output
         assert "Neniu semantika ligilo trovita." in miss.output
+
+    def test_serci_semantiko_accepts_sm_alias_and_target_clause(self, tmp_path):
+        class_uuid = "10000000-0000-0000-0000-000000000001"
+        instance_uuid = "20000000-0000-0000-0000-000000000002"
+        _load_db_fixture(
+            [
+                _make_entry(uuid=class_uuid, titolo="Class"),
+                _make_entry(
+                    uuid=instance_uuid,
+                    titolo="Instance",
+                    ligilo=[[class_uuid, "rdf:type"]],
+                ),
+            ],
+            tmp_path / "encik.db",
+        )
+
+        result = runner.invoke(
+            app,
+            ["encik", "serci", "-sm", f"rdf:type #{class_uuid[:8]};"],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Semantikaj ligiloj (rdf:type):" in result.output
+        assert "Instance" in result.output
+        assert "Class" in result.output
+
+    def test_serci_semantiko_supports_multiple_and_conditions(self, tmp_path):
+        class_uuid = "10000000-0000-0000-0000-000000000001"
+        whole_uuid = "30000000-0000-0000-0000-000000000003"
+        inst_ok = "20000000-0000-0000-0000-000000000002"
+        inst_partial = "40000000-0000-0000-0000-000000000004"
+        _load_db_fixture(
+            [
+                _make_entry(uuid=class_uuid, titolo="Class"),
+                _make_entry(uuid=whole_uuid, titolo="Whole"),
+                _make_entry(
+                    uuid=inst_ok,
+                    titolo="Both",
+                    ligilo=[[class_uuid, "rdf:type"], [whole_uuid, "wdt:P361"]],
+                ),
+                _make_entry(
+                    uuid=inst_partial,
+                    titolo="OnlyType",
+                    ligilo=[[class_uuid, "rdf:type"]],
+                ),
+            ],
+            tmp_path / "encik.db",
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "encik",
+                "serci",
+                "--semantiko",
+                f"rdf:type #{class_uuid[:8]}; wdt:P361 #{whole_uuid[:8]}",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Semantikaj ligiloj (AND-kondiĉoj):" in result.output
+        assert "Both" in result.output
+        assert "OnlyType" not in result.output
 
     def test_semantika_serci_text_and_range(self, tmp_path):
         _load_db_fixture(
@@ -3300,6 +3549,61 @@ class TestEncikCLI:
         merged = result.output + (result.stderr or "")
         assert "Nevalida --semantiko valoro." in merged
         assert "encik semantika" in merged
+
+    def test_serci_matches_phrase_with_explanatory_parentheses(self, tmp_path):
+        _load_db_fixture(
+            [
+                _make_entry(
+                    uuid="93000000-0000-0000-0000-000000000003",
+                    titolo="AI (artefarita inteligenteco) modelo",
+                    terminologio={"eo": "AI (artefarita inteligenteco) modelo"},
+                )
+            ],
+            tmp_path / "encik.db",
+        )
+        result = runner.invoke(app, ["encik", "serci", "AI modelo"])
+        assert result.exit_code == 0, result.output
+        assert "Neniu nodo trovita" not in result.output
+        assert "AI (artefarita inteligenteco) modelo" in result.output
+
+    def test_serci_prioritizes_compact_match_over_extra_content(self, tmp_path):
+        _load_db_fixture(
+            [
+                _make_entry(
+                    uuid="91000000-0000-0000-0000-000000000001",
+                    titolo="dosiero",
+                    terminologio={"eo": "dosiero"},
+                ),
+                _make_entry(
+                    uuid="92000000-0000-0000-0000-000000000002",
+                    titolo="7z dosiero",
+                    terminologio={"eo": "7z dosiero"},
+                ),
+            ],
+            tmp_path / "encik.db",
+        )
+        result = runner.invoke(app, ["encik", "serci", "dosiero"], input="\n")
+        assert result.exit_code == 0, result.output
+        assert "dosiero" in result.output
+        assert "7z dosiero" in result.output
+        assert result.output.find("dosiero") < result.output.find("7z dosiero")
+
+    def test_serci_default_limo_is_20(self, tmp_path):
+        entries = []
+        for idx in range(25):
+            head = f"{idx + 1:08x}"
+            entries.append(
+                _make_entry(
+                    uuid=f"{head}-0000-0000-0000-000000000000",
+                    titolo=f"nodo-{idx:02d}",
+                    terminologio={"eo": f"nodo-{idx:02d}"},
+                )
+            )
+        _load_db_fixture(entries, tmp_path / "encik.db")
+        result = runner.invoke(app, ["encik", "serci", "nodo"], input="\n")
+        assert result.exit_code == 0, result.output
+        hits = re.findall(r"\b[0-9a-f]{8}\b", result.output)
+        assert len(hits) == 20
 
     def test_semantic_reconcile_repairs_existing_wrong_reverse(self, tmp_path):
         base = tmp_path / "base_repair.enc"
