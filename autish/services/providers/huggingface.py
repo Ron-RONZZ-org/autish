@@ -46,12 +46,30 @@ def _parse_generated_text(raw_json: str) -> str:
         if isinstance(choices, list) and choices:
             first = choices[0]
             if isinstance(first, dict):
-                # prefer message.content
+                # prefer message.content, but handle some providers that include
+                # alternative fields (e.g. reasoning_content) when outputs are
+                # truncated (finish_reason == "length").
                 message = first.get("message")
+                # finish_reason may be on the choice or at top-level
+                finish_reason = first.get("finish_reason") or payload.get("finish_reason")
                 if isinstance(message, dict):
                     content = message.get("content")
+                    reasoning = message.get("reasoning_content") or message.get("reasoning")
+                    # If content exists and seems reasonable, use it, unless the
+                    # choice was cut for length and an alternative reasoning field
+                    # appears longer — prefer the longer reasoning content in that case.
                     if isinstance(content, str) and content.strip():
+                        if (
+                            isinstance(finish_reason, str)
+                            and finish_reason == "length"
+                            and isinstance(reasoning, str)
+                            and len(reasoning.strip()) > len(content.strip())
+                        ):
+                            return reasoning.strip()
                         return content.strip()
+                    # If no content but reasoning exists, use reasoning
+                    if isinstance(reasoning, str) and reasoning.strip():
+                        return reasoning.strip()
                 # fall back to text field
                 text = first.get("text")
                 if isinstance(text, str) and text.strip():
