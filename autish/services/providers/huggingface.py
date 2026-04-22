@@ -246,7 +246,10 @@ class HuggingFaceProvider(TextGenerationProvider):
             ]
             openai_payload = {
                 "model": self._model_name,
-                "messages": [{"role": "user", "content": request.prompt}],
+                "messages": [
+                    {"role": "system", "content": "Respondu nur per la fina teksto, sen klarigoj aŭ metakomento."},
+                    {"role": "user", "content": request.prompt},
+                ],
                 "max_tokens": request.max_new_tokens,
                 "temperature": request.temperature,
             }
