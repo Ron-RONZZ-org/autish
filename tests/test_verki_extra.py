@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-
-import pytest
 
 from autish.services.providers.base import GenerationRequest
 from autish.services.providers.huggingface import HuggingFaceProvider
@@ -19,7 +16,7 @@ class _FakeResponse:
         self._payload = payload
         self.headers = _FakeHeaders()
 
-    def __enter__(self) -> "_FakeResponse":
+    def __enter__(self) -> _FakeResponse:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
@@ -42,5 +39,7 @@ def test_huggingface_provider_ignores_top_level_id(monkeypatch):
 
     monkeypatch.setattr(hf_mod.urllib.request, "urlopen", _fake_urlopen)
     provider = HuggingFaceProvider(model="foo", token="hf_test")
-    text = provider.generate(GenerationRequest(prompt="x", max_new_tokens=10, temperature=0.1))
+    text = provider.generate(
+        GenerationRequest(prompt="x", max_new_tokens=10, temperature=0.1)
+    )
     assert text == "Hello from deep generated text"

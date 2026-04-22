@@ -46,41 +46,20 @@ def _parse_generated_text(raw_json: str) -> str:
         if isinstance(choices, list) and choices:
             first = choices[0]
             if isinstance(first, dict):
-                # prefer message.content, but handle some providers that include
-                # alternative fields (e.g. reasoning_content) when outputs are
-                # truncated (finish_reason == "length").
                 message = first.get("message")
-                # finish_reason may be on the choice or at top-level
-                finish_reason = first.get("finish_reason") or payload.get("finish_reason")
                 if isinstance(message, dict):
                     content = message.get("content")
-                    reasoning = message.get("reasoning_content") or message.get("reasoning")
-                    # If content exists and seems reasonable, use it, unless the
-                    # choice was cut for length and an alternative reasoning field
-                    # appears longer — prefer the longer reasoning content in that case.
                     if isinstance(content, str) and content.strip():
-                        if (
-                            isinstance(finish_reason, str)
-                            and finish_reason == "length"
-                            and isinstance(reasoning, str)
-                            and len(reasoning.strip()) > len(content.strip())
-                        ):
-                            return reasoning.strip()
                         return content.strip()
-                    # If no content but reasoning exists, use reasoning
-                    if isinstance(reasoning, str) and reasoning.strip():
-                        # Attempt to extract a content-like block (e.g. .enc file text)
-                        try:
-                            import re
-
-                            # Look for likely start tokens used in .enc entries or definitions
-                            m = re.search(r"(?i)(terminologio\.|terminology\.|difino\.|definition\.|termino\.)", reasoning)
-                            if m:
-                                return reasoning[m.start():].strip()
-                        except Exception:
-                            pass
-                        # Fallback: return whole reasoning if no structured block found
-                        return reasoning.strip()
+                    if isinstance(content, list):
+                        text_parts: list[str] = []
+                        for item in content:
+                            if isinstance(item, dict):
+                                text_value = item.get("text")
+                                if isinstance(text_value, str) and text_value.strip():
+                                    text_parts.append(text_value.strip())
+                        if text_parts:
+                            return "\n".join(text_parts).strip()
                 # fall back to text field
                 text = first.get("text")
                 if isinstance(text, str) and text.strip():
@@ -98,77 +77,81 @@ def _parse_generated_text(raw_json: str) -> str:
             if isinstance(generated, str) and generated.strip():
                 return generated.strip()
 
-    # As a last resort, search recursively for the most-likely text field while
-    # avoiding short metadata fields like 'id' that can appear before the content.
+    # Last resort: extract only content-like fields and skip reasoning metadata.
     def _extract_first_string(o: Any) -> str | None:
-        def _contains_likely_content(x: Any) -> bool:
-            if isinstance(x, dict):
-                for k in ("choices", "generated_text", "data", "outputs", "text", "message", "content", "result", "answer"):
-                    if k in x:
-                        return True
-                for v in x.values():
-                    if isinstance(v, (dict, list)) and _contains_likely_content(v):
-                        return True
-            if isinstance(x, list):
-                for v in x:
-                    if _contains_likely_content(v):
-                        return True
-            return False
+        preferred_keys = (
+            "generated_text",
+            "output_text",
+            "output",
+            "outputs",
+            "text",
+            "content",
+            "answer",
+            "result",
+            "message",
+            "data",
+            "choices",
+        )
+        ignore_keys = {
+            "id",
+            "object",
+            "model",
+            "type",
+            "created",
+            "name",
+            "role",
+            "usage",
+            "reasoning",
+            "reasoning_content",
+            "reasoning_details",
+            "thinking",
+            "thought",
+        }
 
         if isinstance(o, str):
-            return o
+            s = o.strip()
+            return s or None
+
         if isinstance(o, dict):
-            # Prefer known semantic fields that commonly contain generated text
-            for key in ("choices", "generated_text", "data", "outputs", "text", "message", "content", "result", "answer"):
+            for key in preferred_keys:
                 if key in o:
                     res = _extract_first_string(o[key])
                     if res:
                         return res
-            ignore_keys = {"id", "object", "model", "type", "created", "name"}
-            # First pass: recurse into dict/list values that likely contain generated text
             for k, v in o.items():
                 if k in ignore_keys:
                     continue
-                if isinstance(v, (dict, list)) and _contains_likely_content(v):
+                if isinstance(v, (dict, list)):
                     res = _extract_first_string(v)
                     if res:
                         return res
-            # Second pass: recurse into lists even if they don't explicitly contain preferred keys
-            for k, v in o.items():
-                if k in ignore_keys:
-                    continue
-                if isinstance(v, list):
-                    res = _extract_first_string(v)
-                    if res:
-                        return res
-            # Final pass: return any string values (fallback)
-            for k, v in o.items():
-                if k in ignore_keys:
-                    continue
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
+            return None
+
         if isinstance(o, list):
-            # Prefer list elements that likely contain generated text
-            for v in o:
-                if _contains_likely_content(v):
-                    res = _extract_first_string(v)
-                    if res:
-                        return res
-            # Fallback: scan list items in order
             for v in o:
                 res = _extract_first_string(v)
                 if res:
                     return res
+            return None
+
         return None
 
     fallback = _extract_first_string(payload)
     if isinstance(fallback, str) and fallback.strip():
         return fallback.strip()
 
-    raise VerkiProviderError("Nekonata respondo-formo de Hugging Face.")
+    raise VerkiProviderError(
+        "Nekonata respondo-formo de Hugging Face (neniu fina teksto trovita)."
+    )
 
 
-def _save_debug(path: str | None, url: str, status: int | None, headers: Any, body: str) -> None:
+def _save_debug(
+    path: str | None,
+    url: str,
+    status: int | None,
+    headers: Any,
+    body: str,
+) -> None:
     """Save a debugging JSON file with basic meta and the raw body.
 
     The function is intentionally best-effort and will not raise on failure.
@@ -244,16 +227,6 @@ class HuggingFaceProvider(TextGenerationProvider):
                 "https://router.huggingface.co/v1",
                 f"{self._api_base}/v1",
             ]
-            openai_payload = {
-                "model": self._model_name,
-                "messages": [
-                    {"role": "system", "content": "Respondu nur per la fina teksto, sen klarigoj aŭ metakomento."},
-                    {"role": "user", "content": request.prompt},
-                ],
-                "max_tokens": request.max_new_tokens,
-                "temperature": request.temperature,
-            }
-            openai_body = json.dumps(openai_payload, ensure_ascii=False).encode("utf-8")
             openai_headers = {
                 "Content-Type": "application/json",
                 "Accept": "application/json",
@@ -261,70 +234,99 @@ class HuggingFaceProvider(TextGenerationProvider):
             if self._token:
                 openai_headers["Authorization"] = f"Bearer {self._token}"
 
+            base_payload = {
+                "model": self._model_name,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Respondu nur per la fina teksto, "
+                            "sen klarigoj aŭ metakomento."
+                        ),
+                    },
+                    {"role": "user", "content": request.prompt},
+                ],
+                "max_tokens": request.max_new_tokens,
+                "temperature": request.temperature,
+            }
+            payload_attempts = [
+                {
+                    **base_payload,
+                    "reasoning_effort": "none",
+                    "response_format": {"type": "text"},
+                },
+                base_payload,
+            ]
+
             last_err: Exception | None = None
             for base in router_candidates:
                 chat_url = f"{base.rstrip('/')}/chat/completions"
-                try:
-                    req = urllib.request.Request(
-                        chat_url,
-                        data=openai_body,
-                        headers=openai_headers,
-                        method="POST",
-                    )
-                    with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                        enc = resp.headers.get_content_charset() or "utf-8"
-                        raw = resp.read().decode(enc, errors="replace")
-                        # Save raw router response when debugging is enabled
+                for payload in payload_attempts:
+                    openai_body = json.dumps(
+                        payload, ensure_ascii=False
+                    ).encode("utf-8")
+                    try:
+                        req = urllib.request.Request(
+                            chat_url,
+                            data=openai_body,
+                            headers=openai_headers,
+                            method="POST",
+                        )
+                        with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                            enc = resp.headers.get_content_charset() or "utf-8"
+                            raw = resp.read().decode(enc, errors="replace")
+                            # Save raw router response when debugging is enabled
+                            if getattr(request, "debug_path", None):
+                                try:
+                                    _save_debug(
+                                        request.debug_path,
+                                        chat_url,
+                                        getattr(resp, "getcode", lambda: None)(),
+                                        resp.headers,
+                                        raw,
+                                    )
+                                except Exception:
+                                    pass
+                            return _parse_generated_text(raw)
+                    except urllib.error.HTTPError as exc:
+                        # Read body to detect host-side blocking (Cloudflare, etc.)
+                        detail = exc.read().decode("utf-8", errors="replace")
+                        # Save router error detail when debugging
                         if getattr(request, "debug_path", None):
                             try:
                                 _save_debug(
                                     request.debug_path,
                                     chat_url,
-                                    getattr(resp, "getcode", lambda: None)(),
-                                    resp.headers,
-                                    raw,
+                                    getattr(exc, "code", None),
+                                    getattr(exc, "headers", None),
+                                    detail,
                                 )
                             except Exception:
                                 pass
-                        return _parse_generated_text(raw)
-                except urllib.error.HTTPError as exc:
-                    # Read body to detect host-side blocking (Cloudflare, etc.)
-                    detail = exc.read().decode("utf-8", errors="replace")
-                    # Save router error detail when debugging
-                    if getattr(request, "debug_path", None):
-                        try:
-                            _save_debug(
-                                request.debug_path,
-                                chat_url,
-                                getattr(exc, "code", None),
-                                getattr(exc, "headers", None),
-                                detail,
-                            )
-                        except Exception:
-                            pass
-                    low = detail.lower()
-                    if (
-                        exc.code == 403
-                        or "cloudflare" in low
-                        or "error 1010" in low
-                        or "browser_signature_banned" in low
-                    ):
-                        msg = _extract_error_message(detail) or detail
-                        raise VerkiProviderError(
-                            f"Hugging Face router blocked access ({exc.code}): {msg}"
-                        ) from exc
-                    last_err = exc
-                    continue
-                except urllib.error.URLError as exc:
-                    last_err = exc
-                    continue
-                except VerkiProviderError as exc:
-                    # Parsing or provider-level error; try next candidate
-                    last_err = exc
-                    continue
-                except Exception as exc:
-                    last_err = exc
-                    continue
+                        low = detail.lower()
+                        if (
+                            exc.code == 403
+                            or "cloudflare" in low
+                            or "error 1010" in low
+                            or "browser_signature_banned" in low
+                        ):
+                            msg = _extract_error_message(detail) or detail
+                            raise VerkiProviderError(
+                                "Hugging Face router blocked access "
+                                f"({exc.code}): {msg}"
+                            ) from exc
+                        last_err = exc
+                        continue
+                    except urllib.error.URLError as exc:
+                        last_err = exc
+                        continue
+                    except VerkiProviderError as exc:
+                        # Parsing/provider-level error; try next payload/base.
+                        last_err = exc
+                        continue
+                    except Exception as exc:
+                        last_err = exc
+                        continue
 
             if last_err is not None:
                 msg = f"Router attempt failed: {last_err}"
@@ -340,7 +342,13 @@ class HuggingFaceProvider(TextGenerationProvider):
                 # If router explicitly blocked access (Cloudflare or host-side ban),
                 # re-raise so the user sees that error instead of falling back.
                 msg = str(exc).lower()
-                if any(k in msg for k in ("blocked access", "cloudflare", "error 1010", "browser_signature_banned")):
+                blocked_markers = (
+                    "blocked access",
+                    "cloudflare",
+                    "error 1010",
+                    "browser_signature_banned",
+                )
+                if any(k in msg for k in blocked_markers):
                     raise
                 # Otherwise fall back to classic inference if router fails
                 pass

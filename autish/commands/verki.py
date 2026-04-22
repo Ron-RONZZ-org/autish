@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 import typer
-import tempfile
 
 from autish.commands.kp import _copy as _kp_copy
 from autish.commands.uzanto import _load_profile
@@ -226,7 +226,12 @@ def generi(
 
         # Create debug file path early so the provider can write to it.
         if debug:
-            with tempfile.NamedTemporaryFile(delete=False, prefix="verki_debug_", suffix=".json", dir="/tmp") as _f:
+            with tempfile.NamedTemporaryFile(
+                delete=False,
+                prefix="verki_debug_",
+                suffix=".json",
+                dir="/tmp",
+            ) as _f:
                 debug_path = _f.name
 
         service = _build_verki_service(
@@ -254,7 +259,10 @@ def generi(
     except (ValueError, VerkiServiceError) as exc:
         # If debug file was requested, try to print its path for investigation
         if debug and debug_path:
-            typer.echo(f"[debug] raw HF response (partial/error) may be at: {debug_path}", err=True)
+            typer.echo(
+                f"[debug] raw HF response (partial/error) may be at: {debug_path}",
+                err=True,
+            )
         typer.echo(f"Eraro: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 

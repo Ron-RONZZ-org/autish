@@ -164,6 +164,63 @@ def test_verki_service_build_prompt_contains_controls():
     assert "Celo: teama resumo." in prompt
 
 
+def test_verki_service_build_prompt_contains_enc_constraints():
+    provider = _FakeProvider("Rezulto")
+    service = VerkiService(provider=provider)
+    prompt = service.build_prompt(
+        VerkiRequest(instrukcio="Generate .enc on 'ECHO IV'")
+    )
+    assert "Formato deviga por .enc" in prompt
+    assert 'terminologio.eo="..."' in prompt
+    assert "Ne uzu ``` kodbarilojn." in prompt
+
+
+def test_verki_service_normalizes_enc_output():
+    provider = _FakeProvider(
+        "The user wants...\n"
+        "```enc\n"
+        'terminologio.eo="ECHO IV"\n'
+        'terminologio.fr="ECHO IV"\n'
+        'terminologio.en="ECHO IV"\n'
+        'difino.eo="mallonga"\n'
+        "```\n"
+    )
+    service = VerkiService(provider=provider)
+    out = service.verki(VerkiRequest(instrukcio="Generate .enc on 'ECHO IV'"))
+    assert out.startswith('terminologio.eo="ECHO IV"')
+    assert "The user wants" not in out
+    assert "```" not in out
+
+
+def test_verki_service_retries_incomplete_enc_once():
+    class _SequenceProvider:
+        def __init__(self) -> None:
+            self.requests: list[GenerationRequest] = []
+            self.outputs = [
+                '```enc\nterminologio.eo="ECHO IV"\n',
+                (
+                    'terminologio.eo="ECHO IV"\n'
+                    'terminologio.fr="ECHO IV"\n'
+                    'terminologio.en="ECHO IV"\n'
+                    'difino.eo="mallonga"\n'
+                ),
+            ]
+
+        def generate(self, request: GenerationRequest) -> str:
+            self.requests.append(request)
+            idx = min(len(self.requests) - 1, len(self.outputs) - 1)
+            return self.outputs[idx]
+
+    provider = _SequenceProvider()
+    service = VerkiService(provider=provider)
+    out = service.verki(
+        VerkiRequest(instrukcio="Generate .enc on 'ECHO IV'", maksimumaj_tokenoj=512)
+    )
+    assert out.startswith('terminologio.eo="ECHO IV"')
+    assert len(provider.requests) == 2
+    assert provider.requests[1].max_new_tokens >= 1024
+
+
 def test_verki_service_calls_provider_and_returns_clean_text():
     provider = _FakeProvider("   Finita teksto.   ")
     service = VerkiService(provider=provider)
@@ -339,6 +396,54 @@ def test_huggingface_provider_prefers_router_for_revision_model(monkeypatch):
     assert "chat/completions" in seen["url"]
 
 
+def test_huggingface_router_payload_requests_non_reasoning_output(monkeypatch):
+    import autish.services.providers.huggingface as hf_mod
+
+    captured_body: dict[str, object] = {}
+
+    def _fake_urlopen(request, timeout):
+        captured_body["payload"] = json.loads(request.data.decode("utf-8"))
+        return _FakeResponse(
+            json.dumps({"choices": [{"message": {"content": "Final text"}}]})
+        )
+
+    monkeypatch.setattr(hf_mod.urllib.request, "urlopen", _fake_urlopen)
+    provider = HuggingFaceProvider(
+        model="MiniMaxAI/MiniMax-M2.7:novita",
+        token="hf_test",
+        timeout=5,
+    )
+    text = provider.generate(
+        GenerationRequest(prompt="Generate .enc", max_new_tokens=128, temperature=0.3)
+    )
+    assert text == "Final text"
+    payload = captured_body["payload"]
+    assert isinstance(payload, dict)
+    assert payload.get("reasoning_effort") == "none"
+    assert payload.get("response_format") == {"type": "text"}
+
+
+def test_parse_generated_text_rejects_reasoning_only_response():
+    import autish.services.providers.huggingface as hf_mod
+
+    raw = json.dumps(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": "The user wants me to ...",
+                    },
+                    "finish_reason": "length",
+                }
+            ]
+        }
+    )
+    with pytest.raises(VerkiProviderError, match="neniu fina teksto"):
+        hf_mod._parse_generated_text(raw)
+
+
 def test_huggingface_provider_cloudflare_block(monkeypatch):
     import autish.services.providers.huggingface as hf_mod
 
@@ -348,7 +453,9 @@ def test_huggingface_provider_cloudflare_block(monkeypatch):
             code=403,
             msg="Forbidden",
             hdrs=None,
-            fp=io.BytesIO(b'{"title":"Error 1010: Access denied","cloudflare_error":true}'),
+            fp=io.BytesIO(
+                b'{"title":"Error 1010: Access denied","cloudflare_error":true}'
+            ),
         )
 
     monkeypatch.setattr(hf_mod.urllib.request, "urlopen", _blocked_urlopen)
@@ -358,7 +465,9 @@ def test_huggingface_provider_cloudflare_block(monkeypatch):
         timeout=5,
     )
     with pytest.raises(VerkiProviderError, match="blocked access"):
-        provider.generate(GenerationRequest(prompt="x", max_new_tokens=10, temperature=0.1))
+        provider.generate(
+            GenerationRequest(prompt="x", max_new_tokens=10, temperature=0.1)
+        )
 
 
 def test_verki_cli_exports_output_file(monkeypatch, tmp_path: Path):
