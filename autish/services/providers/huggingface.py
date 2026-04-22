@@ -140,8 +140,7 @@ class HuggingFaceProvider(TextGenerationProvider):
                 "max_tokens": request.max_new_tokens,
                 "temperature": request.temperature,
             }
-            openai_body = json.dumps(openai_payload, ensure_ascii=False)
-            openai_body = openai_body.encode("utf-8")
+            openai_body = json.dumps(openai_payload, ensure_ascii=False).encode("utf-8")
             openai_headers = {
                 "Content-Type": "application/json",
                 "Accept": "application/json",
@@ -159,16 +158,34 @@ class HuggingFaceProvider(TextGenerationProvider):
                         headers=openai_headers,
                         method="POST",
                     )
-                    with urllib.request.urlopen(
-                        req, timeout=self._timeout
-                    ) as resp:
+                    with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                         enc = resp.headers.get_content_charset() or "utf-8"
                         raw = resp.read().decode(enc, errors="replace")
                         return _parse_generated_text(raw)
                 except urllib.error.HTTPError as exc:
+                    # Read body to detect host-side blocking (Cloudflare, etc.)
+                    detail = exc.read().decode("utf-8", errors="replace")
+                    low = detail.lower()
+                    if (
+                        exc.code == 403
+                        or "cloudflare" in low
+                        or "error 1010" in low
+                        or "browser_signature_banned" in low
+                    ):
+                        msg = _extract_error_message(detail) or detail
+                        raise VerkiProviderError(
+                            f"Hugging Face router blocked access ({exc.code}): {msg}"
+                        ) from exc
                     last_err = exc
                     continue
                 except urllib.error.URLError as exc:
+                    last_err = exc
+                    continue
+                except VerkiProviderError as exc:
+                    # Parsing or provider-level error; try next candidate
+                    last_err = exc
+                    continue
+                except Exception as exc:
                     last_err = exc
                     continue
 
@@ -182,8 +199,13 @@ class HuggingFaceProvider(TextGenerationProvider):
         if prefer_router:
             try:
                 return _try_router()
-            except VerkiProviderError:
-                # Fall back to classic inference if router fails
+            except VerkiProviderError as exc:
+                # If router explicitly blocked access (Cloudflare or host-side ban),
+                # re-raise so the user sees that error instead of falling back.
+                msg = str(exc).lower()
+                if any(k in msg for k in ("blocked access", "cloudflare", "error 1010", "browser_signature_banned")):
+                    raise
+                # Otherwise fall back to classic inference if router fails
                 pass
 
         http_request = urllib.request.Request(

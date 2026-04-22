@@ -339,6 +339,28 @@ def test_huggingface_provider_prefers_router_for_revision_model(monkeypatch):
     assert "chat/completions" in seen["url"]
 
 
+def test_huggingface_provider_cloudflare_block(monkeypatch):
+    import autish.services.providers.huggingface as hf_mod
+
+    def _blocked_urlopen(request, timeout):
+        raise HTTPError(
+            url="https://router.huggingface.co/v1/chat/completions",
+            code=403,
+            msg="Forbidden",
+            hdrs=None,
+            fp=io.BytesIO(b'{"title":"Error 1010: Access denied","cloudflare_error":true}'),
+        )
+
+    monkeypatch.setattr(hf_mod.urllib.request, "urlopen", _blocked_urlopen)
+    provider = HuggingFaceProvider(
+        model="deepseek-ai/DeepSeek-R1:hyperbolic",
+        token="hf_test",
+        timeout=5,
+    )
+    with pytest.raises(VerkiProviderError, match="blocked access"):
+        provider.generate(GenerationRequest(prompt="x", max_new_tokens=10, temperature=0.1))
+
+
 def test_verki_cli_exports_output_file(monkeypatch, tmp_path: Path):
     import autish.commands.verki as mod
 
