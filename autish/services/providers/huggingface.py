@@ -114,7 +114,7 @@ class HuggingFaceProvider(TextGenerationProvider):
         self._timeout = timeout
 
     def generate(self, request: GenerationRequest) -> str:
-        # First attempt: classic Hugging Face Inference API
+        # Classic inference payload
         payload: dict[str, Any] = {
             "inputs": request.prompt,
             "parameters": {
@@ -125,62 +125,97 @@ class HuggingFaceProvider(TextGenerationProvider):
             "options": {"wait_for_model": True},
         }
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        }
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
+
+        def _try_router() -> str:
+            router_candidates = [
+                "https://router.huggingface.co/v1",
+                f"{self._api_base}/v1",
+            ]
+            openai_payload = {
+                "model": self._model_name,
+                "messages": [{"role": "user", "content": request.prompt}],
+                "max_tokens": request.max_new_tokens,
+                "temperature": request.temperature,
+            }
+            openai_body = json.dumps(openai_payload, ensure_ascii=False)
+            openai_body = openai_body.encode("utf-8")
+            openai_headers = {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+            if self._token:
+                openai_headers["Authorization"] = f"Bearer {self._token}"
+
+            last_err: Exception | None = None
+            for base in router_candidates:
+                chat_url = f"{base.rstrip('/')}/chat/completions"
+                try:
+                    req = urllib.request.Request(
+                        chat_url,
+                        data=openai_body,
+                        headers=openai_headers,
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(
+                        req, timeout=self._timeout
+                    ) as resp:
+                        enc = resp.headers.get_content_charset() or "utf-8"
+                        raw = resp.read().decode(enc, errors="replace")
+                        return _parse_generated_text(raw)
+                except urllib.error.HTTPError as exc:
+                    last_err = exc
+                    continue
+                except urllib.error.URLError as exc:
+                    last_err = exc
+                    continue
+
+            if last_err is not None:
+                msg = f"Router attempt failed: {last_err}"
+                raise VerkiProviderError(msg) from last_err
+            raise VerkiProviderError("Router attempt failed")
+
+        # Prefer router for model revisions (model:revision)
+        prefer_router = ":" in self._model_name
+        if prefer_router:
+            try:
+                return _try_router()
+            except VerkiProviderError:
+                # Fall back to classic inference if router fails
+                pass
+
         http_request = urllib.request.Request(
-            self._url,
-            data=body,
-            headers=headers,
-            method="POST",
+            self._url, data=body, headers=headers, method="POST"
         )
         try:
-            with urllib.request.urlopen(http_request, timeout=self._timeout) as response:
+            with urllib.request.urlopen(
+                http_request, timeout=self._timeout
+            ) as response:
                 encoding = response.headers.get_content_charset() or "utf-8"
                 raw_json = response.read().decode(encoding, errors="replace")
                 return _parse_generated_text(raw_json)
         except urllib.error.HTTPError as exc:
-            # Read detail for diagnostics and auto-detect router mismatch
             detail = exc.read().decode("utf-8", errors="replace")
             message = _extract_error_message(detail) or str(exc.reason)
 
-            # If we see a 404/405 or HTML indicating router mismatch, try OpenAI-compatible router endpoints
-            if exc.code in (404, 405) or "<!DOCTYPE html>" in detail or "Cannot POST /models/" in detail:
-                # Try API v1 chat/completions at the api-inference base first, then router.huggingface
-                router_candidates = [f"{self._api_base}/v1", "https://router.huggingface.co/v1"]
-                for base in router_candidates:
-                    chat_url = f"{base.rstrip('/')}/chat/completions"
-                    openai_payload = {
-                        "model": self._model_name,
-                        "messages": [{"role": "user", "content": request.prompt}],
-                        "max_tokens": request.max_new_tokens,
-                        "temperature": request.temperature,
-                    }
-                    openai_body = json.dumps(openai_payload, ensure_ascii=False).encode("utf-8")
-                    openai_headers = {"Content-Type": "application/json", "Accept": "application/json"}
-                    if self._token:
-                        openai_headers["Authorization"] = f"Bearer {self._token}"
-                    try:
-                        req2 = urllib.request.Request(
-                            chat_url, data=openai_body, headers=openai_headers, method="POST"
-                        )
-                        with urllib.request.urlopen(req2, timeout=self._timeout) as resp2:
-                            enc2 = resp2.headers.get_content_charset() or "utf-8"
-                            raw2 = resp2.read().decode(enc2, errors="replace")
-                            return _parse_generated_text(raw2)
-                    except urllib.error.HTTPError:
-                        # Try next candidate
-                        continue
-                    except urllib.error.URLError:
-                        continue
+            if (
+                exc.code in (404, 405)
+                or "<!DOCTYPE html>" in detail
+                or "Cannot POST /models/" in detail
+            ):
+                try:
+                    return _try_router()
+                except VerkiProviderError:
+                    err_msg = f"Hugging Face HTTP-eraro {exc.code}: {message}"
+                    raise VerkiProviderError(err_msg) from exc
 
-            # Not recoverable via fallback
-            raise VerkiProviderError(f"Hugging Face HTTP-eraro {exc.code}: {message}") from exc
+            err_msg = f"Hugging Face HTTP-eraro {exc.code}: {message}"
+            raise VerkiProviderError(err_msg) from exc
         except urllib.error.URLError as exc:
-            raise VerkiProviderError(f"Reta eraro ĉe Hugging Face: {exc.reason}") from exc
+            msg = f"Reta eraro ĉe Hugging Face: {exc.reason}"
+            raise VerkiProviderError(msg) from exc
 
     def list_models(
         self,
