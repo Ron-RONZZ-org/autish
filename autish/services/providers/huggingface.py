@@ -69,16 +69,63 @@ def _parse_generated_text(raw_json: str) -> str:
             if isinstance(generated, str) and generated.strip():
                 return generated.strip()
 
-    # As a last resort, search recursively for the first string value
+    # As a last resort, search recursively for the most-likely text field while
+    # avoiding short metadata fields like 'id' that can appear before the content.
     def _extract_first_string(o: Any) -> str | None:
+        def _contains_likely_content(x: Any) -> bool:
+            if isinstance(x, dict):
+                for k in ("choices", "generated_text", "data", "outputs", "text", "message", "content", "result", "answer"):
+                    if k in x:
+                        return True
+                for v in x.values():
+                    if isinstance(v, (dict, list)) and _contains_likely_content(v):
+                        return True
+            if isinstance(x, list):
+                for v in x:
+                    if _contains_likely_content(v):
+                        return True
+            return False
+
         if isinstance(o, str):
             return o
         if isinstance(o, dict):
-            for v in o.values():
-                res = _extract_first_string(v)
-                if res:
-                    return res
+            # Prefer known semantic fields that commonly contain generated text
+            for key in ("choices", "generated_text", "data", "outputs", "text", "message", "content", "result", "answer"):
+                if key in o:
+                    res = _extract_first_string(o[key])
+                    if res:
+                        return res
+            ignore_keys = {"id", "object", "model", "type", "created", "name"}
+            # First pass: recurse into dict/list values that likely contain generated text
+            for k, v in o.items():
+                if k in ignore_keys:
+                    continue
+                if isinstance(v, (dict, list)) and _contains_likely_content(v):
+                    res = _extract_first_string(v)
+                    if res:
+                        return res
+            # Second pass: recurse into lists even if they don't explicitly contain preferred keys
+            for k, v in o.items():
+                if k in ignore_keys:
+                    continue
+                if isinstance(v, list):
+                    res = _extract_first_string(v)
+                    if res:
+                        return res
+            # Final pass: return any string values (fallback)
+            for k, v in o.items():
+                if k in ignore_keys:
+                    continue
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
         if isinstance(o, list):
+            # Prefer list elements that likely contain generated text
+            for v in o:
+                if _contains_likely_content(v):
+                    res = _extract_first_string(v)
+                    if res:
+                        return res
+            # Fallback: scan list items in order
             for v in o:
                 res = _extract_first_string(v)
                 if res:
