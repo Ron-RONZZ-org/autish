@@ -238,6 +238,20 @@ Por pli detala ĝo sur disponablaj modeloj, vizitu [huggingface.co/models](https
 - Hugging Face-a gratisa tavolo rajtas malveigi ĉe ĉuta kutimo
 - Provu poste, aŭ uzu `meta-llama/Llama-2-7b-chat` (se aliro)
 
+### Router / Cloudflare-blokado
+
+Kelkfoje modeloj aŭ siaj retoj estas gastigitaj ĉe triaj domajnoj aŭ per la Hugging Face "router". Simptomoj inkluzivas:
+
+- HTTP 403 kun mesaĝo kiel "Error 1010" aŭ "browser_signature_banned".
+- HTML-404 paĝo kun "Cannot POST /models/<modelo>" (ofte sekvo de torenta fallback).
+
+Kion fari:
+
+- Provu alian publikan modelon per `verki modelo -n <kriterio>` aŭ uzu oftajn modelojn (ekz. `google/flan-t5-base`).
+- Se vi vidas Cloudflare/1010, kontaktu la model-posedanton aŭ la serv-providanton: ili devas permesi vian uzazon aŭ whitelistigi viajn petojn.
+- Provu alian ret-reton (i.e., malsama IP) aŭ rulu la modelon lokale se eble.
+- La CLI nun surfacas tiajn erarmesaĝojn klare; sekvu la supre listigitajn paŝojn por solvi.
+
 ## Refoj
 
 - [Hugging Face Inference API — Dokumento](https://huggingface.co/docs/api-inference)
