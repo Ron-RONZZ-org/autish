@@ -69,6 +69,17 @@ def _parse_generated_text(raw_json: str) -> str:
                         return content.strip()
                     # If no content but reasoning exists, use reasoning
                     if isinstance(reasoning, str) and reasoning.strip():
+                        # Attempt to extract a content-like block (e.g. .enc file text)
+                        try:
+                            import re
+
+                            # Look for likely start tokens used in .enc entries or definitions
+                            m = re.search(r"(?i)(terminologio\.|terminology\.|difino\.|definition\.|termino\.)", reasoning)
+                            if m:
+                                return reasoning[m.start():].strip()
+                        except Exception:
+                            pass
+                        # Fallback: return whole reasoning if no structured block found
                         return reasoning.strip()
                 # fall back to text field
                 text = first.get("text")
