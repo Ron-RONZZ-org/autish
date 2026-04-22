@@ -276,6 +276,31 @@ def test_huggingface_provider_handles_http_errors(monkeypatch):
         provider.generate(GenerationRequest(prompt="x"))
 
 
+def test_huggingface_provider_fallback_router(monkeypatch):
+    import autish.services.providers.huggingface as hf_mod
+
+    calls = {"n": 0}
+
+    def _sequential_urlopen(request, timeout):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Simulate HTML 404 response from a router/misconfigured endpoint
+            raise HTTPError(
+                url="https://router.huggingface.co/models/deepseek-ai/DeepSeek-R1",
+                code=404,
+                msg="Not Found",
+                hdrs=None,
+                fp=io.BytesIO(b"<!DOCTYPE html><pre>Cannot POST /models/deepseek-ai/DeepSeek-R1</pre>"),
+            )
+        # Second call returns an OpenAI-like chat response
+        return _FakeResponse(json.dumps({"choices": [{"message": {"content": "Fallback success"}}]}))
+
+    monkeypatch.setattr(hf_mod.urllib.request, "urlopen", _sequential_urlopen)
+    provider = HuggingFaceProvider(model="deepseek-ai/DeepSeek-R1", token="hf_test", timeout=5)
+    text = provider.generate(GenerationRequest(prompt="Hello", max_new_tokens=50, temperature=0.1))
+    assert text == "Fallback success"
+
+
 def test_verki_cli_exports_output_file(monkeypatch, tmp_path: Path):
     import autish.commands.verki as mod
 

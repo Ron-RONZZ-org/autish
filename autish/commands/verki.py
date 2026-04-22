@@ -277,7 +277,7 @@ def modelo(
         help="API-slosilo (ekz. -a hf_xxxxx).",
     ),
     limigo: int = typer.Option(
-        10,
+        50,
         "-L",
         "--limigo",
         help="Maksimuma nombro da rezultoj (ekz. -L 5).",
