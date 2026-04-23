@@ -1,65 +1,51 @@
 # bug fixes
 
-- some random entries crepted into my `encik` entry database. delete them:
+- `verki generi` problem persist ! Fix it and test thoroughly !:
 
- #    UUID        Titolo                           
- 1    b343de6d    Fonto [Celo](#c3a1098e)          
- 2    a6257b7f    Fonto-ilo_f0 [Celo](#3e95fcd1)   
- 3    24faa46d    Fonto-4cd6ae8f [Celo](#f519db34) 
- 4    7e870cb6    Fonto-ccf60686 [Celo](#80585972) 
- 5    368ecd48    Fonto-e72935d8 [Celo](#c0ae10aa) 
- 6    b0956194    Fonto-10c2f717 [Celo](#8a50b858) 
- 7    404c451f    Fonto-07569bdf [Celo](#f5187a38) 
- 8    7b86baad    Fonto-fe39bf66 [Celo](#7bebf597) 
- 9    a70306e4    Fonto-da9b3381 [Celo](#17ca09b2) 
- 10   64f67110    Fonto-50a7346f [Celo](#99280a37) 
- 11   c6a4e221    Fonto-24a0049f [Celo](#fd96e6e6) 
- 12   8dbf98d9    Fonto-2bf2bad6 [Celo](#56cd0d56) 
- 13   f49f839a    Fonto-7f726762 [Celo](#86f8e44e) 
- 14   aa095cec    Fonto-b51fcbe7 [Celo](#898f5189) 
- 15   aa3bcf89    Fonto-5d5cbad3 [Celo](#ee1cdfea) 
- 16   e6c950db    Fonto-adc46fb2 [Celo](#ffd1c9be) 
- 17   1a941736    Fonto-88312ff4 [Celo](#8f47cedf) 
- 18   1e1cea6c    Fonto-36b0d565 [Celo](#b6d76afc) 
- 19   b1c969b5    Fonto-67ecc126 [Celo](#d8b5f09d) 
- 20   c1233af3    Fonto-87c41531 [Celo](#a35d1427) 
-
-- `verki` is broken:
+Unexpected truncation:
 ```
-(autish-py3.12) rongzhou@libres:~/kodo/autish$ verki generi -i "Generate .enc on 'ECHO IV'" -K /home/rongzhou/kodo/autish/AI-kuntekstoj/enc-AI-kunteksto.md -E ~/kodo/ronzz-markmap/encik/ECHO-IV.enc -m deepseek-ai/DeepSeek-R1 
-Eraro: Hugging Face HTTP-eraro 404: <!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Error</title>
-</head>
-<body>
-<pre>Cannot POST /models/deepseek-ai/DeepSeek-R1</pre>
-</body>
-</html>
+(autish-py3.12) rongzhou@libres:~/kodo/autish$ verki generi -i "Generate .enc on 'macOS'" -K /home/rongzhou/kodo/autish/AI-kuntekstoj/enc-AI-kunteksto.md -E ~/kodo/ronzz-markmap/encik/ECHO-IV.enc -m MiniMaxAI/MiniMax-M2.7:novita
+[v] Skribita al /home/rongzhou/kodo/ronzz-markmap/encik/ECHO-IV.enc
+terminologio.(eo,fr,en)="macOS"
+difino.eo
 ```
 
-Official inference provider examples:
+# feature enhancement: incorporate generative AI function of `verki generi` into other `autish` commands
 
-```
-import os
-from openai import OpenAI
+## `encik generi "{terminologio}"`
 
-client = OpenAI(
-    base_url="https://router.huggingface.co/v1",
-    api_key=os.environ["HF_TOKEN"],
-)
+- generate `.enc` on `{terminologio}`
+  - for now genearte only `terminologio` and `difino` fields
+- `-tl/--terminologio-lingvo LANG-CODE1,LANGCODE,2...` the `terminologio` must be generated in those languages
+- `-dl/--difino-lingvo LANG-CODE1,...` the `difino` must be generated in those languages
+- common-sense verification: ensure generated content is valid `.enc` file.
 
-completion = client.chat.completions.create(
-    model="deepseek-ai/DeepSeek-R1:hyperbolic",
-    messages=[
-        {
-            "role": "user",
-            "content": "What is the capital of France?"
-        }
-    ],
-)
+## `retposto analizi {email UID}|{account-ID/email address}*`
 
-print(completion.choices[0].message)
-```
+- analyse one or more emails, taking into account of the entire conversation history
+  - if nothing parsed analyse all unread mails that has NOT been previously analysed
+  - if account(s) parsed limit to those accounts
+- `-r/--resumi {celvojo}` resume the email content(s) in a `.md` file. Print to CLI if no `{celvojo}`
+- `-k/--kalendaro {celvojo}` locate event details and export them to an `ics` file
+- always create one single `.md`/`ics` file
+- `-R/respondi {celvojo}` propose response(s). if {celvojo} not passed save the email as a draft in the DRAFT folder of the relevant account and inform user accordingly
+  - if multiple `UID`, {celvojo} must be a folder. Each response draft will be saved as a separate file
+- `--instrukcio/-i TEXT`: add custom instruction
+
+
+## `retposto generi {konto-ID}|{konto-retpoŝto-adreso}|{celvoĵo}`
+
+- `{konto-ID}|{lonto-retpoŝto-adreso}` specifies the account to save the AI-generated draft to
+  - always save to DRAFT folder (not always literally named DRAFT, but must have such special property). Create one if not present.
+- save to a file if {celvoĵo} parsed instead
+- `--instrukcio/-i TEXT`: add custom instruction (REQUIRED)
+- `--temo/-t TEXT`: write the mail subject manually and parse onto AI as reference
+- `--al/-a` recipient address(es) and other relevant options from `retposto sendi`
+
+## general requirements
+
+- expose the context to be parsed to AI model in each AI-gen command in `~/.config/autish/verki/{function}-kunteksto.md` to allow user customization
+  - provide a baseline context based on `autish` specifications
+- each generative AI function should have AI model options like `--temperaturo/-tm` like in `verki generi` with sensible defaults for each usage case
+- for `retposto analizi` and `retposto generi`, implement corresponding TUI functions in `retposto` TUI email view/compose-new pane
 

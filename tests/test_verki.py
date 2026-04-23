@@ -221,6 +221,34 @@ def test_verki_service_retries_incomplete_enc_once():
     assert provider.requests[1].max_new_tokens >= 1024
 
 
+def test_verki_service_detects_token_only_difino_as_incomplete():
+    class _SequenceProvider:
+        def __init__(self) -> None:
+            self.requests: list[GenerationRequest] = []
+            self.outputs = [
+                'terminologio.(eo,fr,en)="macOS"\ndifino.eo\n',
+                (
+                    'terminologio.(eo,fr,en)="macOS"\n'
+                    'difino.eo="""\n'
+                    "Mallonga difino.\n"
+                    '"""\n'
+                ),
+            ]
+
+        def generate(self, request: GenerationRequest) -> str:
+            self.requests.append(request)
+            idx = min(len(self.requests) - 1, len(self.outputs) - 1)
+            return self.outputs[idx]
+
+    provider = _SequenceProvider()
+    service = VerkiService(provider=provider)
+    out = service.verki(
+        VerkiRequest(instrukcio="Generate .enc on 'macOS'", maksimumaj_tokenoj=256)
+    )
+    assert len(provider.requests) == 2
+    assert 'difino.eo="""' in out
+
+
 def test_verki_service_calls_provider_and_returns_clean_text():
     provider = _FakeProvider("   Finita teksto.   ")
     service = VerkiService(provider=provider)

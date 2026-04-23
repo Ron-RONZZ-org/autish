@@ -224,8 +224,7 @@ class TestParseEncFile:
     def test_parse_multi_locale_shorthand_allows_bare_rhs(self, tmp_path):
         enc = tmp_path / "multi_locale_bare.enc"
         enc.write_text(
-            "terminologio.(en,fr)=abc\n"
-            "difino.(en,fr)=abc\n",
+            "terminologio.(en,fr)=abc\ndifino.(en,fr)=abc\n",
             encoding="utf-8",
         )
         parsed = _parse_enc_file(enc)
@@ -826,9 +825,7 @@ class TestUuidRefExtraction:
             for src, dst, rel, sem in edges
         )
         assert not any(
-            rel == "ligilo"
-            and sem is None
-            and {src, dst} == {CHILD_UUID, SAMPLE_UUID}
+            rel == "ligilo" and sem is None and {src, dst} == {CHILD_UUID, SAMPLE_UUID}
             for src, dst, rel, sem in edges
         )
 
@@ -864,9 +861,7 @@ class TestUuidRefExtraction:
             for src, dst, rel, _sem in edges
         )
         assert not any(
-            rel == "ligilo"
-            and sem is None
-            and {src, dst} == {SAMPLE_UUID, CHILD_UUID}
+            rel == "ligilo" and sem is None and {src, dst} == {SAMPLE_UUID, CHILD_UUID}
             for src, dst, rel, sem in edges
         )
 
@@ -1295,8 +1290,7 @@ class TestEncikCLI:
     ):
         enc = tmp_path / "disambiguation_copy.enc"
         enc.write_text(
-            'terminologio.eo = "Rivero (malambiguigo)"\n'
-            'difinio.eo = "Difino"\n',
+            'terminologio.eo = "Rivero (malambiguigo)"\ndifinio.eo = "Difino"\n',
             encoding="utf-8",
         )
         add = runner.invoke(app, ["encik", "aldoni", str(enc)])
@@ -1323,8 +1317,7 @@ class TestEncikCLI:
     ):
         enc = tmp_path / "middle_parentheses_copy.enc"
         enc.write_text(
-            'terminologio.eo = "Teorio (speciala) de lumo"\n'
-            'difinio.eo = "Difino"\n',
+            'terminologio.eo = "Teorio (speciala) de lumo"\ndifinio.eo = "Difino"\n',
             encoding="utf-8",
         )
         add = runner.invoke(app, ["encik", "aldoni", str(enc)])
@@ -1402,7 +1395,7 @@ class TestEncikCLI:
         enc = self._make_enc_file(tmp_path, "ViduPoste", "Posta difino")
         result = runner.invoke(app, ["encik", "aldoni", str(enc), "--vidi"])
         assert result.exit_code == 0, result.output
-        assert 'Aldonis #' in result.output
+        assert "Aldonis #" in result.output
         assert "ViduPoste" in result.output
         assert "difino:" in result.output
 
@@ -1486,8 +1479,7 @@ class TestEncikCLI:
 
         child_update = tmp_path / "esploristo_mod.enc"
         child_update.write_text(
-            'terminologio.eo = "Esploristo"\n'
-            'difinio.eo = "Ĝisdatigita difino"\n',
+            'terminologio.eo = "Esploristo"\ndifinio.eo = "Ĝisdatigita difino"\n',
             encoding="utf-8",
         )
         mod = runner.invoke(
@@ -1720,9 +1712,7 @@ class TestEncikCLI:
         assert exported
         assert "systeme-d-exploitation-linux" in exported[0].name
 
-    def test_eksporti_keeps_utf8_content_human_readable(
-        self, tmp_path, monkeypatch
-    ):
+    def test_eksporti_keeps_utf8_content_human_readable(self, tmp_path, monkeypatch):
         import autish.commands.encik as enc_mod
 
         db_path = tmp_path / "encik.db"
@@ -2216,9 +2206,7 @@ class TestEncikCLI:
         assert "wikidata" in result.output.lower()
         assert "wdt:P1082" in result.output
 
-    def test_semantika_serci_languages_uses_profile_order_then_eo_en(
-        self, monkeypatch
-    ):
+    def test_semantika_serci_languages_uses_profile_order_then_eo_en(self, monkeypatch):
         import autish.commands.encik as enc_mod
 
         monkeypatch.setattr(
@@ -2278,9 +2266,7 @@ class TestEncikCLI:
         assert meta["priskribo"] == "Esperanta priskribo"
         assert meta["aliasoj"][:2] == ["populacio", "population"]
 
-    def test_wikidata_search_properties_prefers_localized_metadata(
-        self, monkeypatch
-    ):
+    def test_wikidata_search_properties_prefers_localized_metadata(self, monkeypatch):
         import autish.commands.encik as enc_mod
 
         calls: list[str] = []
@@ -3291,9 +3277,7 @@ class TestEncikCLI:
         assert out.exit_code == 0, out.output
         assert out.output.count("rdfs:subClassOf") == 1
 
-    def test_encik_vidi_combines_multiple_semantic_arcs_for_same_ligilo(
-        self, tmp_path
-    ):
+    def test_encik_vidi_combines_multiple_semantic_arcs_for_same_ligilo(self, tmp_path):
         target = tmp_path / "target_multi_sem.enc"
         target.write_text(
             'terminologio.eo = "Sunsistemo"\ndifinio.eo = "Celo"\n',
@@ -3867,3 +3851,79 @@ class TestEncikLs:
         result = runner.invoke(app, ["encik", "ls", "--help"])
         assert result.exit_code == 0
         assert "--per-pagho" in result.output
+
+
+def test_encik_generi_writes_valid_enc(monkeypatch, tmp_path: Path):
+    import autish.commands.encik as enc_mod
+
+    class _FakeService:
+        def verki(self, request):  # type: ignore[no-untyped-def]
+            return (
+                'terminologio.eo="macOS"\n'
+                'terminologio.fr="macOS"\n'
+                'terminologio.en="macOS"\n'
+                'difino.eo="""\n'
+                "Sistemo operaciuma de Apple.\n"
+                '"""\n'
+                'difino.fr="""\n'
+                "Systeme d'exploitation d'Apple.\n"
+                '"""\n'
+                'difino.en="""\n'
+                "Apple operating system.\n"
+                '"""\n'
+            )
+
+    monkeypatch.setattr(
+        enc_mod, "build_verki_service", lambda **_kwargs: _FakeService()
+    )
+    monkeypatch.setattr(enc_mod, "load_ai_context", lambda *_a, **_k: "ctx")
+    monkeypatch.setattr(enc_mod, "_load_profile", lambda quiet=True: {})
+
+    out = tmp_path / "macos.enc"
+    result = runner.invoke(
+        app,
+        [
+            "encik",
+            "generi",
+            "macOS",
+            "-tl",
+            "eo,fr,en",
+            "-dl",
+            "eo,fr,en",
+            "-E",
+            str(out),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    text = out.read_text(encoding="utf-8")
+    assert 'terminologio.eo="macOS"' in text
+    assert 'difino.eo="""' in text
+
+
+def test_encik_generi_rejects_incomplete_output(monkeypatch):
+    import autish.commands.encik as enc_mod
+
+    class _FakeService:
+        def verki(self, request):  # type: ignore[no-untyped-def]
+            return 'terminologio.(eo,fr,en)="macOS"\ndifino.eo\n'
+
+    monkeypatch.setattr(
+        enc_mod, "build_verki_service", lambda **_kwargs: _FakeService()
+    )
+    monkeypatch.setattr(enc_mod, "load_ai_context", lambda *_a, **_k: "ctx")
+    monkeypatch.setattr(enc_mod, "_load_profile", lambda quiet=True: {})
+
+    result = runner.invoke(
+        app,
+        [
+            "encik",
+            "generi",
+            "macOS",
+            "-tl",
+            "eo,fr,en",
+            "-dl",
+            "eo",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "Eraro:" in result.output

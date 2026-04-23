@@ -52,6 +52,10 @@ import vobject
 from rich.console import Console
 from rich.table import Table
 
+from autish.commands.uzanto import _load_profile
+from autish.services.ai_common import build_verki_service, load_ai_context
+from autish.services.verki import VerkiRequest, VerkiServiceError
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Typer apps
 # ──────────────────────────────────────────────────────────────────────────────
@@ -99,6 +103,7 @@ _MAX_FOLDERS_PER_ACCOUNT: int = 20
 _ACCOUNT_CHECK_CONNECT_TIMEOUT: float = 4.0
 _ACCOUNT_CHECK_PROTOCOL_TIMEOUT: float = 8.0
 _IMAP_SYNC_EXECUTOR: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=4)
+
 
 class _EmailServerConfig(TypedDict):
     imap_servilo: str
@@ -219,10 +224,18 @@ _EMAIL_DOMAIN_CONFIGS: dict[str, _EmailServerConfig] = {
 }
 
 # Allowed column names for _update_message_field to prevent SQL injection
-_MSG_UPDATABLE_COLS: frozenset[str] = frozenset({
-    "konto_id", "dosierujo_id", "legita", "stelo", "spamo", "forigita",
-    "prioritato", "etikedoj",
-})
+_MSG_UPDATABLE_COLS: frozenset[str] = frozenset(
+    {
+        "konto_id",
+        "dosierujo_id",
+        "legita",
+        "stelo",
+        "spamo",
+        "forigita",
+        "prioritato",
+        "etikedoj",
+    }
+)
 # ──────────────────────────────────────────────────────────────────────────────
 
 _CREATE_KONTO = """
@@ -372,6 +385,13 @@ CREATE TABLE IF NOT EXISTS aldonajo (
 );
 """
 
+_CREATE_MESAGO_ANALIZO = """
+CREATE TABLE IF NOT EXISTS mesago_analizo (
+    mesago_id    INTEGER PRIMARY KEY REFERENCES mesago(id) ON DELETE CASCADE,
+    analizita_je TEXT NOT NULL
+);
+"""
+
 # Maximum size (bytes) for attachments stored in DB (1 MB)
 _ALDONAJO_MAX_DB_SIZE = 1024 * 1024
 
@@ -398,6 +418,7 @@ def _get_db() -> sqlite3.Connection:
         + _CREATE_SPAMO_BLOKO
         + _CREATE_FILTRO
         + _CREATE_ALDONAJO
+        + _CREATE_MESAGO_ANALIZO
     )
     # Migrations for existing databases
     _migrate_db(con)
@@ -407,8 +428,7 @@ def _get_db() -> sqlite3.Connection:
 def _migrate_db(con: sqlite3.Connection) -> None:
     """Apply forward-only schema migrations to existing databases."""
     existing_cols = {
-        row[1]
-        for row in con.execute("PRAGMA table_info(konto)").fetchall()
+        row[1] for row in con.execute("PRAGMA table_info(konto)").fetchall()
     }
     if "ordo" not in existing_cols:
         con.execute("ALTER TABLE konto ADD COLUMN ordo INTEGER NOT NULL DEFAULT 0")
@@ -421,15 +441,11 @@ def _migrate_db(con: sqlite3.Connection) -> None:
         con.commit()
     if "imap_uzantonomo" not in existing_cols:
         con.execute("ALTER TABLE konto ADD COLUMN imap_uzantonomo TEXT")
-        con.execute(
-            "UPDATE konto SET imap_uzantonomo = COALESCE(uzantonomo, retposto)"
-        )
+        con.execute("UPDATE konto SET imap_uzantonomo = COALESCE(uzantonomo, retposto)")
         con.commit()
     if "smtp_uzantonomo" not in existing_cols:
         con.execute("ALTER TABLE konto ADD COLUMN smtp_uzantonomo TEXT")
-        con.execute(
-            "UPDATE konto SET smtp_uzantonomo = COALESCE(uzantonomo, retposto)"
-        )
+        con.execute("UPDATE konto SET smtp_uzantonomo = COALESCE(uzantonomo, retposto)")
         con.commit()
     if "webmail_url" not in existing_cols:
         con.execute("ALTER TABLE konto ADD COLUMN webmail_url TEXT")
@@ -511,8 +527,11 @@ def _migrate_db(con: sqlite3.Connection) -> None:
         con.commit()
     # Allow contacts without email address: make retposto nullable.
     retposto_col = next(
-        (row for row in con.execute("PRAGMA table_info(kontakto)").fetchall()
-         if row[1] == "retposto"),
+        (
+            row
+            for row in con.execute("PRAGMA table_info(kontakto)").fetchall()
+            if row[1] == "retposto"
+        ),
         None,
     )
     if retposto_col is not None and int(retposto_col[3]) == 1:
@@ -642,12 +661,26 @@ def _save_account(acc: dict) -> int:
         return cur.lastrowid  # type: ignore[return-value]
 
 
-_KONTO_UPDATABLE_COLS: frozenset[str] = frozenset({
-    "nomo", "imap_servilo", "imap_haveno", "imap_ssl",
-    "smtp_servilo", "smtp_haveno", "smtp_tls", "uzantonomo", "subskribo",
-    "imap_uzantonomo", "smtp_uzantonomo", "webmail_url",
-    "sieve_servilo", "sieve_haveno", "sieve_starttls", "sieve_uzantonomo",
-})
+_KONTO_UPDATABLE_COLS: frozenset[str] = frozenset(
+    {
+        "nomo",
+        "imap_servilo",
+        "imap_haveno",
+        "imap_ssl",
+        "smtp_servilo",
+        "smtp_haveno",
+        "smtp_tls",
+        "uzantonomo",
+        "subskribo",
+        "imap_uzantonomo",
+        "smtp_uzantonomo",
+        "webmail_url",
+        "sieve_servilo",
+        "sieve_haveno",
+        "sieve_starttls",
+        "sieve_uzantonomo",
+    }
+)
 
 
 def _update_account(account_id: int, fields: dict) -> None:
@@ -737,7 +770,7 @@ def _load_folders(account_id: int) -> list[dict]:
 
 def _find_drafts_folder(account_id: int) -> int | None:
     """Find the drafts folder for an account by checking common names.
-    
+
     Returns folder ID if found, None otherwise.
     """
     with _get_db() as con:
@@ -754,8 +787,12 @@ def _find_drafts_folder(account_id: int) -> int | None:
     return None
 
 
-def _ensure_folder(account_id: int, nomo: str, server_nomo: str | None = None,
-                   patro_id: int | None = None) -> int:
+def _ensure_folder(
+    account_id: int,
+    nomo: str,
+    server_nomo: str | None = None,
+    patro_id: int | None = None,
+) -> int:
     """Return folder id, creating if absent."""
     with _get_db() as con:
         row = con.execute(
@@ -845,6 +882,241 @@ def _load_messages(
     return result
 
 
+def _decode_message_json_columns(msg: dict) -> dict:
+    decoded = dict(msg)
+    for col in ("al", "cc", "bcc", "aldonajoj", "etikedoj"):
+        try:
+            decoded[col] = json.loads(decoded.get(col) or "[]")
+        except (json.JSONDecodeError, TypeError):
+            decoded[col] = []
+    return decoded
+
+
+def _load_message_latest_by_account_uid(konto_id: int, uid: str) -> dict | None:
+    with _get_db() as con:
+        row = con.execute(
+            (
+                "SELECT * FROM mesago WHERE konto_id = ? AND uid = ? "
+                "ORDER BY id DESC LIMIT 1"
+            ),
+            (konto_id, uid),
+        ).fetchone()
+    if row is None:
+        return None
+    return _decode_message_json_columns(dict(row))
+
+
+def _load_message_latest_by_uid_any(uid: str) -> dict | None:
+    with _get_db() as con:
+        row = con.execute(
+            "SELECT * FROM mesago WHERE uid = ? "
+            "ORDER BY ricevita_je DESC, id DESC LIMIT 1",
+            (uid,),
+        ).fetchone()
+    if row is None:
+        return None
+    return _decode_message_json_columns(dict(row))
+
+
+def _load_unread_unanalyzed_messages(
+    *,
+    konto_ids: set[int] | None = None,
+    limo: int = 200,
+) -> list[dict]:
+    clauses = ["m.forigita = 0", "m.legita = 0", "a.mesago_id IS NULL"]
+    params: list[object] = []
+    if konto_ids:
+        placeholders = ",".join("?" for _ in sorted(konto_ids))
+        clauses.append(f"m.konto_id IN ({placeholders})")
+        params.extend(sorted(konto_ids))
+    params.append(max(1, int(limo)))
+    where = " AND ".join(clauses)
+    with _get_db() as con:
+        rows = con.execute(
+            (
+                "SELECT m.* FROM mesago m "
+                "LEFT JOIN mesago_analizo a ON a.mesago_id = m.id "
+                f"WHERE {where} "
+                "ORDER BY COALESCE(m.ricevita_je, m.kreita_je) DESC LIMIT ?"
+            ),
+            params,
+        ).fetchall()
+    return [_decode_message_json_columns(dict(row)) for row in rows]
+
+
+def _mark_messages_analyzed(messages: list[dict]) -> None:
+    ids = [int(msg["id"]) for msg in messages if msg.get("id") is not None]
+    if not ids:
+        return
+    now = _now_iso()
+    with _get_db() as con:
+        con.executemany(
+            (
+                "INSERT OR REPLACE INTO mesago_analizo (mesago_id, analizita_je) "
+                "VALUES (?, ?)"
+            ),
+            [(msg_id, now) for msg_id in ids],
+        )
+
+
+def _resolve_retposto_ai_service(
+    *,
+    provizanto: str,
+    modelo: str,
+    api_slosilo: str | None,
+):
+    profile: dict | None = None
+    try:
+        profile = _load_profile(quiet=True)
+    except Exception:
+        profile = None
+    return build_verki_service(
+        provizanto=provizanto,
+        modelo=modelo,
+        api_slosilo=api_slosilo,
+        profile=profile,
+    )
+
+
+def _render_message_for_ai(msg: dict) -> str:
+    parts: list[str] = []
+    parts.append(f"Mesaĝo-ID: {msg.get('id')}")
+    parts.append(f"Konto-ID: {msg.get('konto_id')}")
+    parts.append(f"De: {msg.get('de') or ''}")
+    parts.append(f"Al: {', '.join(msg.get('al') or [])}")
+    parts.append(f"Cc: {', '.join(msg.get('cc') or [])}")
+    parts.append(f"Subjekto: {msg.get('subjekto') or ''}")
+    parts.append(f"Dato: {(msg.get('ricevita_je') or msg.get('kreita_je') or '')[:19]}")
+    parts.append("")
+    body = msg.get("korpo") or _strip_html_tags(msg.get("html_korpo") or "")
+    parts.append(str(body or ""))
+    return "\n".join(parts).strip()
+
+
+def _render_conversation_for_ai(msg: dict) -> str:
+    conv = _load_conversation_messages(msg)
+    if not conv:
+        conv = [msg]
+    chunks = []
+    for idx, item in enumerate(conv, start=1):
+        chunks.append(f"## Mesaĝo {idx}\n{_render_message_for_ai(item)}")
+    return "\n\n".join(chunks).strip()
+
+
+def _resolve_analizi_targets(
+    identifiers: list[str],
+    *,
+    accounts: list[dict],
+) -> list[dict]:
+    selected: list[dict] = []
+    seen_ids: set[int] = set()
+    konto_filters: set[int] = set()
+    explicit_uids: list[tuple[int, str] | str] = []
+
+    for raw in identifiers:
+        token = raw.strip()
+        if not token:
+            continue
+        acc = _find_account(token)
+        if acc is not None:
+            konto_filters.add(int(acc["id"]))
+            continue
+        try:
+            explicit_uids.append(_parse_cli_uid(token, accounts))
+            continue
+        except ValueError:
+            explicit_uids.append(token)
+
+    for item in explicit_uids:
+        msg: dict | None
+        if isinstance(item, tuple):
+            msg = _load_message_latest_by_account_uid(item[0], item[1])
+        else:
+            msg = _load_message_latest_by_uid_any(item)
+        if msg is None:
+            continue
+        msg_id = int(msg["id"])
+        if msg_id not in seen_ids:
+            seen_ids.add(msg_id)
+            selected.append(msg)
+
+    unread_scope = (
+        _load_unread_unanalyzed_messages(konto_ids=konto_filters or None)
+        if (konto_filters or not identifiers)
+        else []
+    )
+    for msg in unread_scope:
+        msg_id = int(msg["id"])
+        if msg_id not in seen_ids:
+            seen_ids.add(msg_id)
+            selected.append(msg)
+    return selected
+
+
+def _resolve_output_path(
+    raw_path: str,
+    *,
+    default_filename: str,
+    suffix: str,
+) -> Path:
+    target = Path(raw_path).expanduser()
+    raw_text = str(raw_path or "").strip()
+    if (target.exists() and target.is_dir()) or raw_text.endswith(("/", "\\")):
+        target = target / default_filename
+    if target.suffix.lower() != suffix.lower():
+        target = target.with_suffix(suffix)
+    return target.resolve()
+
+
+_RETPOSTO_AI_DEF_MODEL = "MiniMaxAI/MiniMax-M2.7:novita"
+
+
+def _ai_analyze_single_message(msg: dict) -> str:
+    service = _resolve_retposto_ai_service(
+        provizanto="huggingface",
+        modelo=_RETPOSTO_AI_DEF_MODEL,
+        api_slosilo=None,
+    )
+    context = load_ai_context("retposto-analizi")
+    instruction = (
+        "Analizu la jenan retpoŝtan konversacion kaj redonu koncizan resumon en "
+        "Markdown kun ĉefaj punktoj kaj venontaj paŝoj."
+    )
+    return service.verki(
+        VerkiRequest(
+            instrukcio=instruction,
+            fonta_teksto=_render_conversation_for_ai(msg),
+            kunteksto=context,
+            maksimumaj_tokenoj=900,
+            temperaturo=0.4,
+        )
+    )
+
+
+def _ai_generate_reply_body(msg: dict, instrukcio: str | None = None) -> str:
+    service = _resolve_retposto_ai_service(
+        provizanto="huggingface",
+        modelo=_RETPOSTO_AI_DEF_MODEL,
+        api_slosilo=None,
+    )
+    context = load_ai_context("retposto-generi")
+    instruction = (
+        "Proponu ĝentilan kaj klaran respondon por ĉi tiu konversacio. "
+        "Redonu nur la retpoŝtan korpon."
+    )
+    if (instrukcio or "").strip():
+        instruction += f"\nPlia instrukcio: {instrukcio.strip()}"
+    return service.verki(
+        VerkiRequest(
+            instrukcio=instruction,
+            fonta_teksto=_render_conversation_for_ai(msg),
+            kunteksto=context,
+            maksimumaj_tokenoj=900,
+            temperaturo=0.4,
+        )
+    )
+
+
 def _resolve_folder_spec(folder_spec: str) -> tuple[int, int] | None:
     """Resolve ACCOUNT/FOLDER spec to (konto_id, dosierujo_id)."""
     raw = folder_spec.strip().strip('"').strip("'")
@@ -924,6 +1196,7 @@ def _search_messages(
 
 def _coalesce_messages(messages: list[dict]) -> list[dict]:
     """Return one representative (latest) message per conversation."""
+
     def _thread_root(msg: dict) -> str:
         refs = (msg.get("references_hdr") or "").strip().split()
         if refs:
@@ -1179,9 +1452,7 @@ def _delete_message(msg_id: int, permanent: bool = False) -> None:
         if permanent:
             con.execute("DELETE FROM mesago WHERE id = ?", (msg_id,))
         else:
-            trash_folder_id = _ensure_folder(
-                int(msg_row["konto_id"]), "Trash", "Trash"
-            )
+            trash_folder_id = _ensure_folder(int(msg_row["konto_id"]), "Trash", "Trash")
             trash_row = con.execute(
                 "SELECT server_nomo, nomo FROM dosierujo WHERE id = ?",
                 (trash_folder_id,),
@@ -1403,12 +1674,12 @@ def _save_aldonajo(
     mime_tipo: str = "application/octet-stream",
 ) -> int:
     """Save an attachment. Small files (<1MB) in DB, large files to filesystem.
-    
+
     Returns: aldonajo_id
     """
     grandeco = len(enhavo)
     kreita_je = _now_iso()
-    
+
     with _get_db() as con:
         if grandeco < _ALDONAJO_MAX_DB_SIZE:
             # Store in database
@@ -1422,7 +1693,7 @@ def _save_aldonajo(
             # Store as file
             _ALDONAJOJ_DIR.mkdir(parents=True, exist_ok=True)
             import uuid
-            
+
             # Generate unique filename: <uuid>_<original_name>
             unique_id = uuid.uuid4().hex[:12]
             safe_name = "".join(
@@ -1430,7 +1701,7 @@ def _save_aldonajo(
             )
             vojo = _ALDONAJOJ_DIR / f"{unique_id}_{safe_name}"
             vojo.write_bytes(enhavo)
-            
+
             cur = con.execute(
                 """INSERT INTO aldonajo
                    (mesago_id, dosiernomo, mime_tipo, grandeco, enhavo, vojo, kreita_je)
@@ -1442,7 +1713,7 @@ def _save_aldonajo(
 
 def _load_aldonajoj(mesago_id: int) -> list[dict]:
     """Load all attachments for a message.
-    
+
     Returns: list of {id, mesago_id, dosiernomo, mime_tipo, grandeco, kreita_je}
     """
     with _get_db() as con:
@@ -1456,7 +1727,7 @@ def _load_aldonajoj(mesago_id: int) -> list[dict]:
 
 def _get_aldonajo_enhavo(aldonajo_id: int) -> bytes | None:
     """Retrieve attachment content from DB or filesystem.
-    
+
     Returns: bytes of the attachment, or None if not found.
     """
     with _get_db() as con:
@@ -1464,20 +1735,21 @@ def _get_aldonajo_enhavo(aldonajo_id: int) -> bytes | None:
             "SELECT enhavo, vojo FROM aldonajo WHERE id = ?",
             (aldonajo_id,),
         ).fetchone()
-    
+
     if row is None:
         return None
-    
+
     if row["enhavo"] is not None:
         # Stored in database
         return bytes(row["enhavo"])
     elif row["vojo"]:
         # Stored as file
         from pathlib import Path
+
         vojo = Path(row["vojo"])
         if vojo.exists():
             return vojo.read_bytes()
-    
+
     return None
 
 
@@ -1488,14 +1760,15 @@ def _delete_aldonajo(aldonajo_id: int) -> None:
             "SELECT vojo FROM aldonajo WHERE id = ?",
             (aldonajo_id,),
         ).fetchone()
-        
+
         if row and row["vojo"]:
             # Delete filesystem file
             from pathlib import Path
+
             vojo = Path(row["vojo"])
             if vojo.exists():
                 vojo.unlink()
-        
+
         con.execute("DELETE FROM aldonajo WHERE id = ?", (aldonajo_id,))
 
 
@@ -1503,17 +1776,17 @@ def _malfermi_aldonajon(aldonajo_id: int) -> None:
     """Open attachment with system default app (xdg-open)."""
     import subprocess
     import tempfile
-    
+
     with _get_db() as con:
         row = con.execute(
             "SELECT dosiernomo, enhavo, vojo FROM aldonajo WHERE id = ?",
             (aldonajo_id,),
         ).fetchone()
-    
+
     if row is None:
         typer.echo("Aldonaĵo ne trovita.", err=True)
         raise typer.Exit(1)
-    
+
     # Get the file path
     if row["vojo"]:
         # File stored on filesystem
@@ -1526,13 +1799,13 @@ def _malfermi_aldonajon(aldonajo_id: int) -> None:
         # File in database - extract to temp directory
         enhavo = bytes(row["enhavo"])
         dosiernomo = row["dosiernomo"]
-        
+
         # Create temp file with original extension
         temp_dir = Path(tempfile.gettempdir()) / "autish_aldonajoj"
         temp_dir.mkdir(parents=True, exist_ok=True)
         file_path = temp_dir / f"{aldonajo_id}_{dosiernomo}"
         file_path.write_bytes(enhavo)
-    
+
     # Open with system default app
     try:
         subprocess.run(["xdg-open", str(file_path)], check=True)
@@ -1551,9 +1824,7 @@ def _malfermi_aldonajon(aldonajo_id: int) -> None:
 
 def _load_contacts() -> list[dict]:
     with _get_db() as con:
-        rows = con.execute(
-            "SELECT * FROM kontakto ORDER BY nomo ASC"
-        ).fetchall()
+        rows = con.execute("SELECT * FROM kontakto ORDER BY nomo ASC").fetchall()
     return [dict(r) for r in rows]
 
 
@@ -1591,21 +1862,24 @@ _KONTAKTO_UPDATABLE_COLS: frozenset[str] = frozenset(
 )
 
 
-def _upsert_contact(retposto: str, nomo: str | None = None,
-                    organizo: str | None = None,
-                    telefono: str | None = None,
-                    noto: str | None = None,
-                    *,
-                    familia_nomo: str | None = None,
-                    naskig_dato: str | None = None,
-                    naskig_loko: str | None = None,
-                    lingvoj: list[str] | None = None,
-                    organiza_identiga_numero: str | None = None,
-                    telefonnumeroj: list[dict] | None = None,
-                    retposhtadresoj: list[dict] | None = None,
-                    kampoj: dict[str, str] | None = None,
-                    konfirmita: int | None = None,
-                    kategorioj: list[str] | None = None) -> None:
+def _upsert_contact(
+    retposto: str,
+    nomo: str | None = None,
+    organizo: str | None = None,
+    telefono: str | None = None,
+    noto: str | None = None,
+    *,
+    familia_nomo: str | None = None,
+    naskig_dato: str | None = None,
+    naskig_loko: str | None = None,
+    lingvoj: list[str] | None = None,
+    organiza_identiga_numero: str | None = None,
+    telefonnumeroj: list[dict] | None = None,
+    retposhtadresoj: list[dict] | None = None,
+    kampoj: dict[str, str] | None = None,
+    konfirmita: int | None = None,
+    kategorioj: list[str] | None = None,
+) -> None:
     """Insert or update a contact by email address."""
     now = _now_iso()
     with _get_db() as con:
@@ -1648,14 +1922,10 @@ def _upsert_contact(retposto: str, nomo: str | None = None,
             if konfirmita is not None:
                 update_fields["konfirmita"] = int(bool(konfirmita))
             if kategorioj is not None:
-                update_fields["kategorioj"] = json.dumps(
-                    kategorioj, ensure_ascii=False
-                )
+                update_fields["kategorioj"] = json.dumps(kategorioj, ensure_ascii=False)
             invalid = set(update_fields) - _KONTAKTO_UPDATABLE_COLS
             if invalid:
-                raise ValueError(
-                    f"Disallowed column(s) in _upsert_contact: {invalid}"
-                )
+                raise ValueError(f"Disallowed column(s) in _upsert_contact: {invalid}")
             set_clause = ", ".join(f"{k} = ?" for k in update_fields)
             con.execute(
                 f"UPDATE kontakto SET {set_clause} WHERE retposto = ?",
@@ -1689,7 +1959,7 @@ def _upsert_contact(retposto: str, nomo: str | None = None,
                     noto,
                     now,
                     now,
-                )
+                ),
             )
 
 
@@ -1759,9 +2029,7 @@ def _add_spam_block(rule: str) -> None:
 
 def _remove_spam_block(rule: str) -> None:
     with _get_db() as con:
-        con.execute(
-            "DELETE FROM spamo_bloko WHERE regulo = ?", (rule.lower().strip(),)
-        )
+        con.execute("DELETE FROM spamo_bloko WHERE regulo = ?", (rule.lower().strip(),))
 
 
 def _is_spam(sender: str) -> bool:
@@ -1780,15 +2048,15 @@ def _is_spam(sender: str) -> bool:
 # ──────────────────────────────────────────────────────────────────────────────
 
 _SIEVE_COND_RE = re.compile(
-    r'(?P<field>from|to|subject|body)\s+'
-    r'(?P<neg>not\s+)?'
-    r'(?P<op>contains|is)\s+'
+    r"(?P<field>from|to|subject|body)\s+"
+    r"(?P<neg>not\s+)?"
+    r"(?P<op>contains|is)\s+"
     r'"(?P<value>[^"]*)"',
     re.IGNORECASE,
 )
 
 _SIEVE_ACTION_RE = re.compile(
-    r'(?P<action>fileinto|discard|mark-spam|mark-read|set-priority)\s*'
+    r"(?P<action>fileinto|discard|mark-spam|mark-read|set-priority)\s*"
     r'(?:"(?P<arg>[^"]*)")?',
     re.IGNORECASE,
 )
@@ -1859,8 +2127,9 @@ def _apply_filters(msg: dict, filters: list[dict]) -> dict:
     return msg
 
 
-def _eval_sieve_condition(cond: str, sender: str, recipients: str,
-                          subject: str, body: str) -> bool:
+def _eval_sieve_condition(
+    cond: str, sender: str, recipients: str, subject: str, body: str
+) -> bool:
     """Evaluate a simple Sieve-like condition string."""
     field_map = {
         "from": sender,
@@ -2036,13 +2305,11 @@ def _parse_imap_message(
     uid: str | None = None,
 ) -> tuple[dict, list[tuple[str, bytes, str]]]:
     """Parse raw RFC 5322 message into a mesago dict and attachment list.
-    
+
     Returns:
         tuple: (mesago_dict, [(filename, content_bytes, mime_type), ...])
     """
-    msg = _email_mod.message_from_bytes(
-        raw_bytes, policy=_email_mod.policy.compat32
-    )
+    msg = _email_mod.message_from_bytes(raw_bytes, policy=_email_mod.policy.compat32)
 
     sender = _decode_header(msg.get("From"))
     al_raw = _decode_header(msg.get("To", ""))
@@ -2076,6 +2343,7 @@ def _parse_imap_message(
     ricevita_je: str | None = None
     try:
         from email.utils import parsedate_to_datetime
+
         ricevita_je = parsedate_to_datetime(date_str).isoformat()
     except Exception:
         pass
@@ -2094,7 +2362,7 @@ def _parse_imap_message(
                 filename = part.get_filename() or "attachment"
                 decoded_filename = _decode_header(filename)
                 aldonajoj_filenames.append(decoded_filename)
-                
+
                 # Extract attachment content
                 payload = part.get_payload(decode=True)
                 if isinstance(payload, bytes):
@@ -2145,7 +2413,7 @@ def _parse_imap_message(
         "ricevita_je": ricevita_je,
         "kreita_je": _now_iso(),
     }
-    
+
     return mesago_dict, aldonajoj_data
 
 
@@ -2206,11 +2474,7 @@ def _fetch_account_mail(acc: dict, max_msgs: int = 100) -> tuple[int, int]:
 
             use_uid_fetch = True
             search_status, data = imap.uid("SEARCH", None, "ALL")
-            if (
-                search_status != "OK"
-                or not data
-                or not data[0]
-            ):
+            if search_status != "OK" or not data or not data[0]:
                 use_uid_fetch = False
                 _, data = imap.search(None, "ALL")
             uids_raw = (data[0] or b"").split()
@@ -2246,18 +2510,18 @@ def _fetch_account_mail(acc: dict, max_msgs: int = 100) -> tuple[int, int]:
                 if not msg_data or not msg_data[0]:
                     skipped += 1
                     continue
-                
+
                 # Parse FLAGS from response
                 server_seen = False
                 server_flagged = False
                 for item in msg_data:
                     if isinstance(item, bytes):
-                        flags_match = re.search(rb'FLAGS \(([^)]+)\)', item)
+                        flags_match = re.search(rb"FLAGS \(([^)]+)\)", item)
                         if flags_match:
                             flags = flags_match.group(1).decode()
-                            server_seen = '\\Seen' in flags
-                            server_flagged = '\\Flagged' in flags
-                
+                            server_seen = "\\Seen" in flags
+                            server_flagged = "\\Flagged" in flags
+
                 raw = msg_data[0][1] if isinstance(msg_data[0], tuple) else None
                 if not isinstance(raw, bytes):
                     skipped += 1
@@ -2301,27 +2565,27 @@ def _fetch_account_mail(acc: dict, max_msgs: int = 100) -> tuple[int, int]:
                     if local_legita != server_seen:
                         try:
                             if local_legita:
-                                imap.uid('STORE', uid, '+FLAGS', '(\\Seen)')
+                                imap.uid("STORE", uid, "+FLAGS", "(\\Seen)")
                             else:
-                                imap.uid('STORE', uid, '-FLAGS', '(\\Seen)')
+                                imap.uid("STORE", uid, "-FLAGS", "(\\Seen)")
                         except imaplib.IMAP4.error:
                             pass  # Ignore flag sync errors
                     if local_stelo != server_flagged:
                         try:
                             if local_stelo:
-                                imap.uid('STORE', uid, '+FLAGS', '(\\Flagged)')
+                                imap.uid("STORE", uid, "+FLAGS", "(\\Flagged)")
                             else:
-                                imap.uid('STORE', uid, '-FLAGS', '(\\Flagged)')
+                                imap.uid("STORE", uid, "-FLAGS", "(\\Flagged)")
                         except imaplib.IMAP4.error:
                             pass
-                    
+
                     # Skip re-saving existing message
                     skipped += 1
                     continue
                 if existing_by_message_id:
                     skipped += 1
                     continue
-                
+
                 # New message: set legita based on server SEEN flag
                 parsed["legita"] = 1 if server_seen else 0
                 parsed["stelo"] = 1 if server_flagged else 0
@@ -2330,7 +2594,7 @@ def _fetch_account_mail(acc: dict, max_msgs: int = 100) -> tuple[int, int]:
                 msg_id = _save_message(parsed)
                 for filename, content, mime_tipo in aldonajoj_data:
                     _save_aldonajo(msg_id, filename, content, mime_tipo)
-                
+
                 fetched += 1
 
         try:
@@ -2389,9 +2653,7 @@ def _send_message(
     """Send an email via SMTP. Returns True on success."""
     password = _get_password(acc["id"])
     if not password:
-        typer.echo(
-            f"[!] No password stored for {acc['retposto']}.", err=True
-        )
+        typer.echo(f"[!] No password stored for {acc['retposto']}.", err=True)
         return False
 
     login = acc.get("smtp_uzantonomo") or acc.get("uzantonomo") or acc["retposto"]
@@ -2475,24 +2737,26 @@ def _send_message(
 
         # Save to Sent folder
         sent_folder_id = _ensure_folder(acc["id"], "Sent", "Sent")
-        _save_message({
-            "konto_id": acc["id"],
-            "dosierujo_id": sent_folder_id,
-            "message_id": msg_id,
-            "in_reply_to": in_reply_to,
-            "references_hdr": references_hdr,
-            "de": acc["retposto"],
-            "al": al,
-            "cc": cc or [],
-            "bcc": bcc or [],
-            "subjekto": subjekto,
-            "korpo": korpo,
-            "aldonajoj": attachment_names,
-            "prioritato": prioritato if prioritato is not None else 5,
-            "etikedoj": ["read-receipt-requested"] if peti_legokonfirmon else [],
-            "legita": 1,
-            "ricevita_je": _now_iso(),
-        })
+        _save_message(
+            {
+                "konto_id": acc["id"],
+                "dosierujo_id": sent_folder_id,
+                "message_id": msg_id,
+                "in_reply_to": in_reply_to,
+                "references_hdr": references_hdr,
+                "de": acc["retposto"],
+                "al": al,
+                "cc": cc or [],
+                "bcc": bcc or [],
+                "subjekto": subjekto,
+                "korpo": korpo,
+                "aldonajoj": attachment_names,
+                "prioritato": prioritato if prioritato is not None else 5,
+                "etikedoj": ["read-receipt-requested"] if peti_legokonfirmon else [],
+                "legita": 1,
+                "ricevita_je": _now_iso(),
+            }
+        )
         # Auto-save recipients as contacts
         for addr in recipients:
             if _should_autosave_contact_email(addr):
@@ -2542,7 +2806,7 @@ def _imap_error_repair_steps(acc: dict, exc: Exception) -> list[str]:
                 "Aŭtentigo malsukcesis (malĝusta uzantonomo aŭ pasvorto).",
                 (
                     "Rimedo: ĝisdatigu pasvorton per "
-                    f"`retposto ĝisdatigi-konton \"{retposto}\" --pasvorto`."
+                    f'`retposto ĝisdatigi-konton "{retposto}" --pasvorto`.'
                 ),
                 "Se 2FA estas aktiva, uzu aplikaĵan pasvorton.",
             ]
@@ -2550,7 +2814,7 @@ def _imap_error_repair_steps(acc: dict, exc: Exception) -> list[str]:
             "IMAP servilo rifuzis la peton.",
             (
                 "Rimedo: kontrolu IMAP servilon/havenon per "
-                f"`retposto ĝisdatigi-konton \"{retposto}\" --imap {host} "
+                f'`retposto ĝisdatigi-konton "{retposto}" --imap {host} '
                 f"--imap-haveno {port}`."
             ),
         ]
@@ -2563,7 +2827,7 @@ def _imap_error_repair_steps(acc: dict, exc: Exception) -> list[str]:
             f"Ne eblas rezolvi IMAP servilon: {host!r}.",
             (
                 "Rimedo: ĝustigu servilan nomon per "
-                f"`retposto ĝisdatigi-konton \"{retposto}\" --imap <servilo>`."
+                f'`retposto ĝisdatigi-konton "{retposto}" --imap <servilo>`.'
             ),
         ]
 
@@ -2613,7 +2877,7 @@ def _smtp_error_repair_steps(acc: dict, exc: Exception) -> list[str]:
             "SMTP aŭtentigo malsukcesis (malĝusta uzantonomo aŭ pasvorto).",
             (
                 "Rimedo: ĝisdatigu pasvorton per "
-                f"`retposto ĝisdatigi-konton \"{retposto}\" --pasvorto`."
+                f'`retposto ĝisdatigi-konton "{retposto}" --pasvorto`.'
             ),
         ]
 
@@ -2625,7 +2889,7 @@ def _smtp_error_repair_steps(acc: dict, exc: Exception) -> list[str]:
             f"Ne eblas rezolvi SMTP servilon: {host!r}.",
             (
                 "Rimedo: ĝustigu servilan nomon per "
-                f"`retposto ĝisdatigi-konton \"{retposto}\" --smtp <servilo>`."
+                f'`retposto ĝisdatigi-konton "{retposto}" --smtp <servilo>`.'
             ),
         ]
 
@@ -2655,16 +2919,8 @@ def _smtp_error_repair_steps(acc: dict, exc: Exception) -> list[str]:
 
 def _verify_account_connectivity(acc: dict, password: str) -> tuple[bool, list[str]]:
     """Verify IMAP+SMTP login before persisting account."""
-    imap_login = (
-        acc.get("imap_uzantonomo")
-        or acc.get("uzantonomo")
-        or acc["retposto"]
-    )
-    smtp_login = (
-        acc.get("smtp_uzantonomo")
-        or acc.get("uzantonomo")
-        or acc["retposto"]
-    )
+    imap_login = acc.get("imap_uzantonomo") or acc.get("uzantonomo") or acc["retposto"]
+    smtp_login = acc.get("smtp_uzantonomo") or acc.get("uzantonomo") or acc["retposto"]
     imap_host = str(acc["imap_servilo"])
     imap_port = int(acc.get("imap_haveno", 993))
     smtp_host = str(acc["smtp_servilo"])
@@ -2739,9 +2995,7 @@ def _verify_account_connectivity(acc: dict, password: str) -> tuple[bool, list[s
     return True, []
 
 
-def _probe_tcp_connectivity(
-    host: str, port: int, *, timeout: float
-) -> OSError | None:
+def _probe_tcp_connectivity(host: str, port: int, *, timeout: float) -> OSError | None:
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return None
@@ -2814,8 +3068,7 @@ def _is_valid_domain(domain: str) -> bool:
     if any(not label or len(label) > 63 for label in labels):
         return False
     return all(
-        re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label)
-        for label in labels
+        re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label) for label in labels
     )
 
 
@@ -2877,7 +3130,9 @@ def _parse_thunderbird_autoconfig(
 
 
 def _parse_autodiscover(root: ET.Element, email_addr: str) -> _EmailServerConfig | None:
-    ns = {"a": "http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a"}
+    ns = {
+        "a": "http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a"
+    }
     protocols = root.findall(".//a:Protocol", ns) or root.findall(".//Protocol")
     if not protocols:
         return None
@@ -2895,10 +3150,9 @@ def _parse_autodiscover(root: ET.Element, email_addr: str) -> _EmailServerConfig
         port_raw = port_raw or proto.findtext("Port", default="")
         ssl_raw = proto.findtext("a:SSL", default="", namespaces=ns)
         ssl_raw = ssl_raw or proto.findtext("SSL", default="")
-        encryption = (
-            proto.findtext("a:Encryption", default="", namespaces=ns)
-            or proto.findtext("Encryption", default="")
-        )
+        encryption = proto.findtext(
+            "a:Encryption", default="", namespaces=ns
+        ) or proto.findtext("Encryption", default="")
         if not server:
             continue
         try:
@@ -3041,9 +3295,7 @@ def _load_conversation_messages(msg: dict) -> list[dict]:
                     changed = True
         if conversation_ids:
             conv = [
-                item
-                for item in messages
-                if int(item.get("id", -1)) in conversation_ids
+                item for item in messages if int(item.get("id", -1)) in conversation_ids
             ]
             if conv:
                 return conv
@@ -3098,7 +3350,7 @@ def _parse_cli_uid(uid_text: str, accounts: list[dict]) -> tuple[int, str]:
     for idx in range(len(accounts), 0, -1):
         prefix = str(idx)
         if compact.startswith(prefix) and len(compact) > len(prefix):
-            return int(accounts[idx - 1]["id"]), compact[len(prefix):]
+            return int(accounts[idx - 1]["id"]), compact[len(prefix) :]
     raise ValueError("Nevalida UID formo.")
 
 
@@ -3126,8 +3378,10 @@ def _build_sieve_script(filters: list[dict]) -> str:
             op = m.group("op").lower()
             val = m.group("value")
             sieve_field = {
-                "from": "from", "to": "to",
-                "subject": "subject", "body": "body",
+                "from": "from",
+                "to": "to",
+                "subject": "subject",
+                "body": "body",
             }.get(field, field)
             sieve_op = ":contains" if op == "contains" else ":is"
             test = f'header {sieve_op} "{sieve_field}" "{val}"'
@@ -3167,16 +3421,16 @@ def _build_sieve_script(filters: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _upload_sieve(acc: dict, sieve_script: str,
-                  sieve_host: str | None = None,
-                  sieve_port: int = 4190) -> bool:
+def _upload_sieve(
+    acc: dict, sieve_script: str, sieve_host: str | None = None, sieve_port: int = 4190
+) -> bool:
     """Upload a Sieve script via ManageSieve protocol. Returns True on success."""
     try:
         import managesieve  # type: ignore[import-untyped]
     except ImportError:
         typer.echo(
             "[!] managesieve package not installed. "
-            "Add it to pyproject.toml: managesieve = \"*\"",
+            'Add it to pyproject.toml: managesieve = "*"',
             err=True,
         )
         return False
@@ -3231,8 +3485,9 @@ def _import_vcf(vcf_path: Path) -> int:
             telefono = ""
             if hasattr(vcard, "tel"):
                 telefono = str(vcard.tel.value).strip()
-            _upsert_contact(email_addr, nomo or None, organizo or None,
-                            telefono or None)
+            _upsert_contact(
+                email_addr, nomo or None, organizo or None, telefono or None
+            )
             count += 1
         except Exception:
             continue
@@ -3313,6 +3568,8 @@ def _launch_tui() -> None:
             load_conversation=_load_conversation_messages,
             load_aldonajoj=_load_aldonajoj,
             malfermi_aldonajon=_malfermi_aldonajon,
+            ai_analyze_message=_ai_analyze_single_message,
+            ai_generate_reply=_ai_generate_reply_body,
         )
         tui.run()
 
@@ -3344,15 +3601,14 @@ def aldoni_konton(
     smtp_haveno: int = typer.Option(587, "--smtp-haveno", help="SMTP port."),
     imap_ssl: bool = typer.Option(True, "--imap-ssl/--no-imap-ssl"),
     smtp_tls: bool = typer.Option(True, "--smtp-tls/--no-smtp-tls"),
-    webmail_url: str | None = typer.Option(
-        None, "--webmail-url", help="Webmail URL."
-    ),
+    webmail_url: str | None = typer.Option(None, "--webmail-url", help="Webmail URL."),
     sieve_servilo: str | None = typer.Option(
         None, "--sieve-servilo", help="ManageSieve hostname."
     ),
     sieve_haveno: int = typer.Option(4190, "--sieve-haveno", help="ManageSieve port."),
     sieve_starttls: bool = typer.Option(
-        True, "--sieve-starttls/--no-sieve-starttls",
+        True,
+        "--sieve-starttls/--no-sieve-starttls",
         help="Use STARTTLS for ManageSieve.",
     ),
     sieve_uzantonomo: str | None = typer.Option(
@@ -3435,16 +3691,14 @@ def aldoni_konton(
 
 @app.command("forigi-konton")
 def forigi_konton(
-    id_adr: str = typer.Argument(..., help="Account id or email address.")
+    id_adr: str = typer.Argument(..., help="Account id or email address."),
 ) -> None:
     """Remove an email account."""
     acc = _find_account(id_adr)
     if not acc:
         typer.echo(f"[!] Konto ne trovita: {id_adr}", err=True)
         raise typer.Exit(1)
-    if not _confirm_esperante(
-        f"Forigi konton '{acc['retposto']}'?", default_yes=False
-    ):
+    if not _confirm_esperante(f"Forigi konton '{acc['retposto']}'?", default_yes=False):
         typer.echo("Nuligita.")
         return
     _delete_account(acc["id"])
@@ -3494,9 +3748,7 @@ def preni(
         "--konto",
         help="Account id/email (repeat flag for multiple accounts).",
     ),
-    max_msgs: int = typer.Option(
-        100, "-m", "--max", help="Max messages per folder."
-    ),
+    max_msgs: int = typer.Option(100, "-m", "--max", help="Max messages per folder."),
 ) -> None:
     """Fetch new mail from server(s)."""
     accounts = _load_accounts()
@@ -3685,9 +3937,7 @@ def serci_mesagojn(
         None,
         help="Serĉ-demando (defaŭlte tra de/subjekto/korpo).",
     ),
-    de: str | None = typer.Option(
-        None, "--de", help="Filtri laŭ sendinto-retpoŝto."
-    ),
+    de: str | None = typer.Option(None, "--de", help="Filtri laŭ sendinto-retpoŝto."),
     subjekto: str | None = typer.Option(
         None, "--subjekto", help="Filtri laŭ subjekto."
     ),
@@ -3785,9 +4035,12 @@ def respondi_mesagon(
         raise typer.Exit(1)
     body = korpo if korpo is not None else typer.prompt("Body")
     sub = "Re: " + (src.get("subjekto") or "")
-    base_refs = " ".join(
-        x for x in [src.get("references_hdr"), src.get("message_id")] if x
-    ).strip() or None
+    base_refs = (
+        " ".join(
+            x for x in [src.get("references_hdr"), src.get("message_id")] if x
+        ).strip()
+        or None
+    )
     ok = _send_message(
         acc,
         to_targets,
@@ -3848,9 +4101,12 @@ def respondi_ciujn_mesagon(
         raise typer.Exit(1)
     body = korpo if korpo is not None else typer.prompt("Body")
     sub = "Re: " + (src.get("subjekto") or "")
-    base_refs = " ".join(
-        x for x in [src.get("references_hdr"), src.get("message_id")] if x
-    ).strip() or None
+    base_refs = (
+        " ".join(
+            x for x in [src.get("references_hdr"), src.get("message_id")] if x
+        ).strip()
+        or None
+    )
     ok = _send_message(
         acc,
         to_targets,
@@ -3920,6 +4176,426 @@ def plusendi_mesagon(
         raise typer.Exit(1)
 
 
+@app.command("analizi")
+def analizi_mesagojn(
+    identigiloj: list[str] | None = typer.Argument(
+        None,
+        help=(
+            "UID(j), konto-id(j), aŭ konto-retpoŝto(j). "
+            "Se mankas, analizas nelegitajn ankoraŭ ne-analizitajn mesaĝojn."
+        ),
+    ),
+    resumi: bool = typer.Option(
+        False,
+        "-r",
+        "--resumi",
+        help="Generi resumon de la enhavoj (Markdown).",
+    ),
+    resumi_celvojo: str | None = typer.Option(
+        None,
+        "-rc",
+        "--resumi-celvojo",
+        help="Celvojo por la resumo (.md).",
+    ),
+    kalendaro: bool = typer.Option(
+        False,
+        "-k",
+        "--kalendaro",
+        help="Elpreni eventojn kaj generi iCalendar (.ics).",
+    ),
+    kalendaro_celvojo: str | None = typer.Option(
+        None,
+        "-kc",
+        "--kalendaro-celvojo",
+        help="Celvojo por eventa .ics dosiero.",
+    ),
+    respondi: bool = typer.Option(
+        False,
+        "-R",
+        "--respondi",
+        help="Generi proponitajn respondojn.",
+    ),
+    respondi_celvojo: str | None = typer.Option(
+        None,
+        "-Rc",
+        "--respondi-celvojo",
+        help="Celvojo por respondoj (.md aŭ dosierujo por pluraj).",
+    ),
+    instrukcio: str | None = typer.Option(
+        None,
+        "-i",
+        "--instrukcio",
+        help="Plia AI-instrukcio por analizo.",
+    ),
+    kunteksto_dosiero: Path | None = typer.Option(
+        None,
+        "-K",
+        "--kunteksto-dosiero",
+        help="Propra kunteksto-dosiero por analizo.",
+    ),
+    modelo: str = typer.Option(
+        "MiniMaxAI/MiniMax-M2.7:novita",
+        "-m",
+        "--modelo",
+        help="AI-modelo por analizi mesaĝojn.",
+    ),
+    provizanto: str = typer.Option(
+        "huggingface",
+        "-p",
+        "--provizanto",
+        help="AI-provizanto.",
+    ),
+    api_slosilo: str | None = typer.Option(
+        None,
+        "-as",
+        "--api-slosilo",
+        help="API-slosilo por la AI-provizanto.",
+    ),
+    maksimumaj_tokenoj: int = typer.Option(
+        1800,
+        "-mt",
+        "--maksimumaj-tokenoj",
+        help="Maksimumaj novaj tokenoj.",
+    ),
+    temperaturo: float = typer.Option(
+        0.5,
+        "-tm",
+        "--temperaturo",
+        help="Modela temperaturo inter 0 kaj 2.",
+    ),
+) -> None:
+    """Analizi retpoŝtojn kun AI, inkluzive konversacian kuntekston."""
+    accounts = _load_accounts()
+    if not accounts:
+        typer.echo("[!] Neniuj kontoj konfiguritaj.", err=True)
+        raise typer.Exit(1)
+
+    ids = identigiloj or []
+    targets = _resolve_analizi_targets(ids, accounts=accounts)
+    if not targets:
+        if ids:
+            typer.echo("[!] Neniu mesaĝo trovita por la donitaj identigiloj.", err=True)
+            raise typer.Exit(1)
+        typer.echo("Neniuj nelegitaj ne-analizitaj mesaĝoj trovitaj.")
+        return
+
+    run_summary = resumi or (not kalendaro and not respondi)
+    try:
+        service = _resolve_retposto_ai_service(
+            provizanto=provizanto,
+            modelo=modelo,
+            api_slosilo=api_slosilo,
+        )
+        context = load_ai_context(
+            "retposto-analizi",
+            override_path=kunteksto_dosiero,
+        )
+        corpus_blocks = [
+            f"# Celo {idx}\n{_render_conversation_for_ai(msg)}"
+            for idx, msg in enumerate(targets, start=1)
+        ]
+        corpus = "\n\n".join(corpus_blocks).strip()
+
+        if run_summary:
+            summary_instruction = (
+                "Analizu la jenajn retpoŝtojn kaj redonu koncizan Markdown-resumon. "
+                "Inkluzivu: (1) ĉefaj punktoj, (2) decidendaĵoj, "
+                "(3) rekomenditaj venontaj paŝoj."
+            )
+            if (instrukcio or "").strip():
+                summary_instruction += f"\nPlia instrukcio: {instrukcio.strip()}"
+            summary_text = service.verki(
+                VerkiRequest(
+                    instrukcio=summary_instruction,
+                    fonta_teksto=corpus,
+                    kunteksto=context,
+                    maksimumaj_tokenoj=maksimumaj_tokenoj,
+                    temperaturo=temperaturo,
+                )
+            )
+            if resumi_celvojo:
+                out_path = _resolve_output_path(
+                    resumi_celvojo,
+                    default_filename="retposto_analizo.md",
+                    suffix=".md",
+                )
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(summary_text, encoding="utf-8")
+                typer.echo(f"Skribis resumon al {out_path}.")
+            else:
+                typer.echo(summary_text)
+
+        if kalendaro:
+            calendar_instruction = (
+                "Elprenu eventojn el la retpoŝtoj kaj redonu nur validan iCalendar "
+                "(.ics) tekston kun VCALENDAR/VEVENT."
+            )
+            if (instrukcio or "").strip():
+                calendar_instruction += f"\nPlia instrukcio: {instrukcio.strip()}"
+            ics_text = service.verki(
+                VerkiRequest(
+                    instrukcio=calendar_instruction,
+                    fonta_teksto=corpus,
+                    kunteksto=context,
+                    maksimumaj_tokenoj=max(1200, maksimumaj_tokenoj),
+                    temperaturo=min(temperaturo, 0.6),
+                )
+            )
+            upper_ics = ics_text.upper()
+            if "BEGIN:VCALENDAR" not in upper_ics or "END:VCALENDAR" not in upper_ics:
+                raise ValueError("AI ne redonis validan VCALENDAR enhavon.")
+            if kalendaro_celvojo:
+                out_path = _resolve_output_path(
+                    kalendaro_celvojo,
+                    default_filename="retposto_eventoj.ics",
+                    suffix=".ics",
+                )
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(ics_text, encoding="utf-8")
+                typer.echo(f"Skribis eventojn al {out_path}.")
+            else:
+                typer.echo(ics_text)
+
+        if respondi:
+            accounts_by_id = {int(acc["id"]): acc for acc in accounts}
+            response_texts: list[tuple[dict, str]] = []
+            for msg in targets:
+                response_instruction = (
+                    "Proponu klaran kaj ĝentilan retpoŝtan respondon bazitan sur "
+                    "la konversacia historio. Redonu nur la respondean korpon."
+                )
+                if (instrukcio or "").strip():
+                    response_instruction += f"\nPlia instrukcio: {instrukcio.strip()}"
+                response_body = service.verki(
+                    VerkiRequest(
+                        instrukcio=response_instruction,
+                        fonta_teksto=_render_conversation_for_ai(msg),
+                        kunteksto=context,
+                        maksimumaj_tokenoj=max(900, maksimumaj_tokenoj),
+                        temperaturo=temperaturo,
+                    )
+                )
+                response_texts.append((msg, response_body))
+
+            if respondi_celvojo:
+                target_path = Path(respondi_celvojo).expanduser()
+                if len(response_texts) > 1:
+                    target_path.mkdir(parents=True, exist_ok=True)
+                    if not target_path.is_dir():
+                        raise ValueError(
+                            "Por pluraj mesaĝoj, --respondi-celvojo devas "
+                            "esti dosierujo."
+                        )
+                    for msg, body in response_texts:
+                        file_path = target_path / f"respondo-{int(msg['id'])}.md"
+                        file_path.write_text(body, encoding="utf-8")
+                    typer.echo(
+                        f"Skribis {len(response_texts)} respondojn al {target_path}."
+                    )
+                else:
+                    one_msg, one_body = response_texts[0]
+                    out_path = _resolve_output_path(
+                        str(target_path),
+                        default_filename=f"respondo-{int(one_msg['id'])}.md",
+                        suffix=".md",
+                    )
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    out_path.write_text(one_body, encoding="utf-8")
+                    typer.echo(f"Skribis respondon al {out_path}.")
+            else:
+                for msg, body in response_texts:
+                    konto_id = int(msg["konto_id"])
+                    acc = accounts_by_id.get(konto_id)
+                    if acc is None:
+                        continue
+                    drafts_folder = _find_drafts_folder(konto_id)
+                    if drafts_folder is None:
+                        drafts_folder = _ensure_folder(konto_id, "Malnetoj", "Drafts")
+                    to_targets, cc_targets = _reply_targets(
+                        str(acc.get("retposto") or ""),
+                        msg,
+                    )
+                    subject = "Re: " + str(msg.get("subjekto") or "")
+                    _save_message(
+                        {
+                            "konto_id": konto_id,
+                            "dosierujo_id": drafts_folder,
+                            "de": str(acc.get("retposto") or ""),
+                            "al": to_targets,
+                            "cc": cc_targets,
+                            "bcc": [],
+                            "subjekto": subject,
+                            "korpo": body,
+                            "prioritato": 5,
+                            "legita": 1,
+                            "stelo": 0,
+                            "spamo": 0,
+                            "forigita": 0,
+                        }
+                    )
+                typer.echo(
+                    f"Konservis {len(response_texts)} AI-respondon en Drafts/Malnetoj."
+                )
+
+        _mark_messages_analyzed(targets)
+    except (ValueError, VerkiServiceError) as exc:
+        typer.echo(f"Eraro: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+
+@app.command("generi")
+def generi_malneton(
+    celo: str = typer.Argument(
+        ...,
+        help=("Konto-id/retpoŝto por Drafts, aŭ cel-dosier-vojo por loka konservado."),
+    ),
+    instrukcio: str = typer.Option(
+        ...,
+        "-i",
+        "--instrukcio",
+        help="Deviga AI-instrukcio por generi la malneton.",
+    ),
+    temo: str | None = typer.Option(
+        None,
+        "-t",
+        "--temo",
+        help='Temo por la retpoŝto (ekz: -t "Projekta ĝisdatigo").',
+    ),
+    al: str | None = typer.Option(
+        None,
+        "-a",
+        "--al",
+        help="Ricevonto(j), apartigitaj per komoj.",
+    ),
+    cc: str | None = typer.Option(
+        None,
+        "--cc",
+        help="CC-ricevonto(j), apartigitaj per komoj.",
+    ),
+    bcc: str | None = typer.Option(
+        None,
+        "--bcc",
+        help="BCC-ricevonto(j), apartigitaj per komoj.",
+    ),
+    kunteksto_dosiero: Path | None = typer.Option(
+        None,
+        "-K",
+        "--kunteksto-dosiero",
+        help="Propra kunteksto-dosiero por retposto generi.",
+    ),
+    modelo: str = typer.Option(
+        "MiniMaxAI/MiniMax-M2.7:novita",
+        "-m",
+        "--modelo",
+        help="AI-modelo por retpoŝta generado.",
+    ),
+    provizanto: str = typer.Option(
+        "huggingface",
+        "-p",
+        "--provizanto",
+        help="AI-provizanto.",
+    ),
+    api_slosilo: str | None = typer.Option(
+        None,
+        "-as",
+        "--api-slosilo",
+        help="API-slosilo por la AI-provizanto.",
+    ),
+    maksimumaj_tokenoj: int = typer.Option(
+        1200,
+        "-mt",
+        "--maksimumaj-tokenoj",
+        help="Maksimumaj novaj tokenoj.",
+    ),
+    temperaturo: float = typer.Option(
+        0.4,
+        "-tm",
+        "--temperaturo",
+        help="Modela temperaturo inter 0 kaj 2.",
+    ),
+) -> None:
+    """Generi AI-retpoŝtan malneton al Drafts aŭ al dosiero."""
+    accounts = _load_accounts()
+    account_target = _find_account(celo)
+    if account_target is None and not accounts:
+        typer.echo("[!] Neniuj kontoj konfiguritaj.", err=True)
+        raise typer.Exit(1)
+
+    try:
+        service = _resolve_retposto_ai_service(
+            provizanto=provizanto,
+            modelo=modelo,
+            api_slosilo=api_slosilo,
+        )
+        context = load_ai_context(
+            "retposto-generi",
+            override_path=kunteksto_dosiero,
+        )
+        to_list = [item.strip() for item in (al or "").split(",") if item.strip()]
+        cc_list = [item.strip() for item in (cc or "").split(",") if item.strip()]
+        bcc_list = [item.strip() for item in (bcc or "").split(",") if item.strip()]
+        body_instruction = "Verku retpoŝtan malneton. Respondu nur per la korpoteksto."
+        if (temo or "").strip():
+            body_instruction += f"\nTemo: {temo.strip()}"
+        if to_list:
+            body_instruction += f"\nRicevontoj: {', '.join(to_list)}"
+        body_instruction += f"\nĈefa instrukcio: {instrukcio.strip()}"
+        generated_body = service.verki(
+            VerkiRequest(
+                instrukcio=body_instruction,
+                kunteksto=context,
+                maksimumaj_tokenoj=maksimumaj_tokenoj,
+                temperaturo=temperaturo,
+            )
+        )
+    except (ValueError, VerkiServiceError) as exc:
+        typer.echo(f"Eraro: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    subject = (temo or "AI malneto").strip()
+    if account_target is not None:
+        konto_id = int(account_target["id"])
+        drafts_folder = _find_drafts_folder(konto_id)
+        if drafts_folder is None:
+            drafts_folder = _ensure_folder(konto_id, "Malnetoj", "Drafts")
+        msg_id = _save_message(
+            {
+                "konto_id": konto_id,
+                "dosierujo_id": drafts_folder,
+                "de": str(account_target.get("retposto") or ""),
+                "al": to_list,
+                "cc": cc_list,
+                "bcc": bcc_list,
+                "subjekto": subject,
+                "korpo": generated_body,
+                "prioritato": 5,
+                "legita": 1,
+                "stelo": 0,
+                "spamo": 0,
+                "forigita": 0,
+            }
+        )
+        typer.echo(f"[✓] AI-malneto konservita en Drafts/Malnetoj (id={msg_id}).")
+        return
+
+    out_path = _resolve_output_path(
+        celo,
+        default_filename="retposto_malneto.md",
+        suffix=".md",
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    header = [f"Subjekto: {subject}"]
+    if to_list:
+        header.append(f"Al: {', '.join(to_list)}")
+    if cc_list:
+        header.append(f"Cc: {', '.join(cc_list)}")
+    if bcc_list:
+        header.append(f"Bcc: {', '.join(bcc_list)}")
+    out_text = "\n".join(header) + "\n\n" + generated_body
+    out_path.write_text(out_text, encoding="utf-8")
+    typer.echo(f"Skribis AI-malneton al {out_path}.")
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Contact subcommands
 # ──────────────────────────────────────────────────────────────────────────────
@@ -3978,10 +4654,7 @@ def kontakto_aldoni(
         organizo=organizo,
         telefono=telefono,
     )
-    typer.echo(
-        f"[✓] Kontakto savis sen retpoŝto: "
-        f"#{str(row.get('uuid') or '')[:8]}"
-    )
+    typer.echo(f"[✓] Kontakto savis sen retpoŝto: #{str(row.get('uuid') or '')[:8]}")
 
 
 @kontakto_app.command("serci")
@@ -4127,9 +4800,7 @@ def kontakto_vidi(
 
 
 @kontakto_app.command("forigi")
-def kontakto_forigi(
-    contact_id: int = typer.Argument(..., help="Contact ID.")
-) -> None:
+def kontakto_forigi(contact_id: int = typer.Argument(..., help="Contact ID.")) -> None:
     """Remove a contact."""
     with _get_db() as con:
         row = con.execute(
@@ -4147,7 +4818,7 @@ def kontakto_forigi(
 
 @kontakto_app.command("importi")
 def kontakto_importi(
-    vcf_dosiero: str = typer.Argument(..., help="Path to VCF file.")
+    vcf_dosiero: str = typer.Argument(..., help="Path to VCF file."),
 ) -> None:
     """Import contacts from a VCF file."""
     path = Path(vcf_dosiero)
@@ -4160,7 +4831,7 @@ def kontakto_importi(
 
 @kontakto_app.command("eksporti")
 def kontakto_eksporti(
-    vcf_dosiero: str = typer.Argument(..., help="Path for output VCF file.")
+    vcf_dosiero: str = typer.Argument(..., help="Path for output VCF file."),
 ) -> None:
     """Export contacts to a VCF file."""
     path = Path(vcf_dosiero)
@@ -4195,7 +4866,7 @@ def filtro_agordi(
 
 @filtro_app.command("montri")
 def filtro_montri(
-    nomo: str = typer.Option("ĉefa", "-n", "--nomo", help="Filter profile name.")
+    nomo: str = typer.Option("ĉefa", "-n", "--nomo", help="Filter profile name."),
 ) -> None:
     """Show stored full filter script."""
     with _get_db() as con:
@@ -4214,9 +4885,7 @@ def filtro_aldoni(
     nomo: str = typer.Argument(..., help="Filter name."),
     sieve_kodo: str = typer.Argument(
         ...,
-        help=(
-            'Sieve-style rule: "from contains \\"spam\\"" => fileinto "Spam"'
-        ),
+        help=('Sieve-style rule: "from contains \\"spam\\"" => fileinto "Spam"'),
     ),
     ordo: int = typer.Option(0, "-o", "--ordo", help="Execution order."),
 ) -> None:
@@ -4246,15 +4915,13 @@ def filtro_listigi() -> None:
     table.add_column("Ordo")
     table.add_column("Sieve-kodo")
     for f in filters:
-        table.add_row(
-            str(f["id"]), f["nomo"], str(f["ordo"]), f["sieve_kodo"]
-        )
+        table.add_row(str(f["id"]), f["nomo"], str(f["ordo"]), f["sieve_kodo"])
     console.print(table)
 
 
 @filtro_app.command("forigi")
 def filtro_forigi(
-    nomo: str = typer.Argument(..., help="Filter name to delete.")
+    nomo: str = typer.Argument(..., help="Filter name to delete."),
 ) -> None:
     """Delete a filter by name."""
     _delete_filter(nomo)
@@ -4292,7 +4959,7 @@ def filtro_alsuti(
 def bloki(
     regulo: str = typer.Argument(
         ..., help="Email address or domain to block (e.g. spam@evil.com or evil.com)."
-    )
+    ),
 ) -> None:
     """Block a sender or domain from appearing in inbox."""
     _add_spam_block(regulo)
@@ -4301,7 +4968,7 @@ def bloki(
 
 @app.command("malbloki")
 def malbloki(
-    regulo: str = typer.Argument(..., help="Rule to remove from block list.")
+    regulo: str = typer.Argument(..., help="Rule to remove from block list."),
 ) -> None:
     """Remove a sender/domain from the block list."""
     _remove_spam_block(regulo)
@@ -4349,7 +5016,8 @@ def gisdatigi_konton(
     ),
     sieve_haveno: int | None = typer.Option(None, "--sieve-haveno"),
     sieve_starttls: bool | None = typer.Option(
-        None, "--sieve-starttls/--no-sieve-starttls",
+        None,
+        "--sieve-starttls/--no-sieve-starttls",
         help="Use STARTTLS for ManageSieve.",
     ),
     sieve_uzantonomo: str | None = typer.Option(
@@ -4410,12 +5078,12 @@ def gisdatigi_konton(
 def subskribo_cmd(
     id_adr: str = typer.Argument(..., help="Account id or email address."),
     agordi: str | None = typer.Option(
-        None, "-a", "--agordi",
+        None,
+        "-a",
+        "--agordi",
         help="Set signature: local file path or URL (http/https).",
     ),
-    forigi: bool = typer.Option(
-        False, "-f", "--forigi", help="Remove the signature."
-    ),
+    forigi: bool = typer.Option(False, "-f", "--forigi", help="Remove the signature."),
 ) -> None:
     """View or set the email signature for an account.
 
@@ -4495,7 +5163,7 @@ def novdos(
 def listigi_dosierujojn(
     konto: str | None = typer.Option(
         None, "-k", "--konto", help="Account id or email (default: all)."
-    )
+    ),
 ) -> None:
     """List folders for one or all accounts."""
     accounts = _load_accounts()
@@ -4533,9 +5201,7 @@ def movi_mesagon(
 ) -> None:
     """Move a message to a different folder."""
     with _get_db() as con:
-        row = con.execute(
-            "SELECT * FROM mesago WHERE id = ?", (mesago_id,)
-        ).fetchone()
+        row = con.execute("SELECT * FROM mesago WHERE id = ?", (mesago_id,)).fetchone()
     if not row:
         typer.echo(f"[!] Mesaĝo ne trovita: {mesago_id}", err=True)
         raise typer.Exit(1)
@@ -4566,9 +5232,7 @@ def kopii_mesagon(
 ) -> None:
     """Copy a message to a different folder."""
     with _get_db() as con:
-        row = con.execute(
-            "SELECT * FROM mesago WHERE id = ?", (mesago_id,)
-        ).fetchone()
+        row = con.execute("SELECT * FROM mesago WHERE id = ?", (mesago_id,)).fetchone()
     if not row:
         typer.echo(f"[!] Mesaĝo ne trovita: {mesago_id}", err=True)
         raise typer.Exit(1)
@@ -4875,9 +5539,7 @@ def importi(
                     szf.extractall(path=tmp_dir)
                 toml_path = Path(tmp_dir) / "kontoj.toml"
                 if not toml_path.exists():
-                    typer.echo(
-                        "[!] Arkivo ne enhavas 'kontoj.toml'.", err=True
-                    )
+                    typer.echo("[!] Arkivo ne enhavas 'kontoj.toml'.", err=True)
                     raise typer.Exit(1)
                 kontoj_bytes = toml_path.read_bytes()
         except typer.Exit:
@@ -4942,7 +5604,6 @@ def importi(
     typer.echo(f"[v] Importis {added} konto(j)n.")
 
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Account editor (konton)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -4974,40 +5635,42 @@ def konton() -> None:
 
     records: list[dict] = []
     for acc in accounts:
-        records.append({
-            "id": int(acc["id"]),
-            "nomo": acc.get("nomo") or "",
-            "retposto": acc.get("retposto") or "",
-            "imap_servilo": acc.get("imap_servilo") or "",
-            "imap_haveno": int(acc.get("imap_haveno") or 993),
-            "imap_ssl": bool(acc.get("imap_ssl", True)),
-            "imap_uzantonomo": acc.get("imap_uzantonomo")
-            or acc.get("uzantonomo")
-            or "",
-            "smtp_servilo": acc.get("smtp_servilo") or "",
-            "smtp_haveno": int(acc.get("smtp_haveno") or 587),
-            "smtp_tls": bool(acc.get("smtp_tls", True)),
-            "smtp_uzantonomo": acc.get("smtp_uzantonomo")
-            or acc.get("uzantonomo")
-            or "",
-            "webmail_url": acc.get("webmail_url") or "",
-            "sieve_servilo": acc.get("sieve_servilo") or acc.get("imap_servilo") or "",
-            "sieve_haveno": int(acc.get("sieve_haveno") or 4190),
-            "sieve_starttls": bool(acc.get("sieve_starttls", True)),
-            "sieve_uzantonomo": acc.get("sieve_uzantonomo")
-            or acc.get("imap_uzantonomo")
-            or acc.get("uzantonomo")
-            or "",
-            "uzantonomo": acc.get("uzantonomo") or "",
-            "subskribo": acc.get("subskribo") or "",
-        })
+        records.append(
+            {
+                "id": int(acc["id"]),
+                "nomo": acc.get("nomo") or "",
+                "retposto": acc.get("retposto") or "",
+                "imap_servilo": acc.get("imap_servilo") or "",
+                "imap_haveno": int(acc.get("imap_haveno") or 993),
+                "imap_ssl": bool(acc.get("imap_ssl", True)),
+                "imap_uzantonomo": acc.get("imap_uzantonomo")
+                or acc.get("uzantonomo")
+                or "",
+                "smtp_servilo": acc.get("smtp_servilo") or "",
+                "smtp_haveno": int(acc.get("smtp_haveno") or 587),
+                "smtp_tls": bool(acc.get("smtp_tls", True)),
+                "smtp_uzantonomo": acc.get("smtp_uzantonomo")
+                or acc.get("uzantonomo")
+                or "",
+                "webmail_url": acc.get("webmail_url") or "",
+                "sieve_servilo": acc.get("sieve_servilo")
+                or acc.get("imap_servilo")
+                or "",
+                "sieve_haveno": int(acc.get("sieve_haveno") or 4190),
+                "sieve_starttls": bool(acc.get("sieve_starttls", True)),
+                "sieve_uzantonomo": acc.get("sieve_uzantonomo")
+                or acc.get("imap_uzantonomo")
+                or acc.get("uzantonomo")
+                or "",
+                "uzantonomo": acc.get("uzantonomo") or "",
+                "subskribo": acc.get("subskribo") or "",
+            }
+        )
     toml_text = tomli_w.dumps({"kontoj": records})
 
     # Choose editor
     editor = (
-        os.environ.get("VISUAL")
-        or os.environ.get("EDITOR")
-        or _find_terminal_editor()
+        os.environ.get("VISUAL") or os.environ.get("EDITOR") or _find_terminal_editor()
     )
 
     with tempfile.NamedTemporaryFile(
@@ -5068,14 +5731,14 @@ def listigi_aldonajojn(mesago_id: int) -> None:
     if not aldonajoj:
         typer.echo("Neniu aldonaĵo trovita.")
         return
-    
+
     console = Console()
     table = Table(title=f"Aldonaĵoj por mesaĝo #{mesago_id}")
     table.add_column("ID", style="cyan")
     table.add_column("Dosiernomo", style="bold")
     table.add_column("Grandeco", justify="right")
     table.add_column("MIME-tipo", style="dim")
-    
+
     for ald in aldonajoj:
         grandeco_str = _format_grandeco(ald["grandeco"])
         table.add_row(
@@ -5084,7 +5747,7 @@ def listigi_aldonajojn(mesago_id: int) -> None:
             grandeco_str,
             ald["mime_tipo"],
         )
-    
+
     console.print(table)
 
 
@@ -5100,23 +5763,18 @@ def marki_legita_cmd(
     dosierujo_id: int = typer.Option(
         None, "--dosierujo", "-d", help="Folder ID (required)"
     ),
-    konto_id: int = typer.Option(
-        None, "--konto", "-k", help="Account ID (optional)"
-    ),
+    konto_id: int = typer.Option(None, "--konto", "-k", help="Account ID (optional)"),
 ) -> None:
     """Mark all messages in a folder as read.
-    
+
     Example:
         retposto marki-legita --dosierujo 5
         retposto marki-legita -d 5 -k 1
     """
     if dosierujo_id is None:
-        typer.echo(
-            "Eraro: --dosierujo/-d estas deviga.",
-            err=True
-        )
+        typer.echo("Eraro: --dosierujo/-d estas deviga.", err=True)
         raise typer.Exit(code=1)
-    
+
     with _get_db() as con:
         # Count unread messages
         if konto_id:
@@ -5131,11 +5789,11 @@ def marki_legita_cmd(
                    WHERE dosierujo_id = ? AND legita = 0""",
                 (dosierujo_id,),
             ).fetchone()[0]
-        
+
         if unread_count == 0:
             typer.echo("Ĉiuj mesaĝoj en tiu dosierujo jam estas legita.")
             return
-        
+
         # Mark all as read
         if konto_id:
             con.execute(
@@ -5149,7 +5807,7 @@ def marki_legita_cmd(
                    WHERE dosierujo_id = ? AND legita = 0""",
                 (dosierujo_id,),
             )
-    
+
     typer.echo(f"[✓] Markis {unread_count} mesaĝo(j)n kiel legita(j)n.")
 
 

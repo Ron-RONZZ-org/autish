@@ -31,9 +31,12 @@ All keywords are in **Esperanto** to lower the barrier for non-English speakers.
 | `autish sistemo` | Print system information |
 | `autish kp` | Copy last command output to clipboard |
 | `autish verki generi` | AI-assisted text generation and rewriting; see [VERKI.md](VERKI.md) |
+| `autish verki modelo` | Browse available AI models |
+| `autish encik generi` | AI-generate `.enc` terminology/definition content with language controls |
+| `autish retposto analizi` | AI analysis/summarization/event extraction for email conversations |
+| `autish retposto generi` | AI-generate email draft text to Drafts or file output |
 
 **Note:** verki may surface router/Cloudflare or host-blocking errors (403/Error 1010 or HTML 404 fallback). See VERKI.md Troubleshooting for recommended actions (try another model/network or contact model owner).
-| `autish verki modelo` | Browse available AI models |
 
 ---
 

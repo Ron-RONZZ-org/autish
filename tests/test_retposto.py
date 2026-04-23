@@ -96,7 +96,7 @@ class TestSanitizeAsciiText:
 
     def test_normalizes_quotes_and_dashes(self):
         text = "“alpha”—‘beta’"
-        assert _sanitize_ascii_text(text) == '"alpha"-\'beta\''
+        assert _sanitize_ascii_text(text) == "\"alpha\"-'beta'"
 
     def test_normalizes_unicode_separator_and_format_chars(self):
         text = "A\u2060B\u2028C"
@@ -1587,6 +1587,16 @@ class TestRetpostoTuiReader:
         reader = MessageReader(_FakeStdScr(), msg)
         assert reader._handle_key(1) == "attachments"
 
+    def test_reader_z_triggers_ai_analyze_action(self):
+        msg = {"de": "a@b.com", "al": ["x@y.com"], "subjekto": "S", "korpo": "abc"}
+        reader = MessageReader(_FakeStdScr(), msg)
+        assert reader._handle_key(ord("z")) == "ai_analyze"
+
+    def test_reader_shift_z_triggers_ai_reply_action(self):
+        msg = {"de": "a@b.com", "al": ["x@y.com"], "subjekto": "S", "korpo": "abc"}
+        reader = MessageReader(_FakeStdScr(), msg)
+        assert reader._handle_key(ord("Z")) == "ai_reply"
+
     def test_wrapped_urls_are_unwrapped_in_reader_body(self):
         body = (
             "SG<https://particuliers.sg.fr/assurances/nos-offres/assurance-protection-\n"
@@ -1672,6 +1682,10 @@ class TestRetpostoTuiComposePanel:
         panel_cancel.handle_key(ord(":"))
         panel_cancel.handle_key(ord("q"))
         assert panel_cancel.handle_key(ord("\n")) == "cancel"
+
+    def test_ctrl_g_requests_ai_body_generation(self):
+        panel = ComposePanel(_FakeStdScr(), {"al": "user@example.com"})
+        assert panel.handle_key(7) == "ai_generate_body"
 
     def test_vim_command_mode_draft(self):
         panel = ComposePanel(_FakeStdScr(), {"al": "user@example.com"})
@@ -3713,3 +3727,96 @@ class TestTUIAccountWithNoFolders:
         folders_reloaded = _load_folders(acc_id)
         assert len(folders_reloaded) == 1
         assert folders_reloaded[0]["nomo"] == "Sent"  # Still Sent, not INBOX
+
+
+def test_retposto_generi_saves_ai_draft_to_account(isolated_db, monkeypatch):
+    import autish.commands.retposto as rp_mod
+
+    konto_id = _save_account(
+        {
+            "nomo": "AI Konto",
+            "retposto": "ai@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+            "kreita_je": "2024-01-01T00:00:00+00:00",
+        }
+    )
+    _ensure_folder(konto_id, "INBOX", "INBOX")
+
+    class _FakeService:
+        def verki(self, request):  # type: ignore[no-untyped-def]
+            return "Jen AI malneto."
+
+    monkeypatch.setattr(
+        rp_mod, "_resolve_retposto_ai_service", lambda **_kwargs: _FakeService()
+    )
+    monkeypatch.setattr(rp_mod, "load_ai_context", lambda *_a, **_k: "ctx")
+
+    result = runner.invoke(
+        app,
+        [
+            "retposto",
+            "generi",
+            str(konto_id),
+            "-i",
+            "Verku proponon",
+            "-t",
+            "AI temo",
+            "-a",
+            "ricevonto@example.com",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "AI-malneto konservita" in result.output
+
+    rows = rp_mod._load_messages(konto_id=konto_id, limit=20)
+    assert rows
+    assert any((row.get("subjekto") or "") == "AI temo" for row in rows)
+    assert any((row.get("korpo") or "") == "Jen AI malneto." for row in rows)
+
+
+def test_retposto_analizi_default_summary_marks_messages(isolated_db, monkeypatch):
+    import autish.commands.retposto as rp_mod
+
+    konto_id = _save_account(
+        {
+            "nomo": "Analizo Konto",
+            "retposto": "analizo@example.com",
+            "imap_servilo": "imap.example.com",
+            "smtp_servilo": "smtp.example.com",
+            "kreita_je": "2024-01-01T00:00:00+00:00",
+        }
+    )
+    inbox_id = _ensure_folder(konto_id, "INBOX", "INBOX")
+    msg_id = _save_message(
+        {
+            "konto_id": konto_id,
+            "dosierujo_id": inbox_id,
+            "uid": "42",
+            "de": "sender@example.com",
+            "al": ["analizo@example.com"],
+            "subjekto": "Saluton",
+            "korpo": "Jen testa enhavo.",
+            "legita": 0,
+        }
+    )
+
+    class _FakeService:
+        def verki(self, request):  # type: ignore[no-untyped-def]
+            return "Resumo de mesaĝo."
+
+    monkeypatch.setattr(
+        rp_mod, "_resolve_retposto_ai_service", lambda **_kwargs: _FakeService()
+    )
+    monkeypatch.setattr(rp_mod, "load_ai_context", lambda *_a, **_k: "ctx")
+
+    result = runner.invoke(app, ["retposto", "analizi"])
+    assert result.exit_code == 0, result.output
+    assert "Resumo de mesaĝo." in result.output
+
+    with rp_mod._get_db() as con:
+        row = con.execute(
+            "SELECT mesago_id FROM mesago_analizo WHERE mesago_id = ?",
+            (msg_id,),
+        ).fetchone()
+    assert row is not None

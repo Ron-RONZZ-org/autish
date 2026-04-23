@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from autish.services.providers.base import (
@@ -120,18 +121,18 @@ class VerkiService:
 
     @staticmethod
     def _is_complete_enc(text: str) -> bool:
-        has_terms = (
-            (
-                "terminologio.eo" in text
-                and "terminologio.fr" in text
-                and "terminologio.en" in text
-            )
-            or "terminologio.(eo,fr,en)" in text
+        has_split_terms = all(
+            re.search(rf"(?m)^\s*terminologio\.{lang}\s*=", text) is not None
+            for lang in ("eo", "fr", "en")
         )
-        has_definition = "difino.eo" in text
+        has_compact_terms = (
+            re.search(r"(?m)^\s*terminologio\.\(eo,fr,en\)\s*=", text) is not None
+        )
+        has_terms = has_split_terms or has_compact_terms
+        has_definition = re.search(r"(?m)^\s*difino\.eo\s*=", text) is not None
         triple_quote_count = text.count('"""')
         balanced_triple_quotes = triple_quote_count % 2 == 0
-        if 'difino.eo="""' in text and triple_quote_count < 2:
+        if re.search(r'(?m)^\s*difino\.eo\s*=\s*"""', text) and triple_quote_count < 2:
             balanced_triple_quotes = False
         return has_terms and has_definition and balanced_triple_quotes
 

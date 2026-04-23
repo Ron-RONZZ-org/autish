@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import tempfile
 from pathlib import Path
 
@@ -10,6 +9,13 @@ import typer
 
 from autish.commands.kp import _copy as _kp_copy
 from autish.commands.uzanto import _load_profile
+from autish.services.ai_common import (
+    build_verki_service as _build_service_shared,
+)
+from autish.services.ai_common import (
+    load_ai_context,
+    resolve_huggingface_token,
+)
 from autish.services.providers.huggingface import HuggingFaceProvider
 from autish.services.verki import VerkiRequest, VerkiService, VerkiServiceError
 
@@ -48,24 +54,12 @@ def _resolve_text_input(
 
 
 def _resolve_hf_token(explicit_token: str | None) -> str | None:
-    # Check explicit token first
-    if explicit_token and explicit_token.strip():
-        return explicit_token.strip()
-    # Check environment variables
-    for env_name in ("HF_TOKEN", "HUGGINGFACE_API_TOKEN"):
-        value = os.getenv(env_name)
-        if value and value.strip():
-            return value.strip()
-    # Check user profile
+    profile: dict | None = None
     try:
         profile = _load_profile(quiet=True)
-        if profile and "api_slosilo_huggingface" in profile:
-            value = profile["api_slosilo_huggingface"]
-            if value and value.strip():
-                return value.strip()
     except Exception:
-        pass
-    return None
+        profile = None
+    return resolve_huggingface_token(explicit_token, profile=profile)
 
 
 def _build_verki_service(
@@ -74,17 +68,17 @@ def _build_verki_service(
     modelo: str,
     api_slosilo: str | None,
 ) -> VerkiService:
-    provider_name = provizanto.strip().lower()
-    if provider_name != "huggingface":
-        raise ValueError("Nesubtenata provizanto. Nuntempe subtenata: huggingface.")
-    token = _resolve_hf_token(api_slosilo)
-    if not token:
-        raise ValueError(
-            "Mankas API-slosilo por Hugging Face. Uzu --api-slosilo aŭ agordu "
-            "HF_TOKEN/HUGGINGFACE_API_TOKEN aŭ en uzanto profilo."
-        )
-    provider = HuggingFaceProvider(model=modelo, token=token)
-    return VerkiService(provider=provider)
+    profile: dict | None = None
+    try:
+        profile = _load_profile(quiet=True)
+    except Exception:
+        profile = None
+    return _build_service_shared(
+        provizanto=provizanto,
+        modelo=modelo,
+        api_slosilo=api_slosilo,
+        profile=profile,
+    )
 
 
 @app.command("generi")
@@ -222,7 +216,10 @@ def generi(
         if longo is not None and longo.strip().lower() not in _VALIDAJ_LONGOJ:
             validaj = ", ".join(sorted(_VALIDAJ_LONGOJ))
             raise ValueError(f"Nevalida --longo valoro. Uzu unu el: {validaj}.")
-        context = _read_text_file(kunteksto_dosiero) if kunteksto_dosiero else None
+        context = load_ai_context(
+            "verki-generi",
+            override_path=kunteksto_dosiero,
+        )
 
         # Create debug file path early so the provider can write to it.
         if debug:

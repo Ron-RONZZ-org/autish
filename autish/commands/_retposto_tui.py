@@ -57,6 +57,7 @@ _CTRL_B = 2  # page-up   (like vim)
 _CTRL_C = 3
 _CTRL_D = 4
 _CTRL_F = 6  # page-down (like vim)
+_CTRL_G = 7
 _CTRL_H = 8
 _CTRL_K = 11  # kill line forward
 _CTRL_R = 18
@@ -264,6 +265,8 @@ _HELP_LINES = [
     "",
     "  ALDONAĴOJ (en mesaĝa vidilo)",
     "    Ctrl+A       Listigi/malfermi aldonaĵojn",
+    "    z            AI-analizi malfermitan konversacion",
+    "    Z            AI-proponi respondon en komponilo",
     "",
     "  SERĈO",
     "    /            Komenci serĉon en aktiva panelo",
@@ -288,6 +291,7 @@ _HELP_LINES = [
     "    Ctrl+Shift+S (aŭ S en OUTBOX-listo) Sendi ĉiujn",
     "    m            Ŝalti/malŝalti markdown-reĝimon",
     "    Ctrl+A       Aldoni aldonaĵon per dosier-vojo",
+    "    Ctrl+G       AI-generi korpon laŭ instrukcio",
     "    :a           Aldoni aldonaĵon (demando)",
     "    :aldoni <p>  Aldoni aldonaĵon per rekta vojo",
     "    :w           Konservi skizon (resti en komponilo)",
@@ -554,7 +558,7 @@ class ComposePanel:
         self._completer = contact_completer
         self._from_completer = from_completer
         self._status: str = (
-            "Tab/Shift+Tab:kampo  m:markdown  Ctrl+A:aldonajxo  "
+            "Tab/Shift+Tab:kampo  m:markdown  Ctrl+A:aldonajxo  Ctrl+G:AI-korpo  "
             ":wq skizo+fermi  :w skizo  :h helpo  :q nuligi  Ctrl+S"
         )
         self._complete_list: list[str] = []
@@ -642,7 +646,8 @@ class ComposePanel:
         att_flag = f" [A:{len(self._attachments)}]" if self._attachments else ""
         header = (
             f" ✉  Komponi{md_flag}{att_flag} — "
-            "Ctrl+S:sendi  m:markdown  Ctrl+A:aldonajxo  :w skizo  :q nuligi "
+            "Ctrl+S:sendi  m:markdown  Ctrl+A:aldonajxo  Ctrl+G:AI-korpo  "
+            ":w skizo  :q nuligi "
         )
         _safe_addstr(self.stdscr, 0, 0, header[: w - 1].ljust(w - 1), curses.A_REVERSE)
 
@@ -1058,6 +1063,8 @@ class ComposePanel:
             return "cancel"
         if key == _CTRL_S:
             return "send"
+        if key == _CTRL_G:
+            return "ai_generate_body"
 
         # Enter command mode (vim-style) from NORMAL mode.
         if ch == ":" and ed is not None and ed.mode == "NORMAL":
@@ -1212,6 +1219,8 @@ class ComposePanel:
                 return "draft_stay"
             if cmd in ("send",):
                 return "send"
+            if cmd in ("ai", "generi"):
+                return "ai_generate_body"
             if cmd in ("html",):
                 return "html_preview"
             if cmd in ("a", "aldoni-aldonajon"):
@@ -1959,6 +1968,7 @@ class MessageReader:
             else:
                 line2 = (
                     "r/R/f:x  D/Y:movi/kopii  i/I/a/A:redakti-skizon  "
+                    "z:AI-analizi  Z:AI-respondi  "
                     "Ctrl+A:aldonaĵoj  Ctrl+O:malfermi-URL  "
                     "Ctrl+Y:kopii-URL  :h/:help  q:reen"
                 )
@@ -2270,6 +2280,12 @@ class MessageReader:
             self._prev_ch = ""
             # Legacy key for draft edit
             return "edit_draft"
+        elif ch == "z":
+            self._prev_ch = ""
+            return "ai_analyze"
+        elif ch == "Z":
+            self._prev_ch = ""
+            return "ai_reply"
 
         self._prev_ch = ch
         return None
@@ -2403,6 +2419,8 @@ class RetpostoTUI:
         load_conversation: Callable[[dict], list[dict]] | None = None,
         load_aldonajoj: Callable[[int], list[dict]] | None = None,
         malfermi_aldonajon: Callable[[int], None] | None = None,
+        ai_analyze_message: Callable[[dict], str] | None = None,
+        ai_generate_reply: Callable[[dict, str | None], str] | None = None,
     ) -> None:
         self.stdscr = stdscr
         self._load_accounts = load_accounts
@@ -2434,6 +2452,8 @@ class RetpostoTUI:
         self._load_conversation = load_conversation
         self._load_aldonajoj = load_aldonajoj
         self._malfermi_aldonajon = malfermi_aldonajon
+        self._ai_analyze_message = ai_analyze_message
+        self._ai_generate_reply = ai_generate_reply
 
         # Panels
         self._folder_panel = FolderPanel(stdscr, load_accounts, load_folders)
@@ -2627,7 +2647,7 @@ class RetpostoTUI:
             "j/k:↕  Enter:legi  Shift+Tab:kontoj  c/r/R/f:komponi  "
             "SPACE/v:elekti  Esc:nuligi-elekton  m:marki-legita  "
             "x:forigi  D:movi  Y:kopii  "
-            "s:spamo  S:spamo-listo  *:stelo  "
+            "s:spamo  S:spamo-listo  *:stelo  z/Z:AI  "
             "p:preni  /:serĉi  :h/:help  (De/Prioritato/Legokonfirmo en komponilo)"
         )
 
@@ -2964,6 +2984,68 @@ class RetpostoTUI:
                 self._open_message_html(msg)
             elif result == "help":
                 self._show_help()
+            elif result == "ai_analyze":
+                if self._ai_analyze_message is None:
+                    self._set_status("[!] AI-analizo ne agordita.", transient=True)
+                    continue
+                try:
+                    analysis = self._ai_analyze_message(msg)
+                except Exception as exc:
+                    self._set_status(
+                        f"[!] AI-analizo malsukcesis: {exc}", transient=True
+                    )
+                    continue
+                lines = analysis.splitlines() or ["(malplena AI-respondo)"]
+                self._run_pager_lines(lines, "AI analizo")
+                continue
+            elif result == "ai_reply":
+                if self._ai_generate_reply is None:
+                    self._set_status("[!] AI-respondo ne agordita.", transient=True)
+                    continue
+                extra = self._prompt_inline(
+                    "AI-instrukcio (malplena por defaŭlto)"
+                ).strip()
+                if extra.lower() in {"q", ":q"}:
+                    continue
+                try:
+                    ai_body = self._ai_generate_reply(msg, extra or None)
+                except Exception as exc:
+                    self._set_status(
+                        f"[!] AI-respondo malsukcesis: {exc}", transient=True
+                    )
+                    continue
+                acc = self._selected_account_for_compose()
+                if acc is None:
+                    self._set_status(
+                        "[!] Konto ne trovita por respondo.", transient=True
+                    )
+                    continue
+                to_targets, cc_targets = self._reply_targets(msg, reply_all=False)
+                if not to_targets:
+                    self._set_status(
+                        "[!] Ne eblas determini ricevonton.", transient=True
+                    )
+                    continue
+                base_refs = " ".join(
+                    x for x in [msg.get("references_hdr"), msg.get("message_id")] if x
+                ).strip()
+                if (
+                    self._run_compose(
+                        {
+                            "de": self._default_compose_from_address(),
+                            "al": ", ".join(to_targets),
+                            "cc": ", ".join(cc_targets),
+                            "subjekto": f"Re: {msg.get('subjekto') or ''}",
+                            "korpo": ai_body,
+                            "_in_reply_to": str(msg.get("message_id") or ""),
+                            "_references_hdr": base_refs,
+                            "_focus_body": "1",
+                        }
+                    )
+                    == "cancel"
+                ):
+                    continue
+                return
             elif result and result.startswith("open_url:"):
                 url = result.split(":", 1)[1]
                 if url:
@@ -3341,6 +3423,44 @@ class RetpostoTUI:
                     self._open_compose_html_preview(
                         vals, markdown_enabled=panel.markdown_enabled()
                     )
+                    continue
+                if result == "ai_generate_body":
+                    if self._ai_generate_reply is None:
+                        panel._set_status(
+                            "[!] AI-generado ne agordita.", transient=True
+                        )
+                        continue
+                    instruction = self._prompt_compose_inline(panel, "AI-instrukcio")
+                    if not instruction.strip():
+                        panel._set_status("Nuligita.", transient=True)
+                        continue
+                    vals = panel.get_values()
+                    pseudo_msg = {
+                        "konto_id": acc.get("id"),
+                        "de": vals.get("de") or "",
+                        "al": self._split_compose_recipients(vals.get("al") or ""),
+                        "cc": self._split_compose_recipients(vals.get("cc") or ""),
+                        "bcc": self._split_compose_recipients(vals.get("bcc") or ""),
+                        "subjekto": vals.get("subjekto") or "",
+                        "korpo": vals.get("korpo") or "",
+                    }
+                    try:
+                        ai_body = self._ai_generate_reply(
+                            pseudo_msg,
+                            instruction.strip(),
+                        )
+                    except Exception as exc:
+                        panel._set_status(
+                            f"[!] AI-generado malsukcesis: {exc}",
+                            transient=True,
+                        )
+                        continue
+                    lines = ai_body.splitlines() or [""]
+                    panel._body_lines = [LineEditor(line) for line in lines]
+                    panel._body_row = 0
+                    panel._current_field = len(_COMPOSE_FIELDS) - 1
+                    panel._body_lines[0].mode = "INSERT"
+                    panel._set_status("[✓] AI-korpo enmetita.", transient=True)
                     continue
                 if result in ("draft_quit", "draft_stay"):
                     vals = panel.get_values()

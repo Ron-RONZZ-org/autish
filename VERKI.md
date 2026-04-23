@@ -8,6 +8,17 @@
 - `verki generi` — Generi aŭ reskribi tekston laŭ instrukcioj
 - `verki modelo` — Elĉerpi disponeblajn modelojn de provizanto
 
+## Komunaj AI-kuntekstoj por autish-komandoj
+
+AI-generaj funkcioj uzas uzant-redakteblajn kuntekst-dosierojn en:
+
+- `~/.config/autish/verki/verki-generi-kunteksto.md`
+- `~/.config/autish/verki/encik-generi-kunteksto.md`
+- `~/.config/autish/verki/retposto-analizi-kunteksto.md`
+- `~/.config/autish/verki/retposto-generi-kunteksto.md`
+
+Tiuj dosieroj estas aŭtomate kreataj kun baza enhavo ĉe unua uzo.
+
 ## Setup
 
 ### Akiri Hugging Face API-ŝlosilon
@@ -119,6 +130,7 @@ Amplekso: artikolo por blogo
 | `-K` | `--kunteksto-dosiero` | Vojo al aldona kunteksto. | neniuj |
 | `-k` | `--kopii` | Kopii la rezulton al la sistema tondujo (clipboard). | neniuj |
 | `-E` | `--eksporti` | Eksporti la rezulton al dosiero. | neniuj |
+| `-d` | `--debug` | Konservi krudan HTTP-respondo-JSON en `/tmp`. | neniuj |
 | `-m` | `--modelo` | HF modelo ID. | google/flan-t5-base |
 | `-p` | `--provizanto` | AI-provizanto. | huggingface |
 | `-a` | `--api-slosilo` | API-ŝlosilo (se ne en profilo). | neniuj |
@@ -155,7 +167,36 @@ verki modelo -n flan -L 5
 | `-n` | `--nomo` | Ĉepi por serĉo. | neniuj (ĉiuj) |
 | `-p` | `--provizanto` | AI-provizanto. | huggingface |
 | `-a` | `--api-slosilo` | API-ŝlosilo (se ne en profilo). | neniuj |
-| `-L` | `--limigo` | Maksimuma rezultoj. | 10 |
+| `-L` | `--limigo` | Maksimuma rezultoj. | 50 |
+
+## AI-funkcioj ankaŭ en `encik` kaj `retposto`
+
+### `encik generi`
+
+Generas validan `.enc` (nur `terminologio` kaj `difino`) kun lingvaj opcioj:
+
+```bash
+encik generi "macOS" -tl eo,fr,en -dl eo,fr,en -E ./macos.enc
+```
+
+### `retposto analizi`
+
+Analizas retpoŝtojn kun konversacia kunteksto (resumo, eventoj, aŭ respondoj):
+
+```bash
+retposto analizi --resumi
+retposto analizi 142 --respondi
+retposto analizi konto@example.com --kalendaro --kalendaro-celvojo ./eventoj.ics
+```
+
+### `retposto generi`
+
+Generas AI-retpoŝtan malneton kaj konservas al Drafts (konto) aŭ dosiero:
+
+```bash
+retposto generi 1 -i "Verku ĝentilan status-ĝisdatigon" -t "Statuso" -a team@example.com
+retposto generi ./malneto.md -i "Verku mallongan inviton"
+```
 
 ## Scribajn instrukcio en bona kvalito
 
