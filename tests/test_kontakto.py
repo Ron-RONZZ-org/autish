@@ -215,7 +215,7 @@ class TestKontaktoFlow:
             app,
             ["kontakto", "aldoni", "first@example.com", "-n", "Ada", "-F", "Lovelace"],
         )
-        with patch("autish.commands.retposto._confirm_esperante", return_value=True):
+        with patch("autish.commands.kontakto._prompt_duplicate_action", return_value="update"):
             res = runner.invoke(
                 app,
                 [
@@ -239,7 +239,7 @@ class TestKontaktoFlow:
             app,
             ["kontakto", "aldoni", "first@example.com", "-n", "Ada", "-F", "Lovelace"],
         )
-        with patch("autish.commands.retposto._confirm_esperante", return_value=False):
+        with patch("autish.commands.kontakto._prompt_duplicate_action", return_value="create"):
             res = runner.invoke(
                 app,
                 [

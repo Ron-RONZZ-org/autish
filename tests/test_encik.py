@@ -643,11 +643,12 @@ class TestParseEncFile:
 
         target_entry = enc_mod._find_by_title_exact(target_title)
         assert target_entry is not None
-        source_title = f"Fonto-{suffix} [Celo](#{target_entry['uuid'][:8]})"
+        # Use a valid title (not the Fonto-xxx [Celo](#xxx) pattern which is rejected as malformed)
+        source_title = f"Fonto de celo-{suffix}"
         source = tmp_path / "source.enc"
         source.write_text(
             f'terminologio.eo = "{source_title}"\n'
-            'difino.eo = "Difino kun [ligo](#'
+            'difino.eo = "Fonto el kiu venis la koncento. Ligon al [celo](#'
             f'{target_entry["uuid"][:8]})."\n',
             encoding="utf-8",
         )

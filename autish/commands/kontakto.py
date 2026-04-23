@@ -51,6 +51,19 @@ def _norm_kategorioj(raw: list[str] | None) -> list[str]:
     return out
 
 
+def _prompt_duplicate_action() -> str:
+    """Prompt user for duplicate action: (a)nstataŭigi, (k)rei nova, (N)uligi."""
+    prompt = "Ĉu anstataŭigi, krei novan, aŭ nuligi? (a/k/N)"
+    ans = typer.prompt(prompt, default="N")
+    first = ans.strip()[:1].lower() if ans else "n"
+    if first in ("a", "anstataŭigi"):
+        return "update"
+    elif first in ("k", "krei"):
+        return "create"
+    else:
+        return "cancel"
+
+
 def _norm_kampoj(raw: list[str] | None) -> dict[str, str]:
     out: dict[str, str] = {}
     for item in raw or []:
@@ -878,10 +891,14 @@ def aldoni(
                 f"{c.get('organizo') or '—'} / "
                 f"{c.get('nomo') or '—'} {c.get('familia_nomo') or ''}".strip()
             )
-        if retposto_mod._confirm_esperante(
-            "Ĉu ĝisdatigi ekzistantan eniron anstataŭ krei novan?",
-            default_yes=False,
-        ):
+        action = _prompt_duplicate_action()
+        if action == "cancel":
+            typer.echo("Nuligita.")
+            return
+        elif action == "create":
+            # Fall through to create new contact
+            pass
+        else:  # update
             target = chosen
             update_fields: dict[str, object] = {"modifita_je": retposto_mod._now_iso()}
             if nomo is not None:

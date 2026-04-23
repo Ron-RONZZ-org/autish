@@ -136,12 +136,20 @@ def _display_profile_value(val: object) -> str:
 
 def _normalize_multi_contact_item(raw: str, *, kind: str) -> dict:
     # Format: value:etikedo[:prima]
+    # If only value provided (no colons), use default label "ĉefa" (primary)
     parts = [p.strip() for p in raw.split(":")]
-    if len(parts) < 2:
+    if len(parts) < 1:
         raise ValueError("Atendita formato: valoro:etikedo[:prima]")
+    
     value = parts[0]
-    etikedo = parts[1]
-    prima = len(parts) >= 3 and parts[2].lower() in ("prima", "primary", "1", "jes")
+    # If no label provided, use sensible default
+    if len(parts) == 1:
+        etikedo = "ĉefa"  # default label meaning "primary/main"
+        prima = True
+    else:
+        etikedo = parts[1]
+        prima = len(parts) >= 3 and parts[2].lower() in ("prima", "primary", "1", "jes")
+    
     if kind == "telefono":
         if not re.match(r"^00\d{2,5}\d+$", value):
             raise ValueError(

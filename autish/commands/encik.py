@@ -2585,6 +2585,22 @@ def _semantic_conflicts_for_entry(entry: dict, all_entries: list[dict]) -> list[
     return sorted(set(conflicts))
 
 
+def _raise_if_malformed_entry(entry: dict) -> None:
+    """Reject entries that look corrupted or malformed.
+    
+    Detects patterns like "Fonto-xxxx [Celo](#xxxx)" which indicate
+    incomplete or corrupted data that shouldn't be stored.
+    """
+    titolo = str(entry.get("titolo") or "").strip()
+    
+    # Pattern: "Fonto-<hash> [<something>](#<fragment>)" - likely corrupted AI generation
+    if re.match(r"^Fonto-[a-f0-9]{8}\s+\[[^\]]+\]\(#[a-f0-9]+\)$", titolo):
+        raise ValueError(
+            "Nevalida nodo-titolo: aspektas kiel ne-kompleta aŭ ĉena-pensado eligo. "
+            "Certigu ke la .enc dosiero estas valida."
+        )
+
+
 def _raise_if_semantic_conflicts(entry: dict, *, strict: bool = True) -> None:
     if not strict:
         _reconcile_all_semantic_reverse_links()
@@ -4942,6 +4958,11 @@ def aldoni(
         "modifita_je": now,
         **parsed,
     }
+    try:
+        _raise_if_malformed_entry(entry)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
     _raise_if_semantic_conflicts(entry)
     _insert_entry(entry)
     _sync_bidirectional_relations_for_entry(entry)
@@ -5205,6 +5226,11 @@ def modifi(
         )
         raise typer.Exit(code=1)
 
+    try:
+        _raise_if_malformed_entry(entry)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
     _raise_if_semantic_conflicts(entry, strict=False)
     entry["modifita_je"] = _now_iso()
     _update_entry(entry)
