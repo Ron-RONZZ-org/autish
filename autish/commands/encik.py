@@ -654,7 +654,18 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     return d
 
 
+def _load_all_unsorted() -> list[dict]:
+    """Load all entries without sorting (faster for internal operations)."""
+    conn = _get_conn()
+    try:
+        rows = conn.execute("SELECT * FROM encik").fetchall()
+        return [_row_to_dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def _load_all() -> list[dict]:
+    """Load all entries sorted by title (for display/UI)."""
     conn = _get_conn()
     try:
         rows = conn.execute(
@@ -2378,7 +2389,7 @@ def _save_auto_reverse_pairs(entry: dict, pairs: set[tuple[str, str | None]]) ->
 
 
 def _reconcile_all_semantic_reverse_links() -> None:
-    all_entries = _load_all()
+    all_entries = _load_all_unsorted()
     changed: dict[str, dict] = {}
     expected_by_target: dict[str, set[tuple[str, str | None]]] = {}
 
@@ -2593,7 +2604,7 @@ def _raise_if_malformed_entry(entry: dict) -> None:
     """
     titolo = str(entry.get("titolo") or "").strip()
     
-    # Pattern: "Fonto-<hash> [<something>](#<fragment>)" - likely corrupted AI generation
+    # Pattern: "Fonto-<hash> [<something>](#<fragment>)" indicates corrupted generation
     if re.match(r"^Fonto-[a-f0-9]{8}\s+\[[^\]]+\]\(#[a-f0-9]+\)$", titolo):
         raise ValueError(
             "Nevalida nodo-titolo: aspektas kiel ne-kompleta aŭ ĉena-pensado eligo. "
@@ -3079,7 +3090,7 @@ def _sync_bidirectional_relations_for_entry(
     - B.superklaso contains A => A has B as subklaso (derived in display/search)
       and we ensure parent references are normalized.
     """
-    all_entries = _load_all()
+    all_entries = _load_all_unsorted()
     by_uuid = {e["uuid"]: e for e in all_entries}
     current = by_uuid.get(entry["uuid"])
     if current is None:
