@@ -68,6 +68,7 @@ etikedo = "autish.commands.etikedo:app"
 todo = "autish.commands.todo:app"
 taglibro = "autish.commands.taglibro:app"
 verki = "autish.commands.verki:app"
+rubo = "autish.commands.rubo:app"
 
 [tool.ruff]
 line-length = 88

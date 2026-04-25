@@ -13,6 +13,7 @@ from autish.commands import (
     kp,
     md,
     retposto,
+    rubo,
     sekurkopio,
     shelo,
     sistemo,
@@ -63,6 +64,7 @@ app.add_typer(filmeto.app, name="filmeto")
 app.add_typer(etikedo.app, name="etikedo")
 app.add_typer(todo.app, name="todo")
 app.add_typer(taglibro.app, name="taglibro")
+app.add_typer(rubo.app, name="rubo")
 
 
 @app.command("help")
