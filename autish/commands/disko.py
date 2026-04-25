@@ -183,7 +183,7 @@ def check_health(
             )
             raise typer.Exit(code=1)
         elif result.returncode not in (4,):  # 4=some SMART errors but readable
-            typer.echo(f"Eraro: Nescio dum legado de SMART-informoj.", err=True)
+            typer.echo("Eraro: Nescio dum legado de SMART-informoj.", err=True)
             typer.echo(result.stderr, err=True)
             raise typer.Exit(code=1)
 
@@ -373,3 +373,142 @@ def unmount_disk(
 
     if any_failed:
         raise typer.Exit(code=1)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Partition management subcommands
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+particio_app = typer.Typer(
+    name="particio",
+    help="Administri particiojn",
+    no_args_is_help=True,
+)
+app.add_typer(particio_app)
+
+
+@particio_app.command("shrink")
+def shrink_partition(
+    device: str = typer.Argument(..., help="Aparato (ekz. sda1)"),
+    new_size: str = typer.Argument(..., help="Nova grandeco (ekz. 50GB)"),
+    justa: bool = typer.Option(
+        False,
+        "-j",
+        "--justa",
+        help="Preterlasi sigurec-kontrolojn"
+    ),
+) -> None:
+    """Malpligrandi particion.
+    
+    ⚠️  AVERTO: Ĉi tio estas danĝera operacio. Daŭrigi?
+    """
+    from autish.services.partition_manager import (
+        shrink_partition as shrink,
+    )
+    
+    if not justa:
+        typer.echo("[!] ⚠️  AVERTO: Ĉi tio estas danĝera operacio!")
+        typer.echo(f"    Particioxo: {device}")
+        typer.echo(f"    Nova grandeco: {new_size}")
+        typer.echo("")
+        confirm = typer.confirm("Ĉu vi certas, ke vi volas daŭrigi?", default=False)
+        if not confirm:
+            typer.echo("Nuligita.")
+            raise typer.Exit(0)
+    
+    success, message = shrink(device, new_size, force=justa)
+    
+    if success:
+        typer.echo(f"[✓] {message}")
+    else:
+        typer.echo(f"[!] {message}", err=True)
+        raise typer.Exit(1)
+
+
+@particio_app.command("krei")
+def create_partition(
+    device: str = typer.Argument(..., help="Aparato (ekz. sda)"),
+    grandeco: str = typer.Argument(..., help="Grandeco (ekz. 50GB)"),
+    dosierujo_tipo: str = typer.Option(
+        "ext4",
+        "-t",
+        "--tipo",
+        help="Dosierujo-tipo (ext4, ext3, ntfs, vfat, etc.)"
+    ),
+    justa: bool = typer.Option(
+        False,
+        "-j",
+        "--justa",
+        help="Preterlasi sigurec-kontrolojn"
+    ),
+) -> None:
+    """Krei novan particion.
+    
+    ⚠️  AVERTO: Ĉi tio estas danĝera operacio. Daŭrigi?
+    """
+    from autish.services.partition_manager import (
+        create_partition as create,
+    )
+    
+    if not justa:
+        typer.echo("[!] ⚠️  AVERTO: Ĉi tio estas danĝera operacio!")
+        typer.echo(f"    Aparato: {device}")
+        typer.echo(f"    Grandeco: {grandeco}")
+        typer.echo(f"    Dosierujo-tipo: {dosierujo_tipo}")
+        typer.echo("")
+        confirm = typer.confirm("Ĉu vi certas, ke vi volas daŭrigi?", default=False)
+        if not confirm:
+            typer.echo("Nuligita.")
+            raise typer.Exit(0)
+    
+    success, message = create(device, grandeco, dosierujo_tipo, force=justa)
+    
+    if success:
+        typer.echo(f"[✓] {message}")
+    else:
+        typer.echo(f"[!] {message}", err=True)
+        raise typer.Exit(1)
+
+
+@particio_app.command("formati")
+def format_partition(
+    device: str = typer.Argument(..., help="Aparato (ekz. sda1)"),
+    dosierujo_tipo: str = typer.Option(
+        "ext4",
+        "-t",
+        "--tipo",
+        help="Dosierujo-tipo (ext4, ext3, ntfs, vfat, etc.)"
+    ),
+    justa: bool = typer.Option(
+        False,
+        "-j",
+        "--justa",
+        help="Preterlasi sigurec-kontrolojn"
+    ),
+) -> None:
+    """Formati particion.
+    
+    ⚠️  AVERTO: Ĉi tio forigos ĉiujn datojn! Daŭrigi?
+    """
+    from autish.services.partition_manager import (
+        format_partition as format_part,
+    )
+    
+    if not justa:
+        typer.echo("[!] ⚠️  AVERTO: Ĉi tio forigos ĉiujn datojn!")
+        typer.echo(f"    Aparato: {device}")
+        typer.echo(f"    Dosierujo-tipo: {dosierujo_tipo}")
+        typer.echo("")
+        confirm = typer.confirm("Ĉu vi certas, ke vi volas daŭrigi?", default=False)
+        if not confirm:
+            typer.echo("Nuligita.")
+            raise typer.Exit(0)
+    
+    success, message = format_part(device, dosierujo_tipo, force=justa)
+    
+    if success:
+        typer.echo(f"[✓] {message}")
+    else:
+        typer.echo(f"[!] {message}", err=True)
+        raise typer.Exit(1)
