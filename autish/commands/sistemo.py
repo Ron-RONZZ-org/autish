@@ -441,6 +441,27 @@ def install(
         scope_label = "uzanto-ĉambro" if not sistema else "sisteme"
         typer.echo(f"[✓] Instalita autish en {scope_label}: {autish_dst}")
 
+        # Ensure ~/.bashrc sources the aliases file
+        bashrc_path = Path.home() / ".bashrc"
+        source_line = "source ~/.autish_aliases"
+        
+        try:
+            if bashrc_path.exists():
+                content = bashrc_path.read_text()
+                if source_line not in content:
+                    with open(bashrc_path, "a") as f:
+                        f.write(f"\n# autish bash aliases\n{source_line}\n")
+                    typer.echo("[✓] ~/.bashrc ĝisdatigita por fonti alias-ojn")
+            else:
+                # Create .bashrc if it doesn't exist
+                bashrc_path.write_text(f"# autish bash aliases\n{source_line}\n")
+                typer.echo("[✓] Kreitaj ~/.bashrc kun alias-oj")
+        except Exception as e:
+            typer.echo(
+                f"[!] Ne povis ĝisdatigi ~/.bashrc: {e}",
+                err=True,
+            )
+
         # Update PATH hint if user scope
         if not sistema:
             path_env = os.environ.get("PATH", "").split(":")
@@ -454,7 +475,8 @@ def install(
         # Regenerate aliases if they exist
         try:
             db = BashAliasDB()
-            if db.list_all():
+            aliases = db.list_aliases()
+            if aliases:
                 typer.echo("[i] Regeneranta bash alias-ojn...")
                 db.sync_shell_config()
                 typer.echo("[✓] Bash alias-oj regeneritaj")
