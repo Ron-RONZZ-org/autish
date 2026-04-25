@@ -134,10 +134,47 @@ autish --help         # works without the prefix
 exit                  # return to your normal shell
 ```
 
-### 4. Adding the dev `autish` to your PATH globally
+### 4. Install autish globally (RECOMMENDED for full functionality)
 
-If you want `autish` (from source) to be available without `poetry run` or a
-shell activation, you can add the virtualenv's `bin/` directory to your PATH:
+**To use bash aliases and have `autish` available system-wide, install it globally:**
+
+```bash
+cd /path/to/autish
+poetry install
+autish sistemo install           # Install in ~/.local/bin (default, no sudo needed)
+# or for system-wide:
+sudo autish sistemo install --sistema  # Install in /usr/local/bin (requires sudo)
+```
+
+**What this does:**
+- Creates a symlink to the `autish` binary from your Poetry environment
+- Makes `autish` available in any shell session without activating Poetry
+- Ensures bash aliases work correctly (e.g., `ess='autish encik serci -sk'`)
+- Regenerates existing bash aliases to work with the global installation
+
+**Required PATH setup (user scope only):**
+
+If you installed to `~/.local/bin` (default), ensure `~/.local/bin` is on your PATH:
+
+```bash
+# Check if already present
+echo $PATH | grep -q "$HOME/.local/bin" && echo "✓ PATH OK" || echo "✗ Add ~/.local/bin to PATH"
+
+# Add to PATH if needed
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+Verify installation:
+
+```bash
+which autish     # Should output ~/.local/bin/autish (or /usr/local/bin/autish)
+autish --help    # Should work without 'poetry run'
+```
+
+### 5. Manual setup (alternative — not recommended)
+
+If you prefer manual setup without using `autish sistemo install`:
 
 ```bash
 # Find the virtualenv path
@@ -149,15 +186,14 @@ echo 'export PATH="$(poetry -C /path/to/autish env info --path)/bin:$PATH"' >> ~
 source ~/.bashrc
 ```
 
-Or symlink the binary for a simpler approach:
+Or create a symlink manually:
 
 ```bash
-# One-time symlink — update it if you move the repo
 ln -s "$(poetry env info --path)/bin/autish" ~/.local/bin/autish
 autish --help
 ```
 
-### 5. Run tests and linting
+### 6. Run tests and linting
 
 ```bash
 # Run tests
@@ -171,7 +207,7 @@ poetry run ruff format --check .
 poetry run ruff format .
 ```
 
-### 6. Build a distributable package
+### 7. Build a distributable package
 
 ```bash
 poetry build

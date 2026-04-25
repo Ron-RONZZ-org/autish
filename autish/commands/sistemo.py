@@ -7,6 +7,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import platform
 import socket
 import sqlite3
@@ -205,7 +206,7 @@ def bash_alias_forigi(
             raise typer.Exit(0)
 
     # Delete all
-    for uid, alias_obj in alias_objs:
+    for uid, _alias_obj in alias_objs:
         db.delete_alias(uid)
     db.sync_shell_config()
 
@@ -328,6 +329,158 @@ def bash_alias_serci(
                 bash_alias_vidi(selected_uid)
             except (ValueError, typer.Exit):
                 pass
+
+
+# ============================================================================
+# INSTALL: Set up autish for system-wide or user-scoped access
+# ============================================================================
+
+
+@app.command("install")
+def install(
+    sistema: bool = typer.Option(
+        False,
+        "-s",
+        "--sistema",
+        help="Instali ĉie (sisteme) — devo ruli per 'sudo'. Default: uzanto-ĉambro.",
+    ),
+) -> None:
+    """Instali autish ĝlobale por ke aliaj komandoj kaj bash-alias-oj funkciu.
+
+    Per defaŭlto, instalas al ~/.local/bin (uzanto-ĉambro).
+    Por sistema instalado, uzu --sistema kaj rulu per sudo.
+
+    Ĉi tio kreas ligon por ke `autish` funkcii en ĉiu ŝelo-sesio
+    sen devo aktivigi la Poetry-medion.
+
+    Examples:
+        autish sistemo install                # Instali en ~/.local/bin (defaŭlte)
+        sudo autish sistemo install --sistema # Instali en /usr/local/bin
+    """
+
+    # Get the poetry environment path
+    try:
+        result = subprocess.run(
+            ["poetry", "env", "info", "--path"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            typer.echo(
+                (
+                    "[!] Ne povis trovi Poetry medion. "
+                    "Ĉu vi estas en autish-dosierujo?"
+                ),
+                err=True,
+            )
+            raise typer.Exit(1)
+        poetry_env_path = result.stdout.strip()
+    except subprocess.TimeoutExpired:
+        typer.echo(
+            "[!] Poetry timeout - ĉu poetry estas instalita?",
+            err=True,
+        )
+        raise typer.Exit(1) from None
+
+    autish_src = Path(poetry_env_path) / "bin" / "autish"
+    if not autish_src.exists():
+        typer.echo(
+            f"[!] autish binarooj ne trovita ĉe {autish_src}",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    # Default is user-scoped, unless --sistema is specified
+    if sistema:
+        dest_dir = Path("/usr/local/bin")
+    else:
+        dest_dir = Path.home() / ".local" / "bin"
+
+    try:
+        if not dest_dir.exists():
+            dest_dir.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        scope_label = "sisteme" if sistema else "uzanto-ĉambro"
+        typer.echo(
+            (
+                f"[!] Neniaj permesoj por kreado de {dest_dir}\n"
+                f"    Por {scope_label}: "
+                + (
+                    "rulu per sudo"
+                    if sistema
+                    else "kontrolu ĉu ~/.local/bin ekzistas"
+                )
+            ),
+            err=True,
+        )
+        raise typer.Exit(1) from None
+
+    autish_dst = dest_dir / "autish"
+
+    # Check if destination exists
+    if autish_dst.exists() or autish_dst.is_symlink():
+        if autish_dst.is_symlink() and autish_dst.resolve() == autish_src:
+            typer.echo(f"[i] autish jam instalita ĉe {autish_dst}")
+            raise typer.Exit(0)
+
+        overwrite = typer.confirm(
+            f"[?] {autish_dst} jam ekzistas. Ĉu anstataŭigi?",
+            default=False,
+        )
+        if not overwrite:
+            typer.echo("Nuligita.")
+            raise typer.Exit(0)
+
+        autish_dst.unlink()
+
+    # Create symlink
+    try:
+        autish_dst.symlink_to(autish_src)
+        scope_label = "uzanto-ĉambro" if not sistema else "sisteme"
+        typer.echo(f"[✓] Instalita autish en {scope_label}: {autish_dst}")
+
+        # Update PATH hint if user scope
+        if not sistema:
+            path_env = os.environ.get("PATH", "").split(":")
+            if str(Path.home() / ".local" / "bin") not in path_env:
+                typer.echo(
+                    "[!] Aldonu ~/.local/bin al via PATH:\n"
+                    "    echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.bashrc\n"
+                    "    source ~/.bashrc"
+                )
+
+        # Regenerate aliases if they exist
+        try:
+            db = BashAliasDB()
+            if db.list_all():
+                typer.echo("[i] Regeneranta bash alias-ojn...")
+                db.sync_shell_config()
+                typer.echo("[✓] Bash alias-oj regeneritaj")
+        except Exception as e:
+            typer.echo(
+                f"[!] Ne povis regeneri alias-ojn: {e}",
+                err=True,
+            )
+    except PermissionError as e:
+        scope_label = "sisteme" if sistema else "uzanto-ĉambro"
+        typer.echo(
+            (
+                f"[!] Neniaj permesoj dum instalado en {scope_label}: {e}\n"
+                + (
+                    "    Rulu: sudo autish sistemo install --sistema"
+                    if not sistema
+                    else "    Kontrolu la permesojn de /usr/local/bin"
+                )
+            ),
+            err=True,
+        )
+        raise typer.Exit(1) from None
+    except Exception as e:
+        typer.echo(f"[!] Eraro dum instalado: {e}", err=True)
+        raise typer.Exit(1) from None
+
 
 
 # Register bash_alias_app as subcommand
