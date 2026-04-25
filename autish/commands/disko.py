@@ -164,18 +164,28 @@ def check_health(
 
     # Run smartctl
     typer.echo(f"Kontrolante sanon de {dev_path}...")
-    typer.echo("(Bezonas sudo rajtojn)")
     typer.echo("")
 
+    # Try to run smartctl with sudo
     result = _run_command(
         ["sudo", "smartctl", "-a", dev_path],
         check=False
     )
 
-    if result.returncode not in (0, 4):  # 0=OK, 4=some SMART errors but readable
-        typer.echo("Eraro: Ne povis legi SMART informojn.", err=True)
-        typer.echo(result.stderr, err=True)
-        raise typer.Exit(code=1)
+    # Check for common errors
+    if result.returncode != 0:
+        if "sudo" in result.stderr.lower() or "permission" in result.stderr.lower():
+            typer.echo(
+                "Eraro: Sudo permeso rifuzita.\n\n"
+                "Provu ruli:\n"
+                f"  sudo autish disko sano {nomo}",
+                err=True
+            )
+            raise typer.Exit(code=1)
+        elif result.returncode not in (4,):  # 4=some SMART errors but readable
+            typer.echo(f"Eraro: Nescio dum legado de SMART-informoj.", err=True)
+            typer.echo(result.stderr, err=True)
+            raise typer.Exit(code=1)
 
     # Parse and display key information
     lines = result.stdout.split("\n")
