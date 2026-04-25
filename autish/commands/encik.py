@@ -2599,13 +2599,18 @@ def _semantic_conflicts_for_entry(entry: dict, all_entries: list[dict]) -> list[
 def _raise_if_malformed_entry(entry: dict) -> None:
     """Reject entries that look corrupted or malformed.
     
-    Detects patterns like "Fonto-xxxx [Celo](#xxxx)" which indicate
-    incomplete or corrupted data that shouldn't be stored.
+    Detects incomplete or corrupted entries from failed AI generation
+    that have suspicious patterns with no meaningful definition.
     """
     titolo = str(entry.get("titolo") or "").strip()
+    difino = str(entry.get("difino") or {}).strip()
 
-    # Pattern: "Fonto-<hash> [<something>](#<fragment>)" indicates corrupted generation
-    if re.match(r"^Fonto-[a-f0-9]{8}\s+\[[^\]]+\]\(#[a-f0-9]+\)$", titolo):
+    # Pattern: "Fonto-<hash> [<something>](#<fragment>)" with NO definition
+    # indicates incomplete or corrupted generation (AI reasoning leakage)
+    if (
+        re.match(r"^Fonto-[a-f0-9]{8}\s+\[[^\]]+\]\(#[a-f0-9]+\)$", titolo)
+        and not difino
+    ):
         raise ValueError(
             "Nevalida nodo-titolo: aspektas kiel ne-kompleta aŭ ĉena-pensado eligo. "
             "Certigu ke la .enc dosiero estas valida."
