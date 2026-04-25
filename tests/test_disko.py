@@ -45,13 +45,13 @@ class TestDiskoLs:
                 }
             ]
         }
-        
+
         mock_run = mocker.patch("autish.commands.disko.subprocess.run")
         mock_result = mocker.Mock()
         mock_result.stdout = json.dumps(mock_output)
         mock_result.returncode = 0
         mock_run.return_value = mock_result
-        
+
         result = runner.invoke(app, ["disko", "ls"])
         assert result.exit_code == 0
         assert "disko" in result.output or "subdisko" in result.output
@@ -59,13 +59,13 @@ class TestDiskoLs:
     def test_ls_empty_devices(self, mocker):
         """Test disko ls with no devices."""
         mock_output = {"blockdevices": []}
-        
+
         mock_run = mocker.patch("autish.commands.disko.subprocess.run")
         mock_result = mocker.Mock()
         mock_result.stdout = json.dumps(mock_output)
         mock_result.returncode = 0
         mock_run.return_value = mock_result
-        
+
         result = runner.invoke(app, ["disko", "ls"])
         assert result.exit_code == 0
         assert "Neniu disko trovita" in result.output

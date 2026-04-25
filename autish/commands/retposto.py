@@ -962,7 +962,7 @@ def _get_message_by_uid(konto_id: int, dosierujo_id: int, uid: str) -> dict | No
     """Get a message by account, folder, and UID."""
     with _get_db() as con:
         row = con.execute(
-            """SELECT id, legita, stelo FROM mesago 
+            """SELECT id, legita, stelo FROM mesago
                WHERE konto_id = ? AND dosierujo_id = ? AND uid = ?""",
             (konto_id, dosierujo_id, uid),
         ).fetchone()
@@ -3543,23 +3543,23 @@ def sendi(
         None, "-a", "--al", help="Recipient(s), comma-separated."
     ),
     subjekto: str | None = typer.Option(None, "-s", "--subjekto", help="Subject."),
-    korpo: str | None = typer.Option(None, "--korpo", help="Body text."),
+    korpo: str | None = typer.Option(None, "-b", "--korpo", help="Body text."),
     html: bool = typer.Option(
-        False, "--html", help="Interpret --korpo as HTML file/URL source."
+        False, "-h", "--html", help="Interpret --korpo as HTML file/URL source."
     ),
     md: bool = typer.Option(
-        False, "--md", help="Interpret --korpo as Markdown file/URL source."
+        False, "-m", "--md", help="Interpret --korpo as Markdown file/URL source."
     ),
-    cc: str | None = typer.Option(None, "--cc", help="CC address(es)."),
-    bcc: str | None = typer.Option(None, "--bcc", help="BCC address(es)."),
+    cc: str | None = typer.Option(None, "-c", "--cc", help="CC address(es)."),
+    bcc: str | None = typer.Option(None, "-B", "--bcc", help="BCC address(es)."),
     konto: str | None = typer.Option(
         None, "-k", "--konto", help="Account id or email."
     ),
     prioritato: int = typer.Option(
-        5, "--prioritato", min=1, max=9, help="Outgoing priority (1-9)."
+        5, "-p", "--prioritato", min=1, max=9, help="Outgoing priority (1-9)."
     ),
     legokonfirmo: bool = typer.Option(
-        False, "--legokonfirmo", help="Request read receipt."
+        False, "-R", "--legokonfirmo", help="Request read receipt."
     ),
 ) -> None:
     """Send an email from the command line."""

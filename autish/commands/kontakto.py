@@ -13,6 +13,7 @@ from rich.table import Table
 
 from autish.commands import retposto as retposto_mod
 from autish.commands.uzanto import _normalize_multi_contact_list
+from autish.utils import render_markdown_links_as_rich
 
 app = typer.Typer(
     name="kontakto",
@@ -36,6 +37,15 @@ def _print_wide_table(table: Table) -> None:
     Console(width=220).print(table)
 
 
+
+def _render_markdown_links(text: str) -> object:
+    """Render markdown links as Rich Text objects.
+
+    Wrapper around render_markdown_links_as_rich() from utils.
+    """
+    return render_markdown_links_as_rich(text)
+
+
 def _norm_kategorioj(raw: list[str] | None) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
@@ -49,6 +59,20 @@ def _norm_kategorioj(raw: list[str] | None) -> list[str]:
         seen.add(low)
         out.append(k)
     return out
+
+
+
+def _prompt_duplicate_action() -> str:
+    """Prompt user for duplicate action: (a)nstataŭigi, (k)rei nova, (N)uligi."""
+    prompt = "Ĉu anstataŭigi, krei novan, aŭ nuligi? (a/k/N)"
+    ans = typer.prompt(prompt, default="N")
+    first = ans.strip()[:1].lower() if ans else "n"
+    if first in ("a", "anstataŭigi"):
+        return "update"
+    elif first in ("k", "krei"):
+        return "create"
+    else:
+        return "cancel"
 
 
 def _norm_kampoj(raw: list[str] | None) -> dict[str, str]:
@@ -544,6 +568,9 @@ def vidi(
     kampoj = row.get("kampoj") or {}
     for k, v in kampoj.items():
         table.add_row(f"kampo:{k}", str(v))
+    if row.get("noto"):
+        noto_display = _render_markdown_links(row.get("noto"))
+        table.add_row("noto", noto_display)
     _print_wide_table(table)
 
 
@@ -794,14 +821,14 @@ def aldoni(
         None, "-d", "--naskig-dato", help="Naskiĝdato (YYYYMMDD)."
     ),
     naskig_loko: str | None = typer.Option(
-        None, "--naskig-loko", help="Naskiĝloko."
+        None, "-L", "--naskig-loko", help="Naskiĝloko."
     ),
     lingvoj: str | None = typer.Option(
         None, "-l", "--lingvoj", help="Lingvoj (ekz. en,fr)."
     ),
     organizo: str | None = typer.Option(None, "-o", "--organizo", help="Organizo."),
     organiza_identiga_numero: str | None = typer.Option(
-        None, "--organiza-identiga-numero", help="Organiza identiga numero."
+        None, "-I", "--organiza-identiga-numero", help="Organiza identiga numero."
     ),
     telefonnumeroj: list[str] | None = typer.Option(
         None,
@@ -878,10 +905,14 @@ def aldoni(
                 f"{c.get('organizo') or '—'} / "
                 f"{c.get('nomo') or '—'} {c.get('familia_nomo') or ''}".strip()
             )
-        if retposto_mod._confirm_esperante(
-            "Ĉu ĝisdatigi ekzistantan eniron anstataŭ krei novan?",
-            default_yes=False,
-        ):
+        action = _prompt_duplicate_action()
+        if action == "cancel":
+            typer.echo("Nuligita.")
+            return
+        elif action == "create":
+            # Fall through to create new contact
+            pass
+        else:  # update
             target = chosen
             update_fields: dict[str, object] = {"modifita_je": retposto_mod._now_iso()}
             if nomo is not None:
@@ -982,11 +1013,11 @@ def modifi(
     nomo: str | None = typer.Option(None, "-n", "--nomo"),
     familia_nomo: str | None = typer.Option(None, "-F", "--familia-nomo"),
     naskig_dato: str | None = typer.Option(None, "-d", "--naskig-dato"),
-    naskig_loko: str | None = typer.Option(None, "--naskig-loko"),
+    naskig_loko: str | None = typer.Option(None, "-L", "--naskig-loko"),
     lingvoj: str | None = typer.Option(None, "-l", "--lingvoj"),
     organizo: str | None = typer.Option(None, "-o", "--organizo"),
     organiza_identiga_numero: str | None = typer.Option(
-        None, "--organiza-identiga-numero"
+        None, "-I", "--organiza-identiga-numero"
     ),
     telefonnumeroj: list[str] | None = typer.Option(
         None, "-t", "--telefonnumero"
@@ -999,7 +1030,7 @@ def modifi(
     noto: str | None = typer.Option(None, "-N", "--noto"),
     kategorio: list[str] | None = typer.Option(None, "-k", "--kategorio"),
     anstatauxigi_kategoriojn: bool = typer.Option(
-        False, "--anstatauxigi-kategoriojn", help="Anstataŭigi anstataŭ aldoni."
+        False, "-U", "--anstatauxigi-kategoriojn", help="Anstataŭigi anstataŭ aldoni."
     ),
     konfirmita: int | None = typer.Option(None, "-K", "--konfirmita"),
     regex: str | None = typer.Option(

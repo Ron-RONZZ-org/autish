@@ -46,6 +46,10 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from autish.commands.uzanto import _load_profile
+from autish.services.ai_common import build_verki_service, load_ai_context
+from autish.services.verki import VerkiRequest, VerkiServiceError
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:
@@ -287,9 +291,7 @@ _AUTO_REVERSE_DATUMO_KEY = "__autish_auto_reverse_ligilo__"
 _MATH_TOKEN_PREFIX = "AUTISHMATHSEGMENT"
 _SEMANTIKA_VALORO_TIPOJ: frozenset[str] = frozenset({"int", "bool", "float", "str"})
 _SEMANTIKA_BOOL_TRUE: frozenset[str] = frozenset({"true", "vero", "jes", "j", "1"})
-_SEMANTIKA_BOOL_FALSE: frozenset[str] = frozenset(
-    {"false", "malvero", "ne", "n", "0"}
-)
+_SEMANTIKA_BOOL_FALSE: frozenset[str] = frozenset({"false", "malvero", "ne", "n", "0"})
 _SEMANTIKA_RANGE_RE = re.compile(r"^\(\s*([^,]+?)\s*,\s*([^)]+?)\s*\)$")
 
 _ALLOWED_ENC_PLAIN_KEYS: frozenset[str] = frozenset(
@@ -342,9 +344,7 @@ def _semantika_group_file(group_name: str) -> Path:
 def _normalize_semantika_group_name(raw: str) -> str:
     normalized = str(raw or "").strip().lower().replace(" ", "-")
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", normalized):
-        raise ValueError(
-            "Nevalida grupo: uzu nur minusklojn, ciferojn, '-' aŭ '_'."
-        )
+        raise ValueError("Nevalida grupo: uzu nur minusklojn, ciferojn, '-' aŭ '_'.")
     return normalized
 
 
@@ -446,8 +446,7 @@ def _load_semantika_groups() -> dict[str, list[dict[str, object]]]:
     cached_groups = _SEMANTIKA_CONFIG_CACHE.get("groups")
     if signature == cached_signature and isinstance(cached_groups, dict):
         return {
-            name: [dict(row) for row in rows]
-            for name, rows in cached_groups.items()
+            name: [dict(row) for row in rows] for name, rows in cached_groups.items()
         }
     groups: dict[str, list[dict[str, object]]] = {}
     for path in sorted(_SEMANTIKA_CONFIG_DIR.glob("*.csv")):
@@ -655,7 +654,18 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
     return d
 
 
+def _load_all_unsorted() -> list[dict]:
+    """Load all entries without sorting (faster for internal operations)."""
+    conn = _get_conn()
+    try:
+        rows = conn.execute("SELECT * FROM encik").fetchall()
+        return [_row_to_dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def _load_all() -> list[dict]:
+    """Load all entries sorted by title (for display/UI)."""
     conn = _get_conn()
     try:
         rows = conn.execute(
@@ -790,6 +800,7 @@ def _count_matches(text: str, needle: str) -> int:
     folded_needle = _fold_search_text(needle)
     if not folded_text or not folded_needle:
         return 0
+
     def _collapse_spaces(value: str) -> str:
         return " ".join(str(value or "").split())
 
@@ -939,9 +950,7 @@ def _parse_semantika_serci_conditions(raw_query: str) -> list[dict[str, object]]
             )
         arko = _normalize_semantika_ligilo(arc_token.strip())
         if not arko:
-            raise ValueError(
-                f"Nevalida semantika-serci kondiĉo {idx}: arko mankas."
-            )
+            raise ValueError(f"Nevalida semantika-serci kondiĉo {idx}: arko mankas.")
         expression = expression.strip()
         range_match = _SEMANTIKA_RANGE_RE.fullmatch(expression)
         field_name = f"semantika-serci kondiĉo {idx}"
@@ -1207,9 +1216,7 @@ def _entry_to_enc(entry: dict) -> str:
             valoro = _format_semantika_valoro(
                 item.get("valoro"), tipo=tipo, for_enc=True
             )
-            unuo = _normalize_semantika_unuo(
-                item.get("unuo"), field="semantika.unuo"
-            )
+            unuo = _normalize_semantika_unuo(item.get("unuo"), field="semantika.unuo")
             if not tipo or not arko:
                 continue
             if unuo:
@@ -1270,6 +1277,89 @@ def _resolve_export_path(raw_path: str, *, default_filename: str, suffix: str) -
     if path.suffix.lower() != suffix.lower():
         path = path.with_suffix(suffix)
     return path.resolve()
+
+
+def _parse_required_lingvo_codes(raw: str, *, field: str) -> list[str]:
+    parsed = _normalize_lingvo_codes(raw, field=field)
+    if not parsed:
+        raise ValueError(
+            f"Mankas valoro por {field}. Uzu 2-literajn kodojn (ekz: eo,fr,en)."
+        )
+    return parsed
+
+
+def _validate_generated_enc_output(
+    raw_text: str,
+    *,
+    term_lingvoj: list[str],
+    difino_lingvoj: list[str],
+) -> None:
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            suffix=".enc",
+            delete=False,
+        ) as temp:
+            temp.write(raw_text)
+            temp_path = Path(temp.name)
+        parsed = _parse_enc_file(temp_path)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
+
+    terminologio = parsed.get("terminologio") or {}
+    difinoj = parsed.get("difinoj") or {}
+    missing_terms = [
+        lang for lang in term_lingvoj if not str(terminologio.get(lang) or "").strip()
+    ]
+    missing_defs = [
+        lang for lang in difino_lingvoj if not str(difinoj.get(lang) or "").strip()
+    ]
+    if missing_terms or missing_defs:
+        problems: list[str] = []
+        if missing_terms:
+            problems.append(f"mankas terminologio por: {', '.join(missing_terms)}")
+        if missing_defs:
+            problems.append(f"mankas difino por: {', '.join(missing_defs)}")
+        raise ValueError("Nevalida AI-.enc eligo: " + "; ".join(problems))
+
+    expanded = _expand_multi_locale_assignments(
+        _normalize_multiline_value_spacing(raw_text)
+    )
+    expanded = _escape_latex_style_backslashes(expanded)
+    parsed_raw = tomllib.loads(expanded)
+    allowed = {"terminologio", "difino"}
+    extra = sorted(str(key) for key in parsed_raw.keys() if str(key) not in allowed)
+    if extra:
+        raise ValueError(
+            "Nevalida AI-.enc eligo: nur `terminologio` kaj `difino` "
+            "kampoj estas permesitaj."
+        )
+
+
+def _build_encik_generi_instrukcio(
+    termino: str,
+    *,
+    term_lingvoj: list[str],
+    difino_lingvoj: list[str],
+    papildona_instrukcio: str | None,
+) -> str:
+    term_line = ",".join(term_lingvoj)
+    def_line = ",".join(difino_lingvoj)
+    lines = [
+        f'Generu validan .enc dosieron pri "{termino}".',
+        "Redonu nur la .enc tekston, sen klarigoj.",
+        "Generu nur kampojn `terminologio.xx` kaj `difino.xx`.",
+        f"Terminologio-lingvoj: {term_line}.",
+        f"Difino-lingvoj: {def_line}.",
+        "Ĉiu petita lingvo devas havi ne-malplenan valoron.",
+        "Ne uzu kodbarilojn.",
+    ]
+    if (papildona_instrukcio or "").strip():
+        lines.append(f"Plia instrukcio: {papildona_instrukcio.strip()}")
+    return "\n".join(lines)
 
 
 def _fix_inline_table_commas(text: str) -> str:
@@ -2285,9 +2375,7 @@ def _load_auto_reverse_pairs(entry: dict) -> set[tuple[str, str | None]]:
     }
 
 
-def _save_auto_reverse_pairs(
-    entry: dict, pairs: set[tuple[str, str | None]]
-) -> None:
+def _save_auto_reverse_pairs(entry: dict, pairs: set[tuple[str, str | None]]) -> None:
     datumo = dict(entry.get("datumo") or {})
     ordered_pairs = sorted(pairs, key=lambda item: (item[0], item[1] or ""))
     payload = _serialize_ligilo_items(
@@ -2301,7 +2389,7 @@ def _save_auto_reverse_pairs(
 
 
 def _reconcile_all_semantic_reverse_links() -> None:
-    all_entries = _load_all()
+    all_entries = _load_all_unsorted()
     changed: dict[str, dict] = {}
     expected_by_target: dict[str, set[tuple[str, str | None]]] = {}
 
@@ -2374,9 +2462,7 @@ def _reconcile_all_semantic_reverse_links() -> None:
 
         original_serialized = _serialize_ligilo_items(target_items_original)
         reconciled_serialized = _serialize_ligilo_items(target_items)
-        final_auto_pairs = {
-            pair for pair in expected_pairs if pair not in manual_pairs
-        }
+        final_auto_pairs = {pair for pair in expected_pairs if pair not in manual_pairs}
         if (
             original_serialized != reconciled_serialized
             or auto_pairs != final_auto_pairs
@@ -2508,6 +2594,22 @@ def _semantic_conflicts_for_entry(entry: dict, all_entries: list[dict]) -> list[
                 "rdfs:subClassOf."
             )
     return sorted(set(conflicts))
+
+
+def _raise_if_malformed_entry(entry: dict) -> None:
+    """Reject entries that look corrupted or malformed.
+    
+    Detects patterns like "Fonto-xxxx [Celo](#xxxx)" which indicate
+    incomplete or corrupted data that shouldn't be stored.
+    """
+    titolo = str(entry.get("titolo") or "").strip()
+
+    # Pattern: "Fonto-<hash> [<something>](#<fragment>)" indicates corrupted generation
+    if re.match(r"^Fonto-[a-f0-9]{8}\s+\[[^\]]+\]\(#[a-f0-9]+\)$", titolo):
+        raise ValueError(
+            "Nevalida nodo-titolo: aspektas kiel ne-kompleta aŭ ĉena-pensado eligo. "
+            "Certigu ke la .enc dosiero estas valida."
+        )
 
 
 def _raise_if_semantic_conflicts(entry: dict, *, strict: bool = True) -> None:
@@ -2988,7 +3090,7 @@ def _sync_bidirectional_relations_for_entry(
     - B.superklaso contains A => A has B as subklaso (derived in display/search)
       and we ensure parent references are normalized.
     """
-    all_entries = _load_all()
+    all_entries = _load_all_unsorted()
     by_uuid = {e["uuid"]: e for e in all_entries}
     current = by_uuid.get(entry["uuid"])
     if current is None:
@@ -3453,8 +3555,10 @@ def _render_relation_cli_link(label: str, ref: str) -> str:
     if raw_ref.lower().startswith("ec#"):
         raw_ref = raw_ref[3:]
     normalized_ref = raw_ref[3:].lstrip("#") if is_vorto_ref else raw_ref.lstrip("#")
-    target = _find_vorto_by_uuid(normalized_ref) if is_vorto_ref else _find_by_uuid(
-        normalized_ref
+    target = (
+        _find_vorto_by_uuid(normalized_ref)
+        if is_vorto_ref
+        else _find_by_uuid(normalized_ref)
     )
     short_ref = normalized_ref[:8]
     clean_label = _strip_markdown_links(str(label or "")).strip()
@@ -3487,8 +3591,10 @@ def _render_relation_html_link(label: str, ref: str, *, link_depth: int = 0) -> 
     if raw_ref.lower().startswith("ec#"):
         raw_ref = raw_ref[3:]
     normalized_ref = raw_ref[3:].lstrip("#") if is_vorto_ref else raw_ref.lstrip("#")
-    target = _find_vorto_by_uuid(normalized_ref) if is_vorto_ref else _find_by_uuid(
-        normalized_ref
+    target = (
+        _find_vorto_by_uuid(normalized_ref)
+        if is_vorto_ref
+        else _find_by_uuid(normalized_ref)
     )
     short_ref = normalized_ref[:8]
     clean_label = _strip_markdown_links(str(label or "")).strip()
@@ -4706,9 +4812,9 @@ def aldoni(
             '  terminologio.xx = "..."\n'
             '  difino.xx = "..."\n'
             '  """laŭvola libera teksto"""\n'
-             '  superklaso = ["uuid1", "uuid2"]\n'
-             '  ligilo = ["uuid1", ["uuid2", "rdf:type"],\n'
-             '            ["uuid3", "owl:inverseOf"], "vt#8bf534dc"]\n'
+            '  superklaso = ["uuid1", "uuid2"]\n'
+            '  ligilo = ["uuid1", ["uuid2", "rdf:type"],\n'
+            '            ["uuid3", "owl:inverseOf"], "vt#8bf534dc"]\n'
             '  fonto = [{titolo="...", autoro="...", jaro=2020, tipo="libroj", '
             'noto="...", ligilo="https://...", lingvo="eo,en"}]\n'
             '  citajo = [{teksto="...", autoro="...", verko="...", '
@@ -4863,6 +4969,11 @@ def aldoni(
         "modifita_je": now,
         **parsed,
     }
+    try:
+        _raise_if_malformed_entry(entry)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
     _raise_if_semantic_conflicts(entry)
     _insert_entry(entry)
     _sync_bidirectional_relations_for_entry(entry)
@@ -4912,7 +5023,7 @@ def modifi(
         "--terminologio",
         help=(
             "Anstataŭigi/aldoni terminon laŭ lingvo: xx:teksto (ripetebla). "
-            'Ekzemplo: -t eo:Suno -t en:Sun'
+            "Ekzemplo: -t eo:Suno -t en:Sun"
         ),
     ),
     termino_difino: list[str] | None = typer.Option(
@@ -5126,6 +5237,11 @@ def modifi(
         )
         raise typer.Exit(code=1)
 
+    try:
+        _raise_if_malformed_entry(entry)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
     _raise_if_semantic_conflicts(entry, strict=False)
     entry["modifita_je"] = _now_iso()
     _update_entry(entry)
@@ -5218,10 +5334,7 @@ def eksporti(
     ),
     celvojo: str = typer.Argument(
         ...,
-        help=(
-            "Cel dosiero aŭ dosierujo por .enc eligo. "
-            "Ekzemplo: ~/eliro/fiziko.enc"
-        ),
+        help=("Cel dosiero aŭ dosierujo por .enc eligo. Ekzemplo: ~/eliro/fiziko.enc"),
     ),
 ) -> None:
     """Eksporti unu encik-nodon al .enc dosiero."""
@@ -5240,6 +5353,134 @@ def eksporti(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(_entry_to_enc(entry), encoding="utf-8")
     typer.echo(f'Eksportis #{short_uuid}  "{title}" al {out_path}.')
+
+
+@app.command("generi")
+def generi(
+    terminologio: str = typer.Argument(
+        ...,
+        help='Terminologio por AI-generado (ekz: encik generi "macOS").',
+    ),
+    terminologio_lingvo: str = typer.Option(
+        ...,
+        "-tl",
+        "--terminologio-lingvo",
+        help="Lingvoj por `terminologio` (ekz: -tl eo,fr,en).",
+    ),
+    difino_lingvo: str = typer.Option(
+        ...,
+        "-dl",
+        "--difino-lingvo",
+        help="Lingvoj por `difino` (ekz: -dl eo,fr,en).",
+    ),
+    instrukcio: str | None = typer.Option(
+        None,
+        "-i",
+        "--instrukcio",
+        help="Plia instrukcio por la AI-modelo.",
+    ),
+    kunteksto_dosiero: Path | None = typer.Option(
+        None,
+        "-K",
+        "--kunteksto-dosiero",
+        help=(
+            "Propra kunteksto-dosiero "
+            "(ekz: -K ~/.config/autish/verki/encik-generi-kunteksto.md)."
+        ),
+    ),
+    eksporti_vojo: str | None = typer.Option(
+        None,
+        "-E",
+        "--eksporti",
+        help="Skribi rezulton al .enc dosiero aŭ dosierujo (ekz: -E ./eliro/).",
+    ),
+    modelo: str = typer.Option(
+        "MiniMaxAI/MiniMax-M2.7:novita",
+        "-m",
+        "--modelo",
+        help="AI-modelo (ekz: -m MiniMaxAI/MiniMax-M2.7:novita).",
+    ),
+    provizanto: str = typer.Option(
+        "huggingface",
+        "-p",
+        "--provizanto",
+        help="AI-provizanto (ekz: -p huggingface).",
+    ),
+    api_slosilo: str | None = typer.Option(
+        None,
+        "-as",
+        "--api-slosilo",
+        help="API-slosilo por la AI-provizanto.",
+    ),
+    maksimumaj_tokenoj: int = typer.Option(
+        1200,
+        "-mt",
+        "--maksimumaj-tokenoj",
+        help="Maksimumaj novaj tokenoj (ekz: -mt 1500).",
+    ),
+    temperaturo: float = typer.Option(
+        0.3,
+        "-tm",
+        "--temperaturo",
+        help="Modela temperaturo inter 0 kaj 2 (ekz: -tm 0.3).",
+    ),
+) -> None:
+    """Generi .enc tekston per AI por terminologio + difino kampoj."""
+    try:
+        term_lingvoj = _parse_required_lingvo_codes(
+            terminologio_lingvo, field="--terminologio-lingvo"
+        )
+        difino_lingvoj = _parse_required_lingvo_codes(
+            difino_lingvo, field="--difino-lingvo"
+        )
+        context = load_ai_context(
+            "encik-generi",
+            override_path=kunteksto_dosiero,
+        )
+        profile: dict | None = None
+        try:
+            profile = _load_profile(quiet=True)
+        except Exception:
+            profile = None
+        service = build_verki_service(
+            provizanto=provizanto,
+            modelo=modelo,
+            api_slosilo=api_slosilo,
+            profile=profile,
+        )
+        generated = service.verki(
+            VerkiRequest(
+                instrukcio=_build_encik_generi_instrukcio(
+                    terminologio,
+                    term_lingvoj=term_lingvoj,
+                    difino_lingvoj=difino_lingvoj,
+                    papildona_instrukcio=instrukcio,
+                ),
+                kunteksto=context,
+                maksimumaj_tokenoj=maksimumaj_tokenoj,
+                temperaturo=temperaturo,
+            )
+        )
+        _validate_generated_enc_output(
+            generated,
+            term_lingvoj=term_lingvoj,
+            difino_lingvoj=difino_lingvoj,
+        )
+    except (ValueError, VerkiServiceError) as exc:
+        typer.echo(f"Eraro: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    if eksporti_vojo:
+        default_name = f"{_safe_export_basename(terminologio, 'encik')}.enc"
+        out_path = _resolve_export_path(
+            eksporti_vojo,
+            default_filename=default_name,
+            suffix=".enc",
+        )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(generated, encoding="utf-8")
+        typer.echo(f"Skribis al {out_path}.")
+    typer.echo(generated)
 
 
 def _semantika_language_priority(languages: list[str]) -> list[str]:
@@ -5274,9 +5515,7 @@ def _wikidata_api_get(params: dict[str, str], *, timeout: float = 5.0) -> dict:
     url = f"https://www.wikidata.org/w/api.php?{query}"
     request = urllib.request.Request(
         url,
-        headers={
-            "User-Agent": "autish-encik/0.0.1 (Wikidata semantika integration)"
-        },
+        headers={"User-Agent": "autish-encik/0.0.1 (Wikidata semantika integration)"},
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -5663,7 +5902,7 @@ def _normalize_semantika_add_id(raw_id: str) -> tuple[str, str | None]:
 def semantika_ligilo_aldoni(
     identigilo: str = typer.Argument(
         ...,
-        help='Arko aŭ Wikidata ID (ekz: P1082 aŭ wdt:P1082).',
+        help="Arko aŭ Wikidata ID (ekz: P1082 aŭ wdt:P1082).",
     ),
     grupo: str = typer.Argument(
         ...,
@@ -5673,7 +5912,7 @@ def semantika_ligilo_aldoni(
         None,
         "-p",
         "--priskribo",
-        help="Mana PRISKRIBO por offline fallback (ekz: -p \"Loĝantaro\").",
+        help='Mana PRISKRIBO por offline fallback (ekz: -p "Loĝantaro").',
     ),
     aliazoj: str | None = typer.Option(
         None,
@@ -5930,7 +6169,7 @@ def serci(
         "--semantiko",
         help=(
             "Filtri laŭ semantika ligilo aŭ kondiĉoj "
-            "(ekz: rdf:type aŭ \"rdf:type #9be93895; wdt:P361 #1a2b3c4d\"). "
+            '(ekz: rdf:type aŭ "rdf:type #9be93895; wdt:P361 #1a2b3c4d"). '
             "Plena listo: encik semantika."
         ),
     ),
@@ -6205,6 +6444,7 @@ def serci(
 
     # ── serĉo laŭ demando (defaŭlte titolo, kun -t plena teksto) ──────────
     if demando is not None:
+
         def _copy_selected_entry(entry: dict) -> None:
             if not kopii_uuid and not semantika_kopii:
                 return
