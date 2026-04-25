@@ -82,6 +82,44 @@ pipx install autish
 autish --help
 ```
 
+### Option C — Install from source globally (development mode)
+
+To install autish from your local source repository globally (so the `autish` command is available in your PATH), use Poetry's `install` command with the `--directory` flag:
+
+```bash
+cd /path/to/autish
+poetry install
+
+# Create a symlink to make autish available globally
+ln -s "$(poetry -C . env info --path)/bin/autish" ~/.local/bin/autish
+
+# Verify
+autish --help
+```
+
+Alternatively, if `~/.local/bin` is already on your PATH, you can use:
+
+```bash
+cd /path/to/autish
+poetry install
+poetry run pip install --user -e .
+```
+
+This installs autish in editable mode globally while keeping dependencies isolated in the Poetry environment.
+
+**Why install from source?**
+
+- **Bash aliases work system-wide** — With `autish` in your PATH, bash aliases like `ess='autish encik serci -sk'` work in any shell session without needing to activate the Poetry environment
+- **Development workflow** — Changes to the source code are immediately reflected without reinstalling
+- **Standalone entry-point scripts** — Commands like `vorto`, `encik`, `retposto` work directly if registered in `pyproject.toml`
+
+**Note for bash aliases:** After installing globally, regenerate your bash aliases:
+
+```bash
+sistemo bash-alias ls  # View existing aliases
+# Aliases will now use the global autish command
+```
+
 ### Making autish available system-wide
 
 If you want `autish` available for all users on the machine:
@@ -210,6 +248,20 @@ autish kp echo "hello"
 # Copy the last captured kp output again (without re-running)
 autish kp
 ```
+
+---
+
+## Documentation
+
+Detailed command-specific documentation:
+
+- [**VERKI.md**](VERKI.md) — AI-assisted text generation and rewriting
+- [**BASH_ALIAS.md**](docs/BASH_ALIAS.md) — Bash alias management (`sistemo bash alias`)
+- [**KONTAKTO.md**](docs/KONTAKTO.md) — Contact management with markdown links
+- [**ENCIK.md**](ENCIK.md) — Encyclopedia (terminology and definitions)
+- [**VORTO.md**](VORTO.md) — Word vocabulary management
+
+All commands support Esperanto keywords and work offline by default. AI-backed commands (verki, encik generi, retposto analizi/generi) require API keys for online features; see [VERKI.md](VERKI.md) for setup.
 
 ---
 
