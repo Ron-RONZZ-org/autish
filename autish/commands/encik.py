@@ -111,6 +111,12 @@ CREATE TABLE IF NOT EXISTS encik (
 );
 """
 
+_CREATE_ENCIK_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_encik_titolo_lower ON encik(LOWER(titolo));
+CREATE INDEX IF NOT EXISTS idx_encik_uuid_prefix ON encik(substr(uuid, 1, 8));
+CREATE INDEX IF NOT EXISTS idx_encik_kreita_je ON encik(kreita_je);
+"""
+
 _ISO_690_TIPOJ: dict[str, str] = {
     "lib": "libroj",
     "art": "artikoloj",
@@ -271,16 +277,17 @@ _SEMANTIKA_HELPO_TEKSTO = (
     "            wdt:P106 (occupation), wdt:P26 (spouse), wdt:P123 (publisher), wdt:P69 (educated at)\n"
     "\n"
     "Subcommands:\n"
-    "- encik semantika <group>         Show semantic links in category\n"
-    "- encik semantika serci <query>   Search Wikidata for semantic links\n"
-    "- encik semantika aldoni <id> <group>  Add semantic link to category\n"
+    "- encik semantika <grupo>          Show semantic links in category\n"
+    "- encik semantika serci <query>    Search Wikidata for semantic links\n"
+    "- encik semantika aldoni <id> <grupo>   Add semantic link to category\n"
     "\n"
     "Usage:\n"
-    "- encik modifi <uuid> --ligilo <uuid>:rdf:type\n"
     "- encik serci --semantiko rdf:type [--al <target-node>]\n"
+    "- encik modifi <uuid> --ligilo <uuid>:rdf:type\n"
     "\n"
     "Groups: generala, abstrakta, persono, geografio, agento, invento, komputiko, komerco"
 )
+
 
 
 
@@ -578,6 +585,7 @@ def _init_db() -> None:
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(_CREATE_ENCIK)
+        conn.executescript(_CREATE_ENCIK_INDEXES)
         _migrate_db(conn)
         conn.commit()
     finally:

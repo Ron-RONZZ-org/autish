@@ -91,6 +91,15 @@ CREATE TABLE IF NOT EXISTS vorto (
 );
 """
 
+_CREATE_VORTO_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_vorto_teksto_lower ON vorto(LOWER(teksto));
+CREATE INDEX IF NOT EXISTS idx_vorto_lingvo ON vorto(lingvo);
+CREATE INDEX IF NOT EXISTS idx_vorto_kategorio ON vorto(kategorio);
+CREATE INDEX IF NOT EXISTS idx_vorto_temo ON vorto(temo);
+CREATE INDEX IF NOT EXISTS idx_vorto_tono ON vorto(tono);
+CREATE INDEX IF NOT EXISTS idx_vorto_kreita_je ON vorto(kreita_je);
+"""
+
 _CREATE_RUBUJO = """
 CREATE TABLE IF NOT EXISTS rubujo (
     uuid        TEXT PRIMARY KEY,
@@ -128,7 +137,7 @@ def _get_db() -> sqlite3.Connection:
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL;")
     con.execute("PRAGMA foreign_keys=ON;")
-    con.executescript(_CREATE_VORTO + _CREATE_RUBUJO + _CREATE_UNDO)
+    con.executescript(_CREATE_VORTO + _CREATE_VORTO_INDEXES + _CREATE_RUBUJO + _CREATE_UNDO)
     _migrate_db(con)
     return con
 
@@ -283,6 +292,16 @@ def _load_entries() -> list[dict]:
             "SELECT * FROM vorto ORDER BY kreita_je ASC"
         ).fetchall()
     return [_row_to_dict(r) for r in rows]
+
+
+def _find_existing_by_teksto(teksto: str) -> dict | None:
+    """Find an entry by teksto using SQL (case-insensitive). Returns None if not found."""
+    with _get_db() as con:
+        row = con.execute(
+            "SELECT * FROM vorto WHERE LOWER(teksto) = LOWER(?) LIMIT 1",
+            (teksto,),
+        ).fetchone()
+    return _row_to_dict(row) if row else None
 
 
 def _save_entries(entries: list[dict]) -> None:
@@ -1871,14 +1890,8 @@ def aldoni(
 
     difinoj, uzoj = _normalize_difinoj_uzoj(difino or [], [])
 
-    # Load entries early so we can check for duplicates
-    entries = _load_entries()
-
-    # ── Duplicate teksto check ───────────────────────────────────────────────
-    existing_entry = next(
-        (e for e in entries if e["teksto"].lower() == teksto.lower()),
-        None,
-    )
+    # ── Duplicate teksto check (using SQL) ────────────────────────────────────
+    existing_entry = _find_existing_by_teksto(teksto)
     if existing_entry is not None:
         typer.echo(
             f"Eniro kun teksto \"{existing_entry['teksto']}\" jam ekzistas "
@@ -1892,23 +1905,8 @@ def aldoni(
             return
         # Overwrite: apply modifi-equivalent on the existing entry
         old_entry = dict(existing_entry)
-        if lingvo is not None:
-            existing_entry["lingvo"] = lingvo
-        if tipo is not None:
-            existing_entry["tipo"] = _normalize_tipo(tipo)
-        if temo is not None:
-            existing_entry["temo"] = _normalize_multiline_text(temo)
-        if tono is not None:
-            existing_entry["tono"] = _normalize_tono(tono)
-        if nivelo is not None:
-            existing_entry["nivelo"] = nivelo
-        if difino is not None:
-            existing_entry["difinoj"] = difinoj
-            existing_entry["uzoj"] = uzoj
-        if etikedo is not None:
-            existing_entry["etikedoj"] = _parse_etikedo(etikedo)
-        if ligilo is not None:
-            existing_entry["ligiloj"] = ligilo or []
+        # Load all entries for link synchronization
+        entries = _load_entries()
         existing_entry["ligiloj"] = _merge_links_with_inline_refs(
             existing_entry.get("ligiloj") or [],
             existing_entry.get("difinoj") or [],
