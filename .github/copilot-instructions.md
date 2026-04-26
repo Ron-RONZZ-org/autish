@@ -117,6 +117,7 @@ autish/
 19. **Encik semantic groups are user-editable CSV files** — store `encik semantika` groups in `~/.config/autish/semantika/*.csv` with columns `LIGILO,PRISKRIBO,ALIAZOJ`; each file corresponds to one semantic group/subcommand.
 20. **All command output must be clear, meaningful, succinct, and human-readable** — prefer resolved labels/text over raw IDs, and keep confirmations/results understandable at a glance.
 21. **CLI colors must preserve contrast on light/dark terminals and in grayscale/BW filters** — avoid fixed low-contrast accents and hue-only cues; adapt styles to terminal background so key fields (e.g., `LIGILO`) remain clearly readable even without color perception.
+22. **Legacy command aliases must be hidden from help text** — when adding backward-compatibility aliases for renamed commands, use `@command(hidden=True)` so users see the recommended name in help. The legacy alias still functions but doesn't clutter help output. Example: `disko particio shrink` is hidden; users see `srumpi` instead.
 
 ---
 
