@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 
 import typer
 
@@ -132,3 +134,127 @@ def render_markdown_links_as_rich(text: str) -> object:
     rich_text.append(text[last_pos:])
 
     return rich_text
+
+
+# ============================================================================
+# Search and Fuzzy Matching Utilities
+# ============================================================================
+
+
+def normalize_oe(text: str) -> str:
+    """Fold œ/Œ → oe/OE for case-insensitive search comparisons."""
+    return text.replace("œ", "oe").replace("Œ", "OE")
+
+
+def fold_search_text(text: str) -> str:
+    """Normalize text for accent-insensitive, case-insensitive search.
+    
+    Removes accents, handles œ → oe, converts to lowercase.
+    This is the standard folding used across autish for consistent search behavior.
+    """
+    folded_oe = normalize_oe(str(text or ""))
+    normalized = unicodedata.normalize("NFKD", folded_oe)
+    stripped = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return stripped.casefold()
+
+
+def fuzzy_match_score(query: str, target: str, threshold: float = 0.62) -> float | None:
+    """Calculate fuzzy match score between query and target text.
+    
+    Returns a float between 0 and 1 if score >= threshold, else None.
+    Both texts are folded before comparison.
+    """
+    q = fold_search_text(query.strip())
+    t = fold_search_text(target.strip())
+    
+    if not q or not t:
+        return None
+    
+    ratio = SequenceMatcher(None, q, t).ratio()
+    return ratio if ratio >= threshold else None
+
+
+def fuzzy_match_ignore_whitespace(
+    query: str, target: str, threshold: float = 0.62
+) -> float | None:
+    """Calculate fuzzy match score ignoring spaces and punctuation.
+    
+    Removes spaces, punctuation, and accents before comparison.
+    Useful for matching names, titles, and other text that may have formatting
+    variations.
+    """
+    q = re.sub(r"[\s\W]+", "", fold_search_text(query.strip()))
+    t = re.sub(r"[\s\W]+", "", fold_search_text(target.strip()))
+    
+    if not q or not t:
+        return None
+    
+    ratio = SequenceMatcher(None, q, t).ratio()
+    return ratio if ratio >= threshold else None
+
+
+def wildcard_match(query: str, target: str) -> bool:
+    """Simple wildcard match with * support.
+    
+    Converts wildcard pattern to regex and matches against target.
+    Example: "*.txt" matches "file.txt", "test.txt", etc.
+    """
+    pattern = re.escape(query).replace(r"\*", ".*")
+    try:
+        return bool(re.match(f"^{pattern}$", target, re.IGNORECASE))
+    except re.error:
+        return False
+
+
+def substring_match_folded(query: str, target: str) -> bool:
+    """Substring match with folded (normalized, lowercased) text.
+    
+    Useful for exact-ish substring search with case/accent insensitivity.
+    """
+    q = fold_search_text(query.strip())
+    t = fold_search_text(target.strip())
+    return q in t if q and t else False
+
+
+def filter_entries_by_text(
+    entries: list[dict],
+    query: str,
+    *,
+    text_key: str = "teksto",
+    limit: int = 50,
+    use_whitespace_ignore: bool = False,
+) -> list[dict]:
+    """Filter and rank entries by fuzzy text match on a specific key.
+    
+    Args:
+        entries: List of dicts to search
+        query: Search query
+        text_key: Dict key containing the text to search (e.g., "teksto", "titulo")
+        limit: Max results to return
+        use_whitespace_ignore: If True, ignore spaces/punctuation in matching
+    
+    Returns:
+        Sorted list of matched entries, highest match score first
+    """
+    q = query.strip()
+    if not q:
+        return []
+    
+    scored: list[tuple[float, dict]] = []
+    match_fn = (
+        fuzzy_match_ignore_whitespace
+        if use_whitespace_ignore
+        else fuzzy_match_score
+    )
+    
+    for entry in entries:
+        text = entry.get(text_key) or ""
+        if not text:
+            continue
+        score = match_fn(q, str(text))
+        if score is not None:
+            scored.append((score, entry))
+    
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [entry for _, entry in scored[:limit]]
+

@@ -151,3 +151,18 @@ Eraro: Ne povis legi SMART informojn.
   - restore files from recycle bin
   - alias: `rubo rs`
 
+# Bug fixes
+
+- commands should follow autish naming conventions: STRICT ESPERANTO KEYWORDs !
+  - `disko shrink`> `disko srumpi`
+  - `disko format`> `disko formati`
+  - save old commands as alias for compatibility
+
+# enhancements
+
+- `serci`
+  - should be centralised to a common helper function
+  - fuzzy match enhancement: ignore spaces, punctuations etc. in match strategy
+- system wide alias
+   - add alias for all autish commands to `~/.autish_aliases`
+     - filmeto="autish filmeto", etc.

@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from autish.utils import wildcard_match
+
 
 @dataclass
 class TrashItem:
@@ -60,7 +62,9 @@ class RecycleBinDB:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         # Get all UIDs and find the max numeric one
-        cursor.execute("SELECT uid FROM trash_items ORDER BY CAST(uid AS INTEGER) DESC LIMIT 1")
+        cursor.execute(
+            "SELECT uid FROM trash_items ORDER BY CAST(uid AS INTEGER) DESC LIMIT 1"
+        )
         result = cursor.fetchone()
         conn.close()
         
@@ -154,12 +158,12 @@ class RecycleBinDB:
         self,
         keyword: str,
         use_regex: bool = False,
-        field: str = "original_path"
+        field: str = "original_path",
     ) -> list[TrashItem]:
         """Search trash items.
         
         Args:
-            keyword: Search term or regex pattern
+            keyword: Search term or regex pattern, can include wildcards (*)
             use_regex: If True, treat keyword as POSIX regex
             field: Field to search (original_path, trash_path)
             
@@ -179,21 +183,10 @@ class RecycleBinDB:
                 if pattern.search(getattr(item, field))
             ]
         else:
-            # Wildcard search: * matches anything
-            pattern_str = keyword.replace("*", ".*")
-            pattern_str = f"^{pattern_str}$"
-            try:
-                pattern = re.compile(pattern_str)
-            except re.error:
-                # Fallback to simple substring match
-                return [
-                    item for item in items
-                    if keyword.lower() in getattr(item, field).lower()
-                ]
-            
+            # Use wildcard match (supports * for any characters)
             return [
                 item for item in items
-                if pattern.search(getattr(item, field))
+                if wildcard_match(keyword, getattr(item, field))
             ]
 
     def delete_item(self, uid: str) -> bool:

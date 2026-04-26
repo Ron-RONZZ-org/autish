@@ -336,6 +336,25 @@ def bash_alias_serci(
 # ============================================================================
 
 
+def _generate_command_aliases() -> str:
+    """Generate bash aliases for all autish commands.
+    
+    Returns a multi-line string of bash aliases that wrap autish subcommands.
+    """
+    commands = [
+        "vorto", "retposto", "kontakto", "bluhdento", "wifi",
+        "sistemo", "tempo", "kp", "shelo", "sekurkopio",
+        "uzanto", "md", "encik", "disko", "usb", "filmeto",
+        "kalendaro", "etikedo", "todo", "taglibro", "verki", "rubo"
+    ]
+    
+    aliases = ["# autish command shortcuts"]
+    for cmd in commands:
+        aliases.append(f'{cmd}="autish {cmd}"')
+    
+    return "\n".join(aliases)
+
+
 @app.command("install")
 def install(
     sistema: bool = typer.Option(
@@ -483,6 +502,18 @@ def install(
         except Exception as e:
             typer.echo(
                 f"[!] Ne povis regeneri alias-ojn: {e}",
+                err=True,
+            )
+        
+        # Add command shortcuts to ~/.autish_aliases
+        try:
+            autish_aliases = Path.home() / ".autish_aliases"
+            cmd_aliases = _generate_command_aliases()
+            autish_aliases.write_text(cmd_aliases + "\n")
+            typer.echo("[✓] Komanda alias-oj ĝisdatigitaj en ~/.autish_aliases")
+        except Exception as e:
+            typer.echo(
+                f"[!] Ne povis ĝisdatigi ~/.autish_aliases: {e}",
                 err=True,
             )
     except PermissionError as e:

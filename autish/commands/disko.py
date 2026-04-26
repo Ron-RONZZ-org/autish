@@ -388,7 +388,7 @@ particio_app = typer.Typer(
 app.add_typer(particio_app)
 
 
-@particio_app.command("shrink")
+@particio_app.command("srumpi")
 def shrink_partition(
     device: str = typer.Argument(..., help="Aparato (ekz. sda1)"),
     new_size: str = typer.Argument(..., help="Nova grandeco (ekz. 50GB)"),
@@ -424,6 +424,28 @@ def shrink_partition(
     else:
         typer.echo(f"[!] {message}", err=True)
         raise typer.Exit(1)
+
+
+# Backward compatibility alias
+@particio_app.command("shrink")
+def shrink_partition_alias(
+    device: str = typer.Argument(..., help="Aparato (ekz. sda1)"),
+    new_size: str = typer.Argument(..., help="Nova grandeco (ekz. 50GB)"),
+    justa: bool = typer.Option(
+        False,
+        "-j",
+        "--justa",
+        help="Preterlasi sigurec-kontrolojn"
+    ),
+) -> None:
+    """Malpligrandi particion (useo: disko particio srumpi).
+    
+    ⚠️  AVERTO: Ĉi tio estas danĝera operacio. Daŭrigi?
+    
+    Note: This is a backward compatibility alias for 'srumpi'.
+    """
+    # Call the main function directly
+    return shrink_partition(device, new_size, justa)
 
 
 @particio_app.command("krei")
