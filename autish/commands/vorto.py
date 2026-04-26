@@ -294,14 +294,12 @@ def _load_entries() -> list[dict]:
     return [_row_to_dict(r) for r in rows]
 
 
-def _find_existing_by_teksto(teksto: str) -> dict | None:
-    """Find an entry by teksto using SQL (case-insensitive). Returns None if not found."""
-    with _get_db() as con:
-        row = con.execute(
-            "SELECT * FROM vorto WHERE LOWER(teksto) = LOWER(?) LIMIT 1",
-            (teksto,),
-        ).fetchone()
-    return _row_to_dict(row) if row else None
+def _find_existing_by_teksto_in_list(teksto: str, entries: list[dict]) -> dict | None:
+    """Find an entry by teksto using Python list search (case-insensitive). Returns None if not found."""
+    return next(
+        (e for e in entries if e["teksto"].lower() == teksto.lower()),
+        None,
+    )
 
 
 def _save_entries(entries: list[dict]) -> None:
@@ -1890,8 +1888,12 @@ def aldoni(
 
     difinoj, uzoj = _normalize_difinoj_uzoj(difino or [], [])
 
-    # ── Duplicate teksto check (using SQL) ────────────────────────────────────
-    existing_entry = _find_existing_by_teksto(teksto)
+    # Load all entries early for duplicate checking and link synchronization
+    entries = _load_entries()
+
+    # ── Duplicate teksto check ────────────────────────────────────────────────
+    existing_entry = _find_existing_by_teksto_in_list(teksto, entries)
+    
     if existing_entry is not None:
         typer.echo(
             f"Eniro kun teksto \"{existing_entry['teksto']}\" jam ekzistas "
@@ -1905,8 +1907,23 @@ def aldoni(
             return
         # Overwrite: apply modifi-equivalent on the existing entry
         old_entry = dict(existing_entry)
-        # Load all entries for link synchronization
-        entries = _load_entries()
+        if lingvo is not None:
+            existing_entry["lingvo"] = lingvo
+        if tipo is not None:
+            existing_entry["tipo"] = _normalize_tipo(tipo)
+        if temo is not None:
+            existing_entry["temo"] = _normalize_multiline_text(temo)
+        if tono is not None:
+            existing_entry["tono"] = _normalize_tono(tono)
+        if nivelo is not None:
+            existing_entry["nivelo"] = nivelo
+        if difino is not None:
+            existing_entry["difinoj"] = difinoj
+            existing_entry["uzoj"] = uzoj
+        if etikedo is not None:
+            existing_entry["etikedoj"] = _parse_etikedo(etikedo)
+        if ligilo is not None:
+            existing_entry["ligiloj"] = ligilo or []
         existing_entry["ligiloj"] = _merge_links_with_inline_refs(
             existing_entry.get("ligiloj") or [],
             existing_entry.get("difinoj") or [],
