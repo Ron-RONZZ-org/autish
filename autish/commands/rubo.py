@@ -14,6 +14,7 @@ app = typer.Typer(
         "Administri la rikirejon (rubujon) — movo, reparo, "
         "serĉo de forigitaj dosieroj."
     ),
+    context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
 console = Console()
 

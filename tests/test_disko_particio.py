@@ -1,13 +1,14 @@
 """Tests for disko particio command."""
 
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
 from typer.testing import CliRunner
+
 from autish.commands.disko import app
 from autish.services.partition_manager import (
+    get_mount_point,
     is_mounted,
     is_root_filesystem,
-    get_mount_point,
 )
 
 runner = CliRunner()
@@ -58,9 +59,11 @@ class TestDiskoParticioCLI:
         result = runner.invoke(app, ["particio", "--help"])
         
         assert result.exit_code == 0
-        assert "shrink" in result.stdout
+        # shrink is hidden from help (backward compat alias), srumpi should appear
+        assert "srumpi" in result.stdout
         assert "krei" in result.stdout
         assert "formati" in result.stdout
+        assert "shrink" not in result.stdout  # should be hidden from help
 
     def test_shrink_requires_args(self):
         """Test shrink command requires arguments."""

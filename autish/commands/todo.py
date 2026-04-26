@@ -302,7 +302,19 @@ def aldoni(
         "0",
         "-P",
         "--prioritato",
-        help=('Nombro aŭ esprimo. Ekzemplo: -P "min(20+2*D,70)" aŭ -P 40.'),
+        help=(
+            "Nombro aŭ matema esprimo. Ebloj:\n"
+            "  - Konstanto: -P 42\n"
+            "  - Dinamika per tempo-variabloj:\n"
+            "      M = monatoj (30 tagoj) de kreaĵo\n"
+            "      D = tagoj de kreaĵo\n"
+            "      H = horoj de kreaĵo\n"
+            "      m/MIN = minutoj de kreaĵo\n"
+            "    Ekzemplo: -P '20+2*D'    (20 + 2*tagoj)\n"
+            "    Ekzemplo: -P 'min(30,10*H)'  (maksimume 30)\n"
+            "  - Subtenata operacioj: +, -, *, / min(), max(), abs()\n"
+            "  - Defaŭlte: 0"
+        ),
     ),
     stato: str = typer.Option(
         "malfermita",

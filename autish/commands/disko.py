@@ -426,8 +426,8 @@ def shrink_partition(
         raise typer.Exit(1)
 
 
-# Backward compatibility alias
-@particio_app.command("shrink")
+# Backward compatibility alias (hidden from help)
+@particio_app.command("shrink", hidden=True)
 def shrink_partition_alias(
     device: str = typer.Argument(..., help="Aparato (ekz. sda1)"),
     new_size: str = typer.Argument(..., help="Nova grandeco (ekz. 50GB)"),
