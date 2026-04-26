@@ -343,7 +343,11 @@ def eksporti(
         "",
         "-f",
         "--formato",
-        help="Output format: html or pdf. Se preterlasita, konkludas laŭ dosierfino.",
+        help=(
+            "Output format. Valid values: html, pdf. "
+            "If omitted, inferred from destination file extension. "
+            "Example: --formato pdf"
+        ),
     ),
 ) -> None:
     """Export a Markdown file as HTML or PDF."""
@@ -400,7 +404,10 @@ def eksporti(
 @app.command("importi")
 def importi(
     source: str = typer.Argument(
-        ..., help="Path or URL to the source document (docx/pdf/html/odt/xml/tex)."
+        ..., help=(
+            "Path or URL to source document. Supported formats: docx, pdf, html, odt, xml (DocBook), tex (LaTeX). "
+            "Example: importi ./dokumento.docx ./eligo.md"
+        )
     ),
     destination: str = typer.Argument(..., help="Destination .md file path."),
 ) -> None:

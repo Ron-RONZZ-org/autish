@@ -456,7 +456,10 @@ def create_partition(
         "ext4",
         "-t",
         "--tipo",
-        help="Dosierujo-tipo (ext4, ext3, ntfs, vfat, etc.)"
+        help=(
+            "Filesystem type. Common values: ext4 (Linux default), ext3 (older Linux), "
+            "ntfs (Windows), vfat (universal). Example: --tipo ntfs"
+        )
     ),
     justa: bool = typer.Option(
         False,
@@ -500,7 +503,10 @@ def format_partition(
         "ext4",
         "-t",
         "--tipo",
-        help="Dosierujo-tipo (ext4, ext3, ntfs, vfat, etc.)"
+        help=(
+            "Filesystem type. Common values: ext4 (Linux default), ext3 (older Linux), "
+            "ntfs (Windows), vfat (universal). Example: --tipo ntfs"
+        )
     ),
     justa: bool = typer.Option(
         False,

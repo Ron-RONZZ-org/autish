@@ -121,7 +121,10 @@ def generi(
         None,
         "-lo",
         "--longo",
-        help="Cela longo: mallonga|normala|longa (ekz. -lo mallonga).",
+        help=(
+            "Target text length. Valid values: mallonga (short), normala (normal), longa (long). "
+            "Example: -lo mallonga"
+        ),
     ),
     registro: str | None = typer.Option(
         None,

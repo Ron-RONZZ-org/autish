@@ -262,22 +262,26 @@ _SEMANTIKA_KATEGORIOJ: dict[str, tuple[str, ...]] = {
     ),
 }
 _SEMANTIKA_HELPO_TEKSTO = (
-    "Kategoriigita helpo pri semantikaj ligiloj por Encik.\n"
-    "Grupoj estas CSV-dosieroj en ~/.config/autish/semantika/*.csv.\n"
-    "CSV-kolumnoj: LIGILO, PRISKRIBO, ALIAZOJ.\n"
+    "Semantic link types for Encik knowledge graph.\n"
+    "Organized by group in ~/.config/autish/semantika/*.csv (LIGILO, PRISKRIBO, ALIAZOJ columns).\n"
     "\n"
-    "Subkomandoj:\n"
-    "- encik semantika <grupo>\n"
-    "- encik semantika serci <demando>\n"
-    "- encik semantika aldoni <ID> <grupo>\n"
+    "Common semantic link types:\n"
+    "  RDF/RDFS: rdf:type (instance of), rdfs:subClassOf (is subclass of), owl:inverseOf\n"
+    "  Wikidata: wdt:P50 (author), wdt:P361 (part of), wdt:P527 (has part), wdt:P276 (location),\n"
+    "            wdt:P106 (occupation), wdt:P26 (spouse), wdt:P123 (publisher), wdt:P69 (educated at)\n"
     "\n"
-    "Uzo:\n"
-    "- `encik modifi <uuid> --ligilo <uuid>:<semantiko>`\n"
-    "- `encik serci --semantiko <semantiko> [--al <nodo>]`\n"
+    "Subcommands:\n"
+    "- encik semantika <group>         Show semantic links in category\n"
+    "- encik semantika serci <query>   Search Wikidata for semantic links\n"
+    "- encik semantika aldoni <id> <group>  Add semantic link to category\n"
     "\n"
-    "Defaŭlte prioritatu rdf/rdfs-ligilojn; poste kategori-rilatajn "
-    "Wikidata-P-ligilojn."
+    "Usage:\n"
+    "- encik modifi <uuid> --ligilo <uuid>:rdf:type\n"
+    "- encik serci --semantiko rdf:type [--al <target-node>]\n"
+    "\n"
+    "Groups: generala, abstrakta, persono, geografio, agento, invento, komputiko, komerco"
 )
+
 
 
 def _semantika_help_hint() -> str:
@@ -6173,9 +6177,10 @@ def serci(
         "-sm",
         "--semantiko",
         help=(
-            "Filtri laŭ semantika ligilo aŭ kondiĉoj "
-            '(ekz: rdf:type aŭ "rdf:type #9be93895; wdt:P361 #1a2b3c4d"). '
-            "Plena listo: encik semantika."
+            "Filter by semantic link type or condition (RDF/OWL/Wikidata). "
+            "Examples: rdf:type, rdfs:subClassOf, wdt:P50 (author), wdt:P361 (part of), "
+            "wdt:P276 (location), wdt:P106 (occupation). Complex: 'rdf:type #9be93895; wdt:P361 #1a2b3c4d'. "
+            "Full reference: encik semantika"
         ),
     ),
     al_ref: str | None = typer.Option(

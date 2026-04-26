@@ -294,8 +294,8 @@ def aldoni(
         "-e",
         "--etikedo",
         help=(
-            "Etikedo UUID/teksto; ripetu por pluraj. Ekzemplo: -e #a1b2c3d4 -e "
-            "urgxenta."
+            "Etikedo UUID/teksto; ripetu por pluraj. Se ne trovita, demandos "
+            "ĉu aldoni novan. Ekzemplo: -e #a1b2c3d4 -e urgxenta."
         ),
     ),
     prioritato: str = typer.Option(
@@ -321,8 +321,9 @@ def aldoni(
         "-s",
         "--stato",
         help=(
-            "Komenca stato. Ekzemplo: --stato malfermita "
-            "(ebloj: malfermita, farita, prokrastita, nuligita)."
+            "Initial task status. Valid values: malfermita (open), farita (done), "
+            "prokrastita (deferred), nuligita (cancelled). "
+            "Example: --stato malfermita"
         ),
     ),
 ) -> None:
@@ -332,10 +333,14 @@ def aldoni(
         typer.echo("Malplena titolo ne permesata.", err=True)
         raise typer.Exit(1)
     priskribo_text = _tasklib.normalize_markdown_links(priskribo).strip()
+    _tasklib.auto_create_semantic_link_etikedoj(titolo_text)
+    _tasklib.auto_create_semantic_link_etikedoj(priskribo_text)
     normalized_stato = _normalize_stato(stato)
     now = _tasklib.now_iso()
     _ = _compute_prioritato(prioritato, now)  # validates expression
-    etikedo_ids = _tasklib.resolve_etikedo_refs(etikedo, interactive=True)
+    etikedo_ids = _tasklib.resolve_etikedo_refs(
+        etikedo, interactive=True, prompt_on_missing=True
+    )
     uid = _tasklib.new_uuid()
     with _tasklib.connect() as con:
         con.execute(
@@ -397,7 +402,11 @@ def serci(
         None,
         "-s",
         "--stato",
-        help="Filtri laŭ stato. Ekzemplo: --stato malfermita.",
+        help=(
+            "Filter by task status. Valid values: malfermita (open), farita (done), "
+            "prokrastita (deferred), nuligita (cancelled). "
+            "Example: --stato farita"
+        ),
     ),
     limo: int = typer.Option(
         50,
@@ -516,7 +525,8 @@ def modifi(
         "--etikedo",
         help=(
             "Nova etikedo-listo (anstataŭigas ekzistantajn); ripetu por pluraj. "
-            "Ekzemplo: -e #a1b2c3d4 -e grava."
+            "Se ne trovita, demandos ĉu aldoni novan. Ekzemplo: -e #a1b2c3d4 "
+            "-e grava."
         ),
     ),
     prioritato: str | None = typer.Option(
@@ -529,7 +539,11 @@ def modifi(
         None,
         "-s",
         "--stato",
-        help="Nova stato. Ekzemplo: --stato farita.",
+        help=(
+            "Update task status. Valid values: malfermita (open), farita (done), "
+            "prokrastita (deferred), nuligita (cancelled). "
+            "Example: --stato farita"
+        ),
     ),
 ) -> None:
     """Modifi ekzistantan todo-taskon."""
@@ -561,6 +575,10 @@ def modifi(
         if priskribo is not None
         else str(item.get("priskribo") or "")
     )
+    if titolo is not None:
+        _tasklib.auto_create_semantic_link_etikedoj(new_titolo)
+    if priskribo is not None:
+        _tasklib.auto_create_semantic_link_etikedoj(new_priskribo)
     new_prioritato = (
         str(item.get("prioritato") or "0") if prioritato is None else prioritato
     )
@@ -573,7 +591,9 @@ def modifi(
     label_ids = (
         [uid for uid, _ in (item.get("etikedoj") or [])]
         if etikedo is None
-        else _tasklib.resolve_etikedo_refs(etikedo, interactive=True)
+        else _tasklib.resolve_etikedo_refs(
+            etikedo, interactive=True, prompt_on_missing=True
+        )
     )
     with _tasklib.connect() as con:
         con.execute(

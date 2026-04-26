@@ -1013,7 +1013,11 @@ def serci(
     kuketoj_de_retumilo: str | None = typer.Option(
         None,
         "--kuketoj-de-retumilo",
-        help="Retumilo por importi kuketojn (ekz. firefox, chrome).",
+        help=(
+            "Browser to import cookies from. Valid values: firefox, floorp, librewolf, waterfox, zen (Firefox-based), "
+            "chrome, brave, vivaldi, chromium (Chromium-based). "
+            "Example: --kuketoj-de-retumilo firefox"
+        ),
     ),
     playlistoj: bool = typer.Option(
         False,
@@ -1154,7 +1158,11 @@ def vidi(
     kuketoj_de_retumilo: str | None = typer.Option(
         None,
         "--kuketoj-de-retumilo",
-        help="Retumilo por importi kuketojn (ekz. firefox, chrome).",
+        help=(
+            "Browser to import cookies from. Valid values: firefox, floorp, librewolf, waterfox, zen (Firefox-based), "
+            "chrome, brave, vivaldi, chromium (Chromium-based). "
+            "Example: --kuketoj-de-retumilo firefox"
+        ),
     ),
 ) -> None:
     """Elŝuti filmeton al /tmp kaj malfermi en defaŭlta video-ludilo."""
@@ -1237,7 +1245,11 @@ def elsuti(
     kuketoj_de_retumilo: str | None = typer.Option(
         None,
         "--kuketoj-de-retumilo",
-        help="Retumilo por importi kuketojn (ekz. firefox, chrome).",
+        help=(
+            "Browser to import cookies from. Valid values: firefox, floorp, librewolf, waterfox, zen (Firefox-based), "
+            "chrome, brave, vivaldi, chromium (Chromium-based). "
+            "Example: --kuketoj-de-retumilo firefox"
+        ),
     ),
     vojo: Path | None = typer.Option(
         None,

@@ -216,3 +216,126 @@ def test_taglibro_add_search_modify_view_delete(monkeypatch, tmp_path: Path):
     delete = runner.invoke(app, ["taglibro", "forigi", "nova titolo"], input="j\n")
     assert delete.exit_code == 0
     assert "Forigis taglibro-eniron" in delete.output
+
+
+def test_todo_etikedo_validation_with_creation(monkeypatch, tmp_path: Path):
+    """Test that todo aldoni --etikedo prompts to create missing etikedo."""
+    import autish.commands._tasklib as tasklib
+
+    monkeypatch.setattr(tasklib, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(tasklib, "_DB_FILE", tmp_path / "tasklibro.db")
+    monkeypatch.setattr(tasklib, "_ENCIK_DB_FILE", tmp_path / "encik.db")
+    monkeypatch.setattr(tasklib, "_VORTO_DB_FILE", tmp_path / "vorto.db")
+
+    add_existing_label = runner.invoke(app, ["etikedo", "aldoni", "urgxa"])
+    assert add_existing_label.exit_code == 0
+
+    add_with_new_label = runner.invoke(
+        app,
+        ["todo", "aldoni", "Testo", "-e", "nova_etikedo"],
+        input="j\n",
+    )
+    assert add_with_new_label.exit_code == 0, add_with_new_label.output
+    assert "Aldonis etikedon" in add_with_new_label.output
+    assert "Aldonis todo" in add_with_new_label.output
+
+    add_reject_create = runner.invoke(
+        app,
+        ["todo", "aldoni", "Testo 2", "-e", "neakceptita"],
+        input="N\n",
+    )
+    assert add_reject_create.exit_code == 1
+    assert "Etikedo ne trovita" in add_reject_create.output
+
+
+def test_todo_modifi_etikedo_with_creation(monkeypatch, tmp_path: Path):
+    """Test that todo modifi --etikedo prompts to create missing etikedo."""
+    import autish.commands._tasklib as tasklib
+
+    monkeypatch.setattr(tasklib, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(tasklib, "_DB_FILE", tmp_path / "tasklibro.db")
+    monkeypatch.setattr(tasklib, "_ENCIK_DB_FILE", tmp_path / "encik.db")
+    monkeypatch.setattr(tasklib, "_VORTO_DB_FILE", tmp_path / "vorto.db")
+
+    runner.invoke(app, ["etikedo", "aldoni", "existing"])
+    add = runner.invoke(app, ["todo", "aldoni", "Testo", "-e", "existing"])
+    assert add.exit_code == 0
+
+    modifi_new = runner.invoke(
+        app,
+        ["todo", "modifi", "testo", "-e", "nova"],
+        input="j\n",
+    )
+    assert modifi_new.exit_code == 0, modifi_new.output
+    assert "Aldonis etikedon" in modifi_new.output
+    assert "Modifis todo" in modifi_new.output
+
+    view = runner.invoke(app, ["todo", "vidi", "testo"])
+    assert view.exit_code == 0
+    assert "nova" in view.output
+
+
+def test_todo_semantic_link_auto_creates_etikedo(monkeypatch, tmp_path: Path):
+    """Test that todo aldoni automatically creates etikedoj for semantic links."""
+    import autish.commands._tasklib as tasklib
+
+    monkeypatch.setattr(tasklib, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(tasklib, "_DB_FILE", tmp_path / "tasklibro.db")
+    monkeypatch.setattr(tasklib, "_ENCIK_DB_FILE", tmp_path / "encik.db")
+    monkeypatch.setattr(tasklib, "_VORTO_DB_FILE", tmp_path / "vorto.db")
+    _seed_link_targets(tmp_path / "encik.db", tmp_path / "vorto.db")
+
+    add = runner.invoke(
+        app,
+        [
+            "todo",
+            "aldoni",
+            "Testo kun [Filosofio](ec#4feb123f)",
+            "-p",
+            "Priskribo kun [verbo](vt#8bf534dc)",
+        ],
+    )
+    assert add.exit_code == 0, add.output
+    assert "Aldonis todo" in add.output
+
+    search_labels = runner.invoke(app, ["etikedo", "serci"])
+    assert search_labels.exit_code == 0
+    has_filosofio = (
+        "Filosofio (ec#4feb123f)" in search_labels.output
+        or "Filosofio" in search_labels.output
+    )
+    has_verbo = (
+        "verbo (vt#8bf534dc)" in search_labels.output
+        or "verbo" in search_labels.output
+    )
+    assert has_filosofio
+    assert has_verbo
+
+
+def test_todo_semantic_link_no_duplicate_etikedoj(monkeypatch, tmp_path: Path):
+    """Test that same semantic link isn't duplicated across multiple todos."""
+    import autish.commands._tasklib as tasklib
+
+    monkeypatch.setattr(tasklib, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(tasklib, "_DB_FILE", tmp_path / "tasklibro.db")
+    monkeypatch.setattr(tasklib, "_ENCIK_DB_FILE", tmp_path / "encik.db")
+    monkeypatch.setattr(tasklib, "_VORTO_DB_FILE", tmp_path / "vorto.db")
+    _seed_link_targets(tmp_path / "encik.db", tmp_path / "vorto.db")
+
+    add1 = runner.invoke(
+        app,
+        ["todo", "aldoni", "Testo 1 kun [Filozofio](ec#4feb123f)"],
+    )
+    assert add1.exit_code == 0
+
+    add2 = runner.invoke(
+        app,
+        ["todo", "aldoni", "Testo 2 kun [Filozofio](ec#4feb123f)"],
+    )
+    assert add2.exit_code == 0
+
+    search_labels = runner.invoke(app, ["etikedo", "serci", "filozofio"])
+    assert search_labels.exit_code == 0
+    lines = search_labels.output.strip().split("\n")
+    result_count = int(lines[0].split()[0])
+    assert result_count == 1, f"Expected 1 etikedo, got {result_count}"

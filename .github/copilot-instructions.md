@@ -121,6 +121,52 @@ autish/
 
 ---
 
+## Help Text Standards (for first-time users)
+
+**Options with restricted values MUST document all valid values:**
+- For options that accept only specific values (enums, fixed choices), list them all exhaustively in the help string
+- Example: `--stato` option for `todo serci` must document: "Valid values: malfermita (open), farita (done), prokrastita (deferred), nuligita (cancelled)"
+- For semantic link types in `encik`, reference the relevant groups: "See: encik semantika generala, encik semantika persono, etc."
+
+**Every help string must include concrete usage examples:**
+- Include at least one real example that demonstrates actual usage patterns
+- Format: `Example: --lingvo fr` or `Example: -P 30,80` or `Example: -lo mallonga`
+- Examples should be diverse: show common cases, edge cases, and format variations
+
+**Descriptive help improves clarity:**
+- Prefer: "Target text length. Valid values: mallonga (short), normala (normal), longa (long)." 
+- Over: "Text length (mallonga|normala|longa)"
+- Include brief explanation of what each value does, especially for less obvious options
+
+**Semantic link documentation pattern:**
+- When documenting semantic link types, group by domain: RDF/OWL first, then Wikidata properties
+- Include key aliases: "rdf:type (also: type, wdt:P31, instance of)"
+- Reference command: "Full reference: encik semantika"
+
+---
+
+## Database Optimization Standards
+
+**Scalability is critical for vorto and encik microapps:**
+- Use indexes on frequently searched columns (teksto, titolo, uuid, language codes)
+- Implement normalized search text columns with indexes for case-insensitive matching
+- Avoid full-table loads in memory for operations that can be filtered at SQL level
+- Cache results per command execution, not per function call (reduces redundant queries)
+
+**Performance guidelines:**
+- Target: aldoni operations complete in <100ms even with 10k+ entries
+- Use WHERE clauses in SQL instead of Python-side filtering
+- Implement batch resolution for semantic links instead of per-item lookups
+- Consider full-text search (FTS5) for complex text searches across multiple fields
+
+**SQL patterns to avoid:**
+- Don't use `SELECT *` when you only need specific columns
+- Don't iterate through loaded entries for lookups; use SQL WHERE + indexes
+- Don't recompute aggregate metrics (e.g., subclass counts) on every operation
+- Don't create new database connections for each query; reuse within transaction
+
+---
+
 ## Direct CLI access (standard for new commands)
 
 Every new command module **must** be registered both in `autish/main.py` (as a

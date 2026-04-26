@@ -218,6 +218,8 @@ def aldoni(
         typer.echo("Malplena titolo ne permesata.", err=True)
         raise typer.Exit(1)
     priskribo_text = _tasklib.normalize_markdown_links(priskribo).strip()
+    _tasklib.auto_create_semantic_link_etikedoj(titolo_text)
+    _tasklib.auto_create_semantic_link_etikedoj(priskribo_text)
     try:
         tempo_iso = _parse_tempo(tempo)
     except ValueError as exc:
@@ -452,6 +454,10 @@ def modifi(
         if priskribo is not None
         else str(item.get("priskribo") or "")
     )
+    if titolo is not None:
+        _tasklib.auto_create_semantic_link_etikedoj(new_titolo)
+    if priskribo is not None:
+        _tasklib.auto_create_semantic_link_etikedoj(new_priskribo)
     if tempo is None:
         new_tempo = str(item.get("tempo") or "")
     else:

@@ -288,7 +288,10 @@ def eksporti(
         "7z",
         "-f",
         "--formato",
-        help="Archive format: '7z' (default) or 'zip'.",
+        help=(
+            "Archive format. Valid values: 7z (default, smaller/compressed), zip (more portable). "
+            "Example: --formato zip"
+        ),
     ),
 ) -> None:
     """Export all autish user data as an encrypted archive."""

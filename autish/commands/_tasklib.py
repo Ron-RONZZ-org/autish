@@ -196,6 +196,47 @@ def normalize_markdown_links(text: str) -> str:
     return _MARKDOWN_LINK_RE.sub(_replace, raw_text)
 
 
+def auto_create_semantic_link_etikedoj(text: str) -> None:
+    """Auto-create etikedo entries for semantic links [label](ec#uuid)."""
+    raw_text = str(text or "")
+    if not raw_text:
+        return
+    
+    matches = _MARKDOWN_LINK_RE.finditer(raw_text)
+    con = connect()
+    try:
+        for match in matches:
+            label = match.group(1).strip()
+            target = match.group(2).strip()
+            lower_target = target.casefold()
+            
+            if not (lower_target.startswith("ec#") or lower_target.startswith("vt#")):
+                continue
+            
+            canonical = _canonicalize_internal_ref(target)
+            etikedo_text = (
+                f"[{label}]({canonical})" if label else canonical
+            )
+            folded = fold_search_text(etikedo_text)
+            
+            existing = con.execute(
+                "SELECT uuid FROM etikedo WHERE teksto_norm = ?",
+                (folded,),
+            ).fetchone()
+            if not existing:
+                uid = new_uuid()
+                now = now_iso()
+                con.execute(
+                    "INSERT INTO etikedo "
+                    "(uuid, teksto, teksto_norm, kreita_je, modifita_je) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (uid, etikedo_text, folded, now, now),
+                )
+        con.commit()
+    finally:
+        con.close()
+
+
 def _render_internal_link_plain(label: str, target: str, *, show_ref: bool) -> str:
     token = _canonicalize_internal_ref(target)
     lower = token.casefold()
@@ -387,32 +428,72 @@ def resolve_etikedo_refs(
     references: list[str] | None,
     *,
     interactive: bool = True,
+    prompt_on_missing: bool = False,
 ) -> list[str]:
     refs = [
         str(ref or "").strip() for ref in (references or []) if str(ref or "").strip()
     ]
     if not refs:
         return []
-    with connect() as con:
-        labels = list_etikedoj(con)
     resolved: list[str] = []
     seen: set[str] = set()
     for ref in refs:
-        target = resolve_reference(
-            labels,
-            ref,
-            text_getter=lambda item: str(item.get("teksto") or ""),
-            kind_label="etikedo",
-            allow_fuzzy=True,
-            interactive=interactive,
-        )
-        if target is None:
-            typer.echo(f"Etikedo ne trovita: {ref!r}", err=True)
-            raise typer.Exit(1)
-        uid = str(target.get("uuid") or "")
-        if uid and uid not in seen:
-            seen.add(uid)
-            resolved.append(uid)
+        with connect() as con:
+            labels = list_etikedoj(con)
+            target = resolve_reference(
+                labels,
+                ref,
+                text_getter=lambda item: str(item.get("teksto") or ""),
+                kind_label="etikedo",
+                allow_fuzzy=True,
+                interactive=interactive,
+            )
+            if target is None:
+                if prompt_on_missing and interactive:
+                    answer = typer.prompt(
+                        f"Etikedo ne trovita: {ref!r}. Ĉu aldoni novan? (j/N)",
+                        default="N",
+                    )
+                    if answer.strip().lower() == "j":
+                        normalized = normalize_markdown_links(ref).strip()
+                        if not normalized:
+                            typer.echo("Malplena etikedo ne permesata.", err=True)
+                            raise typer.Exit(1)
+                        folded = fold_search_text(normalized)
+                        existing = con.execute(
+                            "SELECT uuid FROM etikedo WHERE teksto_norm = ?",
+                            (folded,),
+                        ).fetchone()
+                        if existing:
+                            uid = str(existing["uuid"])
+                        else:
+                            uid = new_uuid()
+                            now = now_iso()
+                            con.execute(
+                                "INSERT INTO etikedo "
+                                "(uuid, teksto, teksto_norm, kreita_je, modifita_je) "
+                                "VALUES (?, ?, ?, ?, ?)",
+                                (uid, normalized, folded, now, now),
+                            )
+                            con.commit()
+                            rendered = render_markdown_links_plain(
+                                normalized, show_ref=True
+                            )
+                            typer.echo(f"Aldonis etikedon: {rendered}")
+                        if uid not in seen:
+                            seen.add(uid)
+                            resolved.append(uid)
+                    else:
+                        typer.echo(f"Etikedo ne trovita: {ref!r}", err=True)
+                        raise typer.Exit(1)
+                else:
+                    typer.echo(f"Etikedo ne trovita: {ref!r}", err=True)
+                    raise typer.Exit(1)
+            else:
+                uid = str(target.get("uuid") or "")
+                if uid and uid not in seen:
+                    seen.add(uid)
+                    resolved.append(uid)
     return resolved
 
 
