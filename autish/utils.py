@@ -258,3 +258,165 @@ def filter_entries_by_text(
     scored.sort(key=lambda item: item[0], reverse=True)
     return [entry for _, entry in scored[:limit]]
 
+
+def markdown_to_html(markdown_text: str, title: str = "") -> str:
+    """Convert markdown to HTML with syntax highlighting.
+    
+    Args:
+        markdown_text: Markdown content to convert
+        title: Optional title for the HTML document
+    
+    Returns:
+        Complete HTML document string
+    """
+    import markdown
+    from pygments.formatters import HtmlFormatter
+    
+    # Configure markdown with extensions for code highlighting
+    md = markdown.Markdown(
+        extensions=[
+            "fenced_code",
+            "codehilite",
+            "tables",
+            "toc",
+            "nl2br",
+        ],
+        extension_configs={
+            "codehilite": {
+                "use_pygments": True,
+                "css_class": "highlight",
+            }
+        }
+    )
+    
+    # Convert markdown to HTML
+    html_body = md.convert(markdown_text)
+    
+    # Get Pygments CSS for styling
+    formatter = HtmlFormatter(style="monokai", full=False)
+    pygments_css = formatter.get_style_defs(".highlight")
+    
+    # Wrap in complete HTML document
+    html_doc = f"""<!DOCTYPE html>
+<html lang="eo">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title or "Dokumentaro"}</title>
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f5f5f5;
+            padding: 2rem;
+        }}
+        
+        main {{
+            max-width: 900px;
+            margin: 0 auto;
+            background-color: #fff;
+            padding: 2rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+        
+        h1, h2, h3, h4, h5, h6 {{
+            margin-top: 1.5rem;
+            margin-bottom: 0.5rem;
+            color: #2c3e50;
+            font-weight: 600;
+        }}
+        
+        h1 {{ font-size: 2em; border-bottom: 2px solid #3498db; padding-bottom: 0.3em; }}
+        h2 {{ font-size: 1.5em; }}
+        h3 {{ font-size: 1.25em; }}
+        
+        p {{
+            margin-bottom: 1em;
+        }}
+        
+        a {{
+            color: #3498db;
+            text-decoration: none;
+        }}
+        
+        a:hover {{
+            text-decoration: underline;
+        }}
+        
+        code {{
+            font-family: "Courier New", monospace;
+            background-color: #f0f0f0;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }}
+        
+        pre {{
+            margin: 1em 0;
+            overflow-x: auto;
+            border-radius: 4px;
+        }}
+        
+        pre code {{
+            background-color: transparent;
+            padding: 0;
+            font-size: 0.9em;
+        }}
+        
+        blockquote {{
+            border-left: 4px solid #3498db;
+            padding-left: 1em;
+            margin: 1em 0;
+            color: #666;
+            font-style: italic;
+        }}
+        
+        table {{
+            border-collapse: collapse;
+            width: 100%;
+            margin: 1em 0;
+        }}
+        
+        table th {{
+            background-color: #34495e;
+            color: white;
+            padding: 0.75em;
+            text-align: left;
+        }}
+        
+        table td {{
+            border: 1px solid #ddd;
+            padding: 0.75em;
+        }}
+        
+        table tr:nth-child(even) {{
+            background-color: #f9f9f9;
+        }}
+        
+        ul, ol {{
+            margin: 1em 0 1em 2em;
+        }}
+        
+        li {{
+            margin-bottom: 0.5em;
+        }}
+        
+        {pygments_css}
+    </style>
+</head>
+<body>
+    <main>
+        {html_body}
+    </main>
+</body>
+</html>"""
+    
+    return html_doc

@@ -1,13 +1,13 @@
-"""man — documentation management microapp.
+"""doc — documentation management microapp.
 
 Usage:
-    man aldoni <file.md>        — add a new manual from a .md file
-    man vidi <UUID>             — view a manual entry
-    man modifi <UUID>           — edit a manual entry
-    man forigi <UUID>           — delete a manual entry
-    man serci <term>            — search manuals (title by default)
+    doc aldoni <file.md>        — add a new manual from a .md file
+    doc vidi <UUID>             — view a manual entry
+    doc modifi <UUID>           — edit a manual entry
+    doc forigi <UUID>           — delete a manual entry
+    doc serci <term>            — search manuals (title by default)
 
-Data is stored in an SQLite database at ~/.local/share/autish/man.db.
+Data is stored in an SQLite database at ~/.local/share/autish/doc.db.
 Manuals can be linked to encik entries with -L/--ligilo option.
 """
 
@@ -26,8 +26,8 @@ from rich.markdown import Markdown
 
 from autish.commands.uzanto import _load_profile
 from autish.utils import (
-    fold_search_text,
     fuzzy_match_ignore_whitespace,
+    markdown_to_html,
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -35,8 +35,8 @@ from autish.utils import (
 # ──────────────────────────────────────────────────────────────────────────────
 
 app = typer.Typer(
-    name="man",
-    help="Man — dokumentaro-mastruma mikroapo.",
+    name="doc",
+    help="Doc — dokumentaro-mastruma mikroapo.",
     no_args_is_help=False,
     invoke_without_command=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
@@ -49,7 +49,7 @@ console = Console()
 # ──────────────────────────────────────────────────────────────────────────────
 
 _DATA_DIR: Path = Path.home() / ".local" / "share" / "autish"
-_DB_FILE: Path = _DATA_DIR / "man.db"
+_DB_FILE: Path = _DATA_DIR / "doc.db"
 _ENCIK_DB_FILE: Path = _DATA_DIR / "encik.db"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -249,7 +249,7 @@ def aldoni(
         ...,
         help=(
             "Vojo al .md dosiero.\n"
-            "Ekzemplo: man aldoni ./manlibro/suno.md"
+            "Ekzemplo: doc aldoni ./manlibro/suno.md"
         ),
     ),
     ligilo: str | None = typer.Option(
@@ -337,15 +337,52 @@ def vidi(
         None,
         help=(
             "UUID, #UUID, aŭ titolo de la manlibro.\n"
-            'Ekzemplo: man vidi "#e0a5d3b7"'
+            'Ekzemplo: doc vidi "#e0a5d3b7"'
+        ),
+    ),
+    html: bool = typer.Option(
+        False,
+        "--html",
+        "-h",
+        help=(
+            "Malfermi en defaŭlta retumilo kun HTML-a rendera.\n"
+            'Ekzemplo: doc vidi "#abc" --html'
+        ),
+    ),
+    markmap: bool = typer.Option(
+        False,
+        "--markmap",
+        "-mm",
+        help=(
+            "Malfermi kiel markmap-a diagramo.\n"
+            'Ekzemplo: doc vidi "#abc" --markmap'
+        ),
+    ),
+    pager: bool | None = typer.Option(
+        None,
+        "--pager",
+        "-p",
+        help=(
+            "Uzis 'less' pagilo por vidado (aŭtomate en terminaloj).\n"
+            'Ekzemplo: doc vidi "#abc" --pager'
         ),
     ),
 ) -> None:
     """Montri unu manualan nodon."""
+    import sys
+    
     if not ref:
         typer.echo(
             "Mankas argumento REF. Se vi uzas UUID kun #, citu ĝin:\n"
-            '  man vidi "#e0a5d3b7"',
+            '  doc vidi "#e0a5d3b7"',
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    # Check for conflicting options
+    if (html or markmap) and pager is False:
+        typer.echo(
+            "Eraro: --html kaj --markmap ne povas esti uzataj kun --pager=false",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -355,6 +392,28 @@ def vidi(
         typer.echo(f"Manlibro ne trovita: {ref!r}", err=True)
         raise typer.Exit(code=1)
 
+    # Handle HTML display option
+    if html:
+        _display_as_html(entry)
+        return
+
+    # Handle Markmap display option
+    if markmap:
+        _display_as_markmap(entry)
+        return
+
+    # Default: determine pager based on whether stdout is a terminal
+    # If pager is explicitly set, use that; otherwise auto-detect
+    use_pager = pager if pager is not None else sys.stdout.isatty()
+    
+    if use_pager:
+        _display_in_pager(entry)
+    else:
+        _display_in_console(entry)
+
+
+def _display_in_console(entry: dict) -> None:
+    """Display entry directly in console without pager."""
     console.clear()
     
     # Display title and UUID
@@ -396,13 +455,134 @@ def vidi(
     )
 
 
+def _display_in_pager(entry: dict) -> None:
+    """Display entry in less pager."""
+    # Build formatted text content
+    short_uuid = str(entry["uuid"])[:8]
+    content = f"{entry['titolo']} #{short_uuid}\n\n"
+
+    # Add linked encik entry if exists
+    if entry.get("encik_uuid"):
+        try:
+            conn = sqlite3.connect(_ENCIK_DB_FILE)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT uuid, titolo FROM encik WHERE uuid = ?",
+                (entry["encik_uuid"],),
+            )
+            encik_row = cursor.fetchone()
+            if encik_row:
+                encik_short = str(encik_row["uuid"])[:8]
+                content += f"Ligita al encik: {encik_row['titolo']} #{encik_short}\n\n"
+            conn.close()
+        except (sqlite3.Error, TypeError):
+            pass
+
+    content += entry["enhavo"]
+    content += f"\n\nKreita: {entry['kreita_je']} | Modifita: {entry['modifita_je']}"
+
+    # Use less pager
+    try:
+        pager_cmd = ["less", "-R"]
+        subprocess.run(pager_cmd, input=content.encode(), check=False)
+    except FileNotFoundError:
+        typer.echo("Eraro: 'less' pagilo ne trovita", err=True)
+        _display_in_console(entry)
+
+
+def _display_as_html(entry: dict) -> None:
+    """Render and display entry as HTML in default browser."""
+    import webbrowser
+    
+    # Generate HTML
+    html_content = markdown_to_html(entry["enhavo"], title=entry["titolo"])
+
+    # Write to temporary file
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".html", delete=False, encoding="utf-8"
+    ) as f:
+        f.write(html_content)
+        temp_path = f.name
+
+    try:
+        # Open in default browser
+        webbrowser.open(f"file://{temp_path}")
+        typer.echo(f"[dim]Malferma en retumilo: {temp_path}[/]")
+    except Exception as e:
+        typer.echo(f"Eraro dum malfermo: {e}", err=True)
+        raise typer.Exit(code=1) from None
+
+
+def _display_as_markmap(entry: dict) -> None:
+    """Render and display entry as markmap diagram in browser."""
+    import webbrowser
+    
+    title = entry["titolo"]
+    markdown_content = entry["enhavo"]
+
+    # Generate markmap HTML (CDN-based)
+    html_content = f"""<!DOCTYPE html>
+<html lang="eo">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Markmap — {title}</title>
+    <script src="https://cdn.jsdelivr.net/npm/markmap-autoloader"></script>
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+        }}
+        html, body {{
+            width: 100%;
+            height: 100%;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                Roboto, "Helvetica Neue", Arial, sans-serif;
+        }}
+        svg {{
+            display: block;
+            width: 100%;
+            height: 100%;
+        }}
+    </style>
+</head>
+<body>
+    <div id="app"></div>
+    <textarea id="content" style="display: none;">
+{markdown_content}
+    </textarea>
+    <script>
+        const content = document.getElementById("content").textContent;
+        const element = document.getElementById("app");
+        markmap.autoLoader.renderContent(content, element);
+    </script>
+</body>
+</html>"""
+
+    # Write to temporary file
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".html", delete=False, encoding="utf-8"
+    ) as f:
+        f.write(html_content)
+        temp_path = f.name
+
+    try:
+        # Open in default browser
+        webbrowser.open(f"file://{temp_path}")
+        typer.echo(f"[dim]Markmap malferme: {temp_path}[/]")
+    except Exception as e:
+        typer.echo(f"Eraro dum malfermo: {e}", err=True)
+        raise typer.Exit(code=1) from None
+
+
 @app.command("modifi")
 def modifi(
     ref: str = typer.Argument(
         ...,
         help=(
             "UUID, #UUID, aŭ titolo de la manlibro por modifi.\n"
-            'Ekzemplo: man modifi "#e0a5d3b7"'
+            'Ekzemplo: doc modifi "#e0a5d3b7"'
         ),
     ),
     vidi_poste: bool = typer.Option(
@@ -479,7 +659,7 @@ def forigi(
         ...,
         help=(
             "UUID, #UUID, aŭ titolo de la manlibro por forigi.\n"
-            'Ekzemplo: man forigi "#e0a5d3b7"'
+            'Ekzemplo: doc forigi "#e0a5d3b7"'
         ),
     ),
 ) -> None:
@@ -518,7 +698,7 @@ def serci(
         None,
         help=(
             "Serĉ-termo.\n"
-            "Ekzemplo: man serci fiziko"
+            "Ekzemplo: doc serci fiziko"
         ),
     ),
     teksto: bool = typer.Option(
@@ -538,7 +718,7 @@ def serci(
     if not demando:
         typer.echo(
             "Mankas serĉ-termo.\n"
-            "Ekzemplo: man serci fiziko",
+            "Ekzemplo: doc serci fiziko",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -572,8 +752,10 @@ def serci(
         for entry in all_results:
             if teksto:
                 # Search in both title and content
-                if folded_query in utils_fold(entry["titolo"]) or folded_query in utils_fold(entry["enhavo"]):
-                    substring_matches.append((1.0, entry))  # Give highest score to exact matches
+                title_has_match = folded_query in utils_fold(entry["titolo"])
+                content_has_match = folded_query in utils_fold(entry["enhavo"])
+                if title_has_match or content_has_match:
+                    substring_matches.append((1.0, entry))
             else:
                 # Search title only
                 if folded_query in utils_fold(entry["titolo"]):
@@ -587,13 +769,20 @@ def serci(
             for entry in all_results:
                 if teksto:
                     # Search in both title and content
-                    title_score = fuzzy_match_ignore_whitespace(demando, entry["titolo"], threshold=0.5)
-                    content_score = fuzzy_match_ignore_whitespace(demando, entry["enhavo"], threshold=0.5)
+                    title_score = fuzzy_match_ignore_whitespace(
+                        demando, entry["titolo"], threshold=0.5
+                    )
+                    content_score = fuzzy_match_ignore_whitespace(
+                        demando, entry["enhavo"], threshold=0.5
+                    )
                     if title_score is not None or content_score is not None:
-                        results.append((max(title_score or 0, content_score or 0), entry))
+                        max_score = max(title_score or 0, content_score or 0)
+                        results.append((max_score, entry))
                 else:
                     # Search title only
-                    score = fuzzy_match_ignore_whitespace(demando, entry["titolo"], threshold=0.5)
+                    score = fuzzy_match_ignore_whitespace(
+                        demando, entry["titolo"], threshold=0.5
+                    )
                     if score is not None:
                         results.append((score, entry))
 
@@ -620,7 +809,10 @@ def serci(
             choice = "1"
         else:
             console.print("")
-            choice = typer.prompt(f"Elektu (1-{len(sorted_entries)}) aŭ <Enteri> por eliri")
+            num_entries = len(sorted_entries)
+            choice = typer.prompt(
+                f"Elektu (1-{num_entries}) aŭ <Enteri> por eliri"
+            )
 
         if choice.strip():
             try:

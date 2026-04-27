@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from autish.commands.man import (
+from autish.commands.doc import (
     app,
     _DB_FILE,
     _ensure_db,
@@ -29,7 +29,7 @@ def cleanup_db():
         _DB_FILE.unlink()
 
 
-def test_man_help():
+def test_doc_help():
     """Test man command help."""
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0

@@ -51,9 +51,9 @@ from autish.services.ai_common import build_verki_service, load_ai_context
 from autish.services.verki import VerkiRequest, VerkiServiceError
 from autish.utils import fuzzy_match_ignore_whitespace
 
-# Import man helper for displaying manlibro(j) in encik vidi
+# Import doc helper for displaying manlibro(j) in encik vidi
 try:
-    from autish.commands.man import get_manuals_for_encik
+    from autish.commands.doc import get_manuals_for_encik
 except ImportError:
     def get_manuals_for_encik(encik_uuid: str) -> list[dict[str, str]]:  # type: ignore[no-redef]
         return []

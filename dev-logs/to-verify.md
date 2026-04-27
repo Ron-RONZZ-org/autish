@@ -74,98 +74,6 @@
  - `serci`
    - fuzzy text based match logic and user selection for `vidi` similar to `encik`
 
-# feature enhancements
-
-# bug fixes
-
-## code quality issue: potential code duplication
-
-- multiple autish commands involve markdown parsing, sqlite db management and user edition interface
-  - fix potential code duplication !
-
-## aliases
-
-- short aliases of 1-3 letters for options is extremely important for user comfort
-- add them where missing
-  - e.g., `sistemo bash alias`
-- Update `copilot-instructions.md` and your memory to save this behaviour as default in this repo
-
-- (autish-py3.12) rongzhou@libres:~/kodo/autish/AI-kuntekstoj$ sistemo bash aldoni --alias ess --function "encik serci -sk" --notes "encik"
-[!] Alias 'ess' jam ekzistas
-  - which is not true ! fix it.
-
-# bug fixes
-
-## `sistemo bash`
-
-- (critical) bash alias do not work for `autish` commands in poetry virtual environment: must FIX !
-- should be renamed `sistemo bash-alias` for clarity
-- `forigi` need to take multiple UIDs
-
-# bug fixes
-
-1. bash alias still not working
-```
-(autish-py3.12) rongzhou@libres:~/kodo/autish/AI-kuntekstoj$ sistemo bash-alias ls
-                             Bash-alias-oj                              
-┏━━━━━┳━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ UID ┃ Alias ┃ Funkcio (unuaj 50 ĉaroj) ┃ Notoj (unuaj 40 ĉaroj)      ┃
-┡━━━━━╇━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-│ 8   │ ess   │ autish encik serci -sk   │ Encik search
-
-(autish-py3.12) rongzhou@libres:~/kodo/autish$ sistemo install
-[i] autish jam instalita ĉe /home/rongzhou/.local/bin/autish
-(autish-py3.12) rongzhou@libres:~/kodo/autish$ ess
-La commande « ess » n'a pas été trouvée, voulez-vous dire :
-```
-
-2. `disko sano` not working
-```
-(autish-py3.12) rongzhou@libres:~/kodo/autish$ autish disko sano sda
-Kontrolante sanon de /dev/sda...
-(Bezonas sudo rajtojn)
-
-Eraro: Ne povis legi SMART informojn.
-```
-
-# feature enhancements
-
-- add commands to disko to manage partitions: shrink partition, create new, format
-  - change summary and `j/N`confirmation for all system modifications
-  - throw error on bad usage: e.g., formatting disk where the current OS is installed
-
-# new: utility functions to enhance Linux system experience
-
-## `rubo` working with system recycle bin
-
-- `rubo forigi {path}*`
-  - move specified files to recycle bin
-  - alias: `rubo rm`
-- `rubo ls`
-  - list recycle bin contents
-- `rubo serci {keyword}`
-  - search in recycle bin
-    - wildcard `*` support
-  - `-R/--regex`: basic POSIX regex support
-- `rubo restarigi {path}*`
-  - restore files from recycle bin
-  - alias: `rubo rs`
-
-# Bug fixes
-
-- commands should follow autish naming conventions: STRICT ESPERANTO KEYWORDs !
-  - `disko shrink`> `disko srumpi`
-  - `disko format`> `disko formati`
-  - save old commands as alias for compatibility
-
-# enhancements
-
-- `serci`
-  - should be centralised to a common helper function
-  - fuzzy match enhancement: ignore spaces, punctuations etc. in match strategy
-- system wide alias
-   - add alias for all autish commands to `~/.autish_aliases`
-     - filmeto="autish filmeto", etc.
 # new command: `autish man`
 
  - full markdown parsing in all TEXT fields
@@ -185,4 +93,66 @@ Eraro: Ne povis legi SMART informojn.
    - fuzzy match logic and user selection similar to `encik`
 
 
+- `serci`
+  - fuzzy match enhancement: ignore spaces, punctuations etc. in match strategy
+  - e.g, `AI,` as search term should match for `AI` without problem and vice versa
 
+  - `vidi`
+    - new options
+      - `--html/-h`: open in default browser
+      - `--markmap/-mm`: open as [markmap](https://markmap.js.org/docs/packages--markmap-autoloader)
+    - change default: open in `less` pager
+  - entry title shown in linked `encik` file should be href opening in default browser
+
+- `encik|man vidi --html`
+  - should add code syntax highlighting
+
+- `rubo`
+  - `ls` saying `rikirejon estas malplena.` while there are many files in system `trash:///`
+    - `rubo` should use system recycle bin
+  - converge lines of `forigi` and `rm` in `rubo -h` into one line. `forigi|rm ...`
+    - Update `copilot-instructions.md` and your memory to save this behaviour as default in this repo: `-h` > `command | alias explanation`
+
+- `disko` bug
+
+```
+rongzhou@libres:~/kodo/autish/dev-logs$ disko ls
+┏━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━┳━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Nomo   ┃ Tipo     ┃ Loko      ┃ Grandeco ┃   Spaco ┃ Dosiersistemo ┃ RM ┃ RO ┃ Modelo                 ┃
+┡━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━╇━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━┩
+│ sda    │ disko    │           │  238.5GB │         │               │ 0  │ 0  │ Micron 1100 SATA 256GB │
+│   sda1 │ subdisko │ /boot/efi │  512.0MB │ 504.8MB │ vfat          │ 0  │ 0  │                        │
+│   sda2 │ subdisko │ /         │  238.0GB │ 174.1GB │ ext4          │ 0  │ 0  │                        │
+└────────┴──────────┴───────────┴──────────┴─────────┴───────────────┴────┴────┴────────────────────────┘
+rongzhou@libres:~/kodo/autish/dev-logs$ disko sano sda1
+Kontrolante sanon de /dev/sda1...
+
+[sudo] pasvorto por rongzhou:          
+Eraro: Nescio dum legado de SMART-informoj.
+
+rongzhou@libres:~/kodo/autish/dev-logs$ disko sano sda
+Kontrolante sanon de /dev/sda...
+
+Eraro: Nescio dum legado de SMART-informoj.
+
+rongzhou@libres:~/kodo/autish/dev-logs$ disko sano sda2
+Kontrolante sanon de /dev/sda2...
+
+Eraro: Nescio dum legado de SMART-informoj.
+```
+
+## bug fix
+
+- `man`
+
+  - rename `man` as `doc`
+    - `man` is a common linux system command. having an autish command `man` causes conflict and confusion.
+
+## enhancement
+
+ - doc vidi --html display option
+   - if no common `md` > `html` render function present, create one to be shared across `vorto,encik,doc,md`
+   - add syntax highlighting for HTML output
+ - doc vidi --markmap option (requires markmap integration)
+   - create reusable helper function
+ - Default less pager for doc vidi
