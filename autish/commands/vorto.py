@@ -2317,6 +2317,88 @@ def modifi(
         _copy_entry_reference(entry, semantika=semantika_kopii)
 
 
+def _search_entries_optimized(
+    *,
+    lingvo: str | None = None,
+    tipo: str | None = None,
+    temo: str | None = None,
+    tono: str | None = None,
+    autoro: str | None = None,
+    verko: str | None = None,
+    nivelo_min: float | None = None,
+    nivelo_max: float | None = None,
+    dato_de: str | None = None,
+    dato_gis: str | None = None,
+    limo: int = 1000,
+) -> list[dict]:
+    """Load entries using SQL filters for efficiency."""
+    conn = _get_db()
+    try:
+        where_clauses = []
+        params = []
+        
+        if lingvo is not None:
+            where_clauses.append("lingvo = ?")
+            params.append(lingvo)
+        if tono is not None:
+            where_clauses.append("tono = ?")
+            params.append(_normalize_tono(tono))
+        if nivelo_min is not None:
+            where_clauses.append("(nivelo >= ? OR nivelo IS NULL)")
+            params.append(nivelo_min)
+        if nivelo_max is not None:
+            where_clauses.append("(nivelo <= ? OR nivelo IS NULL)")
+            params.append(nivelo_max)
+        if dato_de is not None:
+            where_clauses.append("kreita_je >= ?")
+            params.append(dato_de)
+        if dato_gis is not None:
+            end = dato_gis + "T23:59:59"
+            where_clauses.append("kreita_je <= ?")
+            params.append(end)
+        
+        where_sql = ""
+        if where_clauses:
+            where_sql = " WHERE " + " AND ".join(where_clauses)
+        
+        sql = f"SELECT * FROM vorto{where_sql} LIMIT ?"
+        params.append(limo)
+        
+        rows = conn.execute(sql, params).fetchall()
+        entries = [_row_to_dict(row) for row in rows]
+        
+        if temo is not None:
+            low_temo = temo.lower()
+            entries = [e for e in entries if low_temo in (e.get("temo") or "").lower()]
+        
+        if autoro is not None:
+            low_autoro = autoro.lower()
+            entries = [e for e in entries if low_autoro in (e.get("autoro") or "").lower()]
+        
+        if verko is not None:
+            low_verko = verko.lower()
+            entries = [e for e in entries if low_verko in (e.get("verko") or "").lower()]
+        
+        if tipo is not None:
+            norm = _normalize_tipo(tipo)
+            if norm:
+                entries = [
+                    e
+                    for e in entries
+                    if (
+                        (
+                            isinstance(e.get("tipo"), list)
+                            and any(t in e.get("tipo") for t in norm)
+                        )
+                        or e.get("kategorio") in norm
+                    )
+                ]
+        
+        return entries
+    finally:
+        conn.close()
+
+
 @app.command(
     "serci",
     help=tr(
