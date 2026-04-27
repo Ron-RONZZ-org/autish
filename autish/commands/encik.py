@@ -117,6 +117,19 @@ CREATE INDEX IF NOT EXISTS idx_encik_uuid_prefix ON encik(substr(uuid, 1, 8));
 CREATE INDEX IF NOT EXISTS idx_encik_kreita_je ON encik(kreita_je);
 """
 
+_CREATE_ENCIK_FTS = """
+CREATE VIRTUAL TABLE IF NOT EXISTS encik_fts USING fts5(
+    uuid UNINDEXED,
+    titolo,
+    terminologio,
+    difinio,
+    difinoj,
+    enhavo,
+    content=encik,
+    content_rowid=rowid
+);
+"""
+
 _ISO_690_TIPOJ: dict[str, str] = {
     "lib": "libroj",
     "art": "artikoloj",
@@ -586,6 +599,7 @@ def _init_db() -> None:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(_CREATE_ENCIK)
         conn.executescript(_CREATE_ENCIK_INDEXES)
+        conn.execute(_CREATE_ENCIK_FTS)
         _migrate_db(conn)
         conn.commit()
     finally:
