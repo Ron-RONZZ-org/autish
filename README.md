@@ -216,6 +216,18 @@ poetry build
 
 ---
 
+## Documentation
+
+### Command Reference
+
+Complete documentation for all 22 autish commands is available in the [Manual Pages](docs/man/INDEX.md) directory:
+
+- View all commands: [docs/man/INDEX.md](docs/man/INDEX.md)
+- Query-specific command help with: `autish {command} --help`
+- Example: `autish vorto --help` for personal wordbank documentation
+
+---
+
 ## Quick Start
 
 ```bash
