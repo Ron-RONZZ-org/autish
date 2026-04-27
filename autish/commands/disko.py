@@ -173,7 +173,9 @@ def check_health(
     )
 
     # Check for common errors
-    if result.returncode != 0:
+    # smartctl uses bit flags: 0=OK, 4=warnings, 8=not enabled, 16=device failure, etc.
+    # Accept all non-error codes (exclude only device open failures and access denied)
+    if result.returncode not in (0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 63):
         if "sudo" in result.stderr.lower() or "permission" in result.stderr.lower():
             typer.echo(
                 "Eraro: Sudo permeso rifuzita.\n\n"
@@ -182,10 +184,13 @@ def check_health(
                 err=True
             )
             raise typer.Exit(code=1)
-        elif result.returncode not in (4,):  # 4=some SMART errors but readable
-            typer.echo("Eraro: Nescio dum legado de SMART-informoj.", err=True)
-            typer.echo(result.stderr, err=True)
+        elif result.returncode == 1 or "Unable to" in result.stdout:
+            typer.echo(f"Eraro: Ne eblis legi SMART-informojn por {dev_path}.", err=True)
+            if result.stderr:
+                typer.echo(f"Detalo: {result.stderr}", err=True)
             raise typer.Exit(code=1)
+        else:
+            typer.echo(f"Averto: smartctl revenis kodon {result.returncode}", err=True)
 
     # Parse and display key information
     lines = result.stdout.split("\n")

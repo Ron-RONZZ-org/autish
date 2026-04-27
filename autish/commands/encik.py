@@ -49,6 +49,14 @@ from rich.table import Table
 from autish.commands.uzanto import _load_profile
 from autish.services.ai_common import build_verki_service, load_ai_context
 from autish.services.verki import VerkiRequest, VerkiServiceError
+from autish.utils import fuzzy_match_ignore_whitespace
+
+# Import man helper for displaying manlibro(j) in encik vidi
+try:
+    from autish.commands.man import get_manuals_for_encik
+except ImportError:
+    def get_manuals_for_encik(encik_uuid: str) -> list[dict[str, str]]:  # type: ignore[no-redef]
+        return []
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -3604,6 +3612,16 @@ def _display_entry(
             rows = payload.get("datumo") if isinstance(payload, dict) else None
             row_count = len(rows) if isinstance(rows, list) else 0
             panel_lines.append(f"    {ds_name}: {row_count} vico(j)")
+
+    # Display linked manuals (manlibro(j))
+    manuals = get_manuals_for_encik(entry["uuid"])
+    if manuals:
+        manlibro_label = "manlibro(j):" if len(manuals) == 1 else "manlibro(j):"
+        panel_lines.append(f"  [dim]{manlibro_label:<14}[/dim]")
+        for manual in manuals:
+            manual_uuid = str(manual.get("uuid", ""))[:8]
+            manual_title = str(manual.get("titolo", ""))
+            panel_lines.append(f"    {manual_title}  [dim]#{manual_uuid}[/dim]")
 
     if montri_cxion:
         kj = entry.get("kreita_je", "")[:10]

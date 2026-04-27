@@ -11,6 +11,7 @@ from autish.commands import (
     kalendaro,
     kontakto,
     kp,
+    man,
     md,
     retposto,
     rubo,
@@ -56,6 +57,7 @@ app.add_typer(sekurkopio.app, name="sekurkopio")
 app.add_typer(uzanto.app, name="uzanto")
 app.add_typer(verki.app, name="verki")
 app.add_typer(md.app, name="md")
+app.add_typer(man.app, name="man")
 app.add_typer(encik.app, name="encik")
 app.add_typer(kalendaro.app, name="kalendaro")
 app.add_typer(disko.app, name="disko")

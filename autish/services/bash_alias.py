@@ -328,7 +328,7 @@ class BashAliasDB:
         """Generate shell script with all aliases for sourcing.
 
         Returns:
-            Bash script content with all aliases defined.
+            Bash script content with all aliases defined as functions.
         """
         aliases = self.list_aliases(sort_by="created_at", descending=False)
         lines = [
@@ -341,9 +341,8 @@ class BashAliasDB:
         for alias_obj in aliases:
             # Normalize autish commands to use 'autish' prefix
             normalized_func = self._normalize_autish_command(alias_obj.function)
-            # Escape function for shell safety
-            escaped_func = normalized_func.replace("'", "'\\''")
-            lines.append(f"alias {alias_obj.alias}='{escaped_func}'")
+            # Create shell function instead of alias for better portability
+            lines.append(f"{alias_obj.alias}() {{ {normalized_func} \"$@\"; }}")
 
         lines.append("")
         return "\n".join(lines)

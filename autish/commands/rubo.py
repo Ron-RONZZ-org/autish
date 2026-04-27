@@ -1,12 +1,13 @@
 """rubo — Linux recycle bin management command."""
 
+from datetime import datetime
 from pathlib import Path
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from autish.services.recycle_bin import RecycleBinDB
+from autish.services.recycle_bin import RecycleBinDB, TrashItem
 
 app = typer.Typer(
     name="rubo",
@@ -119,6 +120,30 @@ def list_trash(
     """Listigi dosierojn en la rikirejon."""
     db = RecycleBinDB()
     items = db.list_items()
+    
+    # Also check the physical trash directory for any files not in database
+    trash_files_dir = db.trash_dir / "files"
+    if trash_files_dir.exists():
+        # Get files from database (keyed by trash_path)
+        db_paths = {item.trash_path for item in items}
+        
+        # Add any physical files not in database
+        for trash_file in trash_files_dir.iterdir():
+            if trash_file.name not in db_paths:
+                try:
+                    size = trash_file.stat().st_size if trash_file.is_file() else 0
+                    # Estimate deleted time from file creation time
+                    deleted_at = datetime.fromtimestamp(trash_file.stat().st_mtime).isoformat()
+                    item = TrashItem(
+                        uid=str(len(items) + 1),
+                        original_path=trash_file.name,
+                        trash_path=str(trash_file),
+                        deleted_at=deleted_at,
+                        size=size
+                    )
+                    items.append(item)
+                except (OSError, ValueError):
+                    continue
     
     if not items:
         typer.echo("[i] La rikirejon estas malplena.")

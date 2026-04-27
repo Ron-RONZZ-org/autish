@@ -213,8 +213,8 @@ class TestBashAliasDB:
 
         script = db.generate_shell_script()
         assert "#!/bin/bash" in script
-        assert "alias ll='ls -lah'" in script
-        assert "alias la='ls -la'" in script
+        assert 'll() { ls -lah "$@"; }' in script
+        assert 'la() { ls -la "$@"; }' in script
 
     def test_sync_shell_config_creates_file(self, tmp_path: Path) -> None:
         """Syncing writes shell config file to disk."""
@@ -248,7 +248,7 @@ class TestBashAliasDB:
         db.add_alias("quoted", "echo 'hello world'")
 
         script = db.generate_shell_script()
-        assert "alias quoted='echo '\\''hello world'\\'''" in script
+        assert "quoted() { echo 'hello world' \"$@\"; }" in script
 
 
 class TestBashAliasCommands:

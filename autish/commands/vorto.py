@@ -38,6 +38,7 @@ from rich.table import Table
 from rich.text import Text
 
 from autish.i18n import tr
+from autish.utils import fuzzy_match_ignore_whitespace
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Typer app
@@ -2623,13 +2624,34 @@ def serci(
                 raise typer.Exit(code=1) from exc
             results = [e for e in results if pattern.search(e["teksto"])]
         else:
+            # Try substring matching first (includes punctuation/space insensitivity through fuzzy_match_ignore_whitespace)
             low = _fold_search_text(teksto)
-            results = [
+            substring_results = [
                 e for e in results if low in _fold_search_text(e.get("teksto") or "")
             ]
-            if not results and not preciza:
-                fuzzy_used = True
-                results = _fuzzy_text_matches(entries=entries, query=teksto, limit=limo)
+            
+            # If we have substring matches, use them
+            if substring_results:
+                results = substring_results
+            elif not preciza:
+                # No substring matches found - try fuzzy with punctuation insensitivity
+                fuzzy_with_spaces = []
+                for e in results:
+                    score = fuzzy_match_ignore_whitespace(teksto, e.get("teksto") or "", threshold=0.5)
+                    if score is not None:
+                        fuzzy_with_spaces.append((score, e))
+                
+                if fuzzy_with_spaces:
+                    fuzzy_with_spaces.sort(key=lambda x: x[0], reverse=True)
+                    results = [e for _, e in fuzzy_with_spaces]
+                    fuzzy_used = True
+                else:
+                    # Final fallback to traditional fuzzy text matches
+                    fuzzy_used = True
+                    results = _fuzzy_text_matches(entries=entries, query=teksto, limit=limo)
+            else:
+                # preciza flag is set, no fuzzy fallback
+                results = []
 
     # Property filters
     if lingvo:

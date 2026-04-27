@@ -166,3 +166,23 @@ Eraro: Ne povis legi SMART informojn.
 - system wide alias
    - add alias for all autish commands to `~/.autish_aliases`
      - filmeto="autish filmeto", etc.
+# new command: `autish man`
+
+ - full markdown parsing in all TEXT fields
+ - support to link to `encik` with `[](ec#)` and  `vorto`  with `[](vt#)`
+- make this function available as standalone command
+- `man` is similar to `encik`, but instead of managing `.enc` encyclopedia entries, `man` is for managing `.md` documentation
+  - `man` is meant to supplement `encik`. For instance, if in `encik` there is an entry on `Poetry`, user can create one or more `man` entry linked to it
+- the subcommand schema should be similar to `encik`, with adaptations to suit a `.md` file
+ - `aldoni {md-file-path}`
+   - `-L {encik UUID}`: specifies which `encik` concept the `md` manual is about
+   - the link to the manual should also be displayed when user `vidi` the `encik` file in a new section called `manlibro(j)`
+ - `modifi {UUID}`
+ - `forigi {UUID}`
+ - `vidi {UUID}`
+    - the `encik` entry title (href) & UUID in user locale should be displayed 
+ - `serci`: filter by every available field
+   - fuzzy match logic and user selection similar to `encik`
+
+
+

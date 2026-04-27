@@ -337,22 +337,34 @@ def bash_alias_serci(
 
 
 def _generate_command_aliases() -> str:
-    """Generate bash aliases for all autish commands.
+    """Generate shell functions for all autish commands.
     
-    Returns a multi-line string of bash aliases that wrap autish subcommands.
+    Returns a multi-line string of shell functions that wrap autish subcommands.
+    Includes unalias statements to avoid conflicts with ~/.bashrc aliases.
     """
     commands = [
         "vorto", "retposto", "kontakto", "bluhdento", "wifi",
         "sistemo", "tempo", "kp", "shelo", "sekurkopio",
-        "uzanto", "md", "encik", "disko", "usb", "filmeto",
+        "uzanto", "md", "man", "encik", "disko", "usb", "filmeto",
         "kalendaro", "etikedo", "todo", "taglibro", "verki", "rubo"
     ]
     
-    aliases = ["# autish command shortcuts"]
+    functions = [
+        "#!/bin/bash",
+        "# autish bash aliases — auto-generated, do not edit manually",
+        "",
+        "# Unalias conflicting entries from ~/.bashrc",
+        "unalias ll 2>/dev/null || true",
+        "unalias la 2>/dev/null || true",
+        "unalias l 2>/dev/null || true",
+        "unalias grep 2>/dev/null || true",
+        "",
+        "# autish command shortcuts"
+    ]
     for cmd in commands:
-        aliases.append(f'{cmd}="autish {cmd}"')
+        functions.append(f'{cmd}() {{ autish {cmd} "$@"; }}')
     
-    return "\n".join(aliases)
+    return "\n".join(functions)
 
 
 def _extract_description(help_text: str) -> str:
@@ -622,21 +634,7 @@ def install(
                     "    source ~/.bashrc"
                 )
 
-        # Regenerate aliases if they exist
-        try:
-            db = BashAliasDB()
-            aliases = db.list_aliases()
-            if aliases:
-                typer.echo("[i] Regeneranta bash alias-ojn...")
-                db.sync_shell_config()
-                typer.echo("[✓] Bash alias-oj regeneritaj")
-        except Exception as e:
-            typer.echo(
-                f"[!] Ne povis regeneri alias-ojn: {e}",
-                err=True,
-            )
-        
-        # Add command shortcuts to ~/.autish_aliases
+        # Add command shortcuts to ~/.autish_aliases (first pass)
         try:
             autish_aliases = Path.home() / ".autish_aliases"
             cmd_aliases = _generate_command_aliases()
@@ -645,6 +643,29 @@ def install(
         except Exception as e:
             typer.echo(
                 f"[!] Ne povis ĝisdatigi ~/.autish_aliases: {e}",
+                err=True,
+            )
+
+        # Regenerate aliases from database and append to ~/.autish_aliases
+        try:
+            db = BashAliasDB()
+            aliases = db.list_aliases()
+            if aliases:
+                typer.echo("[i] Regeneranta bash alias-ojn...")
+                # Get the shell script from the database
+                db_script = db.generate_shell_script()
+                # Append database aliases (skip shebang and comments - first 3 lines)
+                autish_aliases = Path.home() / ".autish_aliases"
+                db_lines = db_script.split('\n')[3:]  # Skip shebang, comments
+                if autish_aliases.exists():
+                    existing = autish_aliases.read_text()
+                    # Add comment header for database aliases section
+                    db_header = "\n# autish database aliases\n"
+                    autish_aliases.write_text(existing + db_header + "\n".join(db_lines))
+                typer.echo("[✓] Bash alias-oj regeneritaj")
+        except Exception as e:
+            typer.echo(
+                f"[!] Ne povis regeneri alias-ojn: {e}",
                 err=True,
             )
         # Install man pages
