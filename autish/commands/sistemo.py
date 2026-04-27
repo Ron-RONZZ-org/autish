@@ -442,17 +442,27 @@ def install(
     if autish_dst.exists() or autish_dst.is_symlink():
         if autish_dst.is_symlink() and autish_dst.resolve() == autish_src:
             typer.echo(f"[i] autish jam instalita ĉe {autish_dst}")
-            raise typer.Exit(0)
+            
+            # Ask if they want to reinstall (useful for fixing bugs, etc.)
+            reinstall = typer.confirm(
+                "[?] Ĉu repreparinstitali por ripari eblajn erarojn?",
+                default=False,
+            )
+            if not reinstall:
+                typer.echo("Nuligita.")
+                raise typer.Exit(0)
+            
+            autish_dst.unlink()
+        else:
+            overwrite = typer.confirm(
+                f"[?] {autish_dst} jam ekzistas. Ĉu anstataŭigi?",
+                default=False,
+            )
+            if not overwrite:
+                typer.echo("Nuligita.")
+                raise typer.Exit(0)
 
-        overwrite = typer.confirm(
-            f"[?] {autish_dst} jam ekzistas. Ĉu anstataŭigi?",
-            default=False,
-        )
-        if not overwrite:
-            typer.echo("Nuligita.")
-            raise typer.Exit(0)
-
-        autish_dst.unlink()
+            autish_dst.unlink()
 
     # Create symlink
     try:
