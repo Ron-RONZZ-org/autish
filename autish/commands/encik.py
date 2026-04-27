@@ -6627,7 +6627,7 @@ def serci(
                 )
             ][: abs(limo)]
         else:
-            candidates = _search_entries(
+            candidates = _search_entries_with_fts(
                 demando,
                 full_text=teksto,
                 max_results=abs(limo),
