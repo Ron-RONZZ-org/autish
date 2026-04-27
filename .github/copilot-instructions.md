@@ -138,6 +138,12 @@ autish/
 - Over: "Text length (mallonga|normala|longa)"
 - Include brief explanation of what each value does, especially for less obvious options
 
+**Command | Alias help text convention:**
+- When documenting options that have both a long form and a short alias (e.g., `-h` for `--help`), use the format "command|alias explanation"
+- Example: "forigi|rm" in `-h` help text means: "Remove (forigi) — also available as 'rm' alias"
+- This applies to help text documentation in man pages and `-h/--help` output
+- When the short form is a standalone command or alias in bash, document both forms together for clarity
+
 **Semantic link documentation pattern:**
 - When documenting semantic link types, group by domain: RDF/OWL first, then Wikidata properties
 - Include key aliases: "rdf:type (also: type, wdt:P31, instance of)"
