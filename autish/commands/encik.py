@@ -871,6 +871,129 @@ def _build_subklaso_count_map(entries: list[dict]) -> dict[str, int]:
     return out
 
 
+def _search_entries_with_fts(
+    query: str,
+    *,
+    full_text: bool,
+    max_results: int,
+    prefer_newest: bool = True,
+    prefer_high_level: bool = True,
+) -> list[dict]:
+    """Search using FTS5 if available, falls back to Python search.
+    
+    FTS significantly improves performance on large databases by:
+    - Using inverted indexes for O(log n) text lookups
+    - Filtering at database level before loading into memory
+    - Ranking by relevance with minimal Python-side scoring
+    """
+    needle = _fold_search_text(query.strip())
+    if not needle:
+        return []
+    
+    conn = _get_conn()
+    try:
+        # Try FTS search for full_text queries
+        if full_text:
+            # Build FTS query: search all indexed columns
+            # FTS5 supports: column:query, AND, OR, NOT operators
+            fts_query = " OR ".join(needle.split())
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT uuid FROM encik_fts
+                    WHERE encik_fts MATCH ?
+                    LIMIT ?
+                    """,
+                    (fts_query, max_results * 2),  # Get extra for filtering
+                ).fetchall()
+                
+                fts_uuids = {row[0] for row in rows}
+                # Load matched entries from main table
+                placeholders = ",".join("?" * len(fts_uuids))
+                entries = []
+                if fts_uuids:
+                    rows = conn.execute(
+                        f"SELECT * FROM encik WHERE uuid IN ({placeholders})",
+                        list(fts_uuids),
+                    ).fetchall()
+                    entries = [_row_to_dict(row) for row in rows]
+            except (sqlite3.OperationalError, sqlite3.DatabaseError):
+                # FTS not available or query malformed, fall back to Python search
+                entries = _load_all()
+        else:
+            # For non-full_text, still use Python search (simpler logic)
+            entries = _load_all()
+    finally:
+        conn.close()
+    
+    # Apply Python-side ranking and filtering
+    sub_count_map = _build_subklaso_count_map(entries)
+    scored: list[dict] = []
+    
+    for e in entries:
+        titolo = str(e.get("titolo") or "")
+        terminologio_vals = [str(v) for v in (e.get("terminologio") or {}).values()]
+        difinoj_vals = [str(v) for v in (e.get("difinoj") or {}).values()]
+        enhavo = str(e.get("enhavo") or "")
+        
+        if full_text:
+            pool = [
+                titolo,
+                *terminologio_vals,
+                str(e.get("difinio") or ""),
+                *difinoj_vals,
+                enhavo,
+            ]
+        else:
+            pool = [titolo, *terminologio_vals]
+        
+        match_count = sum(_count_matches(p, needle) for p in pool if p)
+        if match_count <= 0:
+            continue
+        
+        compactness_candidates: list[int] = []
+        for part in pool:
+            folded_part = _fold_search_text(part)
+            if not folded_part:
+                continue
+            folded_part_compact = " ".join(folded_part.split())
+            folded_part_no_paren = " ".join(
+                re.sub(r"\([^)]*\)", " ", folded_part).split()
+            )
+            needle_compact = " ".join(needle.split())
+            if needle_compact in folded_part_compact:
+                compactness_candidates.append(
+                    max(0, len(folded_part_compact) - len(needle_compact))
+                )
+            if needle_compact in folded_part_no_paren:
+                compactness_candidates.append(
+                    max(0, len(folded_part_no_paren) - len(needle_compact))
+                )
+        
+        e_copy = dict(e)
+        e_copy["_match_count"] = match_count
+        e_copy["_compactness"] = (
+            min(compactness_candidates) if compactness_candidates else 10**9
+        )
+        e_copy["_subklaso_count"] = int(sub_count_map.get(str(e.get("uuid") or ""), 0))
+        e_copy["_time"] = str(e.get("modifita_je") or e.get("kreita_je") or "")
+        scored.append(e_copy)
+    
+    def _sort_key(item: dict) -> tuple:
+        match_key = -int(item.get("_match_count", 0))
+        compactness_key = int(item.get("_compactness", 10**9))
+        level_val = int(item.get("_subklaso_count", 0))
+        level_key = -level_val if prefer_high_level else level_val
+        time_val = str(item.get("_time") or "")
+        time_key = (
+            "".join(chr(255 - ord(c)) for c in time_val) if prefer_newest else time_val
+        )
+        return (match_key, compactness_key, level_key, time_key)
+    
+    scored.sort(key=_sort_key)
+    return scored[:max_results]
+
+
 def _search_entries(
     query: str,
     *,
