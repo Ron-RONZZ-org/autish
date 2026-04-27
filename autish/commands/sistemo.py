@@ -355,6 +355,127 @@ def _generate_command_aliases() -> str:
     return "\n".join(aliases)
 
 
+def _extract_description(help_text: str) -> str:
+    """Extract description line from help text."""
+    lines = help_text.split("\n")
+    for line in lines:
+        line = line.strip()
+        if line and not line.startswith("╭") and "Usage:" not in line:
+            return line.replace("│", "").strip()
+    return ""
+
+
+def _create_man_page(cmd: str, help_text: str) -> str:
+    """Create groff/troff formatted man page."""
+    desc = _extract_description(help_text)
+    
+    man_content = f'''.TH AUTISH\\-{cmd.upper()} 1 "2026-04-27" "autish" "autish CLI Reference"
+.SH NAME
+autish\\-{cmd} \\- {desc or f'{cmd} command'}
+.SH SYNOPSIS
+.B autish {cmd}
+[OPTIONS] [SUBCOMMAND]
+.SH DESCRIPTION
+The \\fI{cmd}\\fR subcommand of autish — a cross-platform CLI tool for essential 
+desktop tasks with minimum sensory stimulation.
+.SH OPTIONS
+For all available options, run:
+.IP
+autish {cmd} \\-\\-help
+.SH EXAMPLES
+.IP
+View help for this command:
+.IP
+  autish {cmd} \\-\\-help
+.IP
+View help for a specific subcommand:
+.IP
+  autish {cmd} SUBCOMMAND \\-\\-help
+.SH SEE ALSO
+.BR autish(1)
+.SH AUTHOR
+Autish contributors
+'''
+    return man_content
+
+
+def _install_man_pages() -> None:
+    """Install groff man pages to ~/.local/share/man/man1."""
+    commands = [
+        "tempo", "wifi", "bluhdento", "sistemo", "kp", "shelo", "vorto",
+        "retposto", "kontakto", "sekurkopio", "uzanto", "verki", "md",
+        "encik", "kalendaro", "disko", "usb", "filmeto", "etikedo",
+        "todo", "taglibro", "rubo",
+    ]
+    
+    man_dir = Path.home() / ".local" / "share" / "man" / "man1"
+    man_dir.mkdir(parents=True, exist_ok=True)
+    
+    for cmd in commands:
+        try:
+            result = subprocess.run(
+                ["poetry", "run", "autish", cmd, "--help"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                man_content = _create_man_page(cmd, result.stdout)
+                man_file = man_dir / f"autish-{cmd}.1"
+                man_file.write_text(man_content)
+        except Exception:
+            pass
+    
+    # Main autish man page
+    main_man = """.TH AUTISH 1 "2026-04-27" "autish" "autish CLI Reference"
+.SH NAME
+autish \\- cross-platform CLI for essential tasks with minimum sensory stimulation
+.SH SYNOPSIS
+.B autish
+[COMMAND] [OPTIONS]
+.SH DESCRIPTION
+autish is a cross-platform CLI software for essential desktop tasks with minimum 
+stimulation. Designed with neurodiversity in mind for calm, predictable output.
+.SH COMMANDS
+For a complete list of commands and options:
+.IP
+autish \\-\\-help
+.SH EXAMPLES
+.IP
+Show current time:
+.IP
+  autish tempo
+.IP
+List Wi-Fi networks:
+.IP
+  autish wifi ls
+.IP
+Show system information:
+.IP
+  autish sistemo
+.SH SEE ALSO
+.BR autish-tempo(1),
+.BR autish-wifi(1),
+.BR autish-vorto(1),
+.BR autish-encik(1)
+.SH AUTHOR
+Autish contributors
+.SH WEBSITE
+https://github.com/Ron-RONZZ-org/autish
+"""
+    
+    (man_dir / "autish.1").write_text(main_man)
+    
+    # Set up MANPATH in shell config
+    for rc_file in [Path.home() / ".bashrc", Path.home() / ".zshrc"]:
+        if rc_file.exists():
+            content = rc_file.read_text()
+            manpath_line = 'export MANPATH="$HOME/.local/share/man:$MANPATH"'
+            if "MANPATH" not in content:
+                with open(rc_file, "a") as f:
+                    f.write(f"\n# autish man pages\n{manpath_line}\n")
+
+
 @app.command("install")
 def install(
     sistema: bool = typer.Option(
@@ -524,6 +645,15 @@ def install(
         except Exception as e:
             typer.echo(
                 f"[!] Ne povis ĝisdatigi ~/.autish_aliases: {e}",
+                err=True,
+            )
+        # Install man pages
+        try:
+            _install_man_pages()
+            typer.echo("[✓] Man-paĝoj instalitaj en ~/.local/share/man/man1")
+        except Exception as e:
+            typer.echo(
+                f"[!] Ne povis instali man-paĝojn: {e}",
                 err=True,
             )
     except PermissionError as e:
