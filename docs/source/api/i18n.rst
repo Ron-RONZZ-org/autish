@@ -1,0 +1,8 @@
+autish.i18n — Internationalization Helpers
+===========================================
+
+.. automodule:: autish.i18n
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :noindex:

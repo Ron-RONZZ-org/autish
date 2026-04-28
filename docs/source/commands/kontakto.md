@@ -1,0 +1,1 @@
+../../man/kontakto.md

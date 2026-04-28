@@ -1,0 +1,62 @@
+Internationalization (i18n)
+==========================
+
+autish supports multiple languages in its user-facing help text and output.
+The system is designed to prioritize user preferences while providing sensible
+defaults.
+
+Supported Languages
+-------------------
+
+* **Esperanto (eo)** — Primary language for CLI commands and help text
+* **English (en)** — Full support for help text and output
+* **French (fr)** — Full support for help text and output
+
+How Language Resolution Works
+------------------------------
+
+autish resolves the display language in the following order:
+
+1. **User profile preference** (``uzanto profilo`` ``lingvoj`` setting) —
+   languages are tried in the order specified
+2. **System locale** — falls back to the system's ``LANG`` or ``LC_ALL``
+   environment variable
+3. **Default fallback** — Esperanto (``eo``) if no valid language is configured
+
+Setting Your Language Preference
+---------------------------------
+
+Use the ``uzanto`` command to configure your language preferences:
+
+.. code-block:: bash
+
+   # Set language preference to French, then English, then Esperanto
+   autish uzanto profilo modifi --lingvoj fr,en,eo
+
+   # View current profile
+   autish uzanto profilo vidi
+
+Esperanto Locale Consistency
+-----------------------------
+
+Throughout autish, Esperanto field names and labels are used consistently:
+
+* ``difino`` — definition
+* ``difinoj`` — definitions
+* ``ligilo`` — link/relation
+* ``superklaso`` — superclass
+* ``subklaso`` — subclass
+* ``helpo`` — help
+
+Bidirectional Links
+-------------------
+
+In autish's knowledge base (``encik``), ``ligilo`` relations are **bidirectional
+by default**. When an entry links to another via ``ligilo``, the reverse
+``ligilo`` is automatically persisted.
+
+Wikidata Fetch Language Order
+------------------------------
+
+For ``encik semantika`` online metadata, autish requests text using the user's
+``lingvoj`` preference order first, then falls back to ``eo``, then ``en``.

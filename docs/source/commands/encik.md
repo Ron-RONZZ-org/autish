@@ -1,0 +1,1 @@
+../../man/encik.md
