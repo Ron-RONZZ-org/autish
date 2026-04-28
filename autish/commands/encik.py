@@ -878,6 +878,16 @@ def _count_matches(text: str, needle: str) -> int:
             _strip_parenthesized(folded_text),
         )
     )
+    
+    # Also try compact matching (ignoring all spaces and punctuation)
+    # This allows "AI," to match "AI"
+    from autish.utils import fold_search_compact
+    compact_needle = fold_search_compact(needle)
+    compact_text = fold_search_compact(text)
+    if compact_needle and compact_text:
+        compact_matches = len(re.findall(re.escape(compact_needle), compact_text))
+        return max(direct, stripped, compact_matches)
+    
     return max(direct, stripped)
 
 
