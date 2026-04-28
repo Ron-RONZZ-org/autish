@@ -156,9 +156,15 @@ def generi(
     ),
     kunteksto_dosiero: Path | None = typer.Option(
         None,
-        "-K",
+        "-Kd",
         "--kunteksto-dosiero",
-        help="Vojo al aldona kunteksto (ekz. -K ./kunteksto.md).",
+        help="Vojo al aldona kunteksto (ekz. -Kd ./kunteksto.md).",
+    ),
+    kunteksto_uuid: str | None = typer.Option(
+        None,
+        "-K",
+        "--kunteksto",
+        help="UUID de verki kunteksto-eniro (ekz. -K a1b2c3d4).",
     ),
     kopii: bool = typer.Option(
         False,
@@ -221,7 +227,20 @@ def generi(
         if longo is not None and longo.strip().lower() not in _VALIDAJ_LONGOJ:
             validaj = ", ".join(sorted(_VALIDAJ_LONGOJ))
             raise ValueError(f"Nevalida --longo valoro. Uzu unu el: {validaj}.")
-        context = _read_text_file(kunteksto_dosiero) if kunteksto_dosiero else None
+        
+        # Resolve context: either from file or from kunteksto database
+        context = None
+        if kunteksto_dosiero and kunteksto_uuid:
+            raise ValueError("Uzu nur unu fonton por kunteksto: dosiero aŭ UUID.")
+        if kunteksto_dosiero:
+            context = _read_text_file(kunteksto_dosiero)
+        elif kunteksto_uuid:
+            # Load context from kunteksto database
+            entry = kunteksto._find_by_uuid(kunteksto_uuid)
+            if not entry:
+                raise ValueError(f"Kunteksto ne trovita: {kunteksto_uuid}")
+            context = entry.get("enhavo")
+        
         service = _build_verki_service(
             provizanto=provizanto,
             modelo=modelo,
