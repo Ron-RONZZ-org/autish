@@ -3231,17 +3231,32 @@ class TestEncikCLI:
     def test_encik_vidi_html_ligilo_label_strips_markdown_from_target_title(
         self, tmp_path, monkeypatch
     ):
+        # First create the "lumo" entry that will be referenced
+        lumo = tmp_path / "lumo.enc"
+        lumo.write_text(
+            'terminologio.eo = "lumo"\n'
+            'difinio.eo = "Ekscitita lumpartiklo"\n',
+            encoding="utf-8",
+        )
+        result = runner.invoke(app, ["encik", "aldoni", str(lumo)])
+        assert result.exit_code == 0, result.output
+        
+        # Extract the UUID of the lumo entry
+        import autish.commands.encik as enc_mod
+        lumo_entry = enc_mod._find_by_title_exact("lumo")
+        assert lumo_entry is not None
+        lumo_uuid = lumo_entry["uuid"][:8]
+        
+        # Now create the target entry that references lumo in its title
         target = tmp_path / "target_md_title.enc"
         target.write_text(
-            'terminologio.eo = "leĝo de reflekto por [lumo](#63497d2c)"\n'
+            f'terminologio.eo = "leĝo de reflekto por [lumo](#{lumo_uuid})"\n'
             'difinio.eo = "Difino"\n',
             encoding="utf-8",
         )
         assert runner.invoke(app, ["encik", "aldoni", str(target)]).exit_code == 0
 
-        import autish.commands.encik as enc_mod
-
-        t = enc_mod._find_by_title_exact("leĝo de reflekto por [lumo](#63497d2c)")
+        t = enc_mod._find_by_title_exact(f"leĝo de reflekto por [lumo](#{lumo_uuid})")
         assert t is not None
         src = tmp_path / "source_md_title.enc"
         src.write_text(

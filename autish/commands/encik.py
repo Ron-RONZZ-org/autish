@@ -3214,6 +3214,34 @@ def _merge_auto_ligilo_refs(parsed: dict) -> dict:
     return parsed
 
 
+def _validate_semantic_links(parsed: dict) -> list[str]:
+    """Validate all semantic links in parsed entry.
+    
+    Returns list of unresolved link UUIDs that failed to resolve.
+    Only validates ligilo fields, not display fields like terminologio/difinio.
+    """
+    unresolved = []
+    # Only validate ligilo field which contains actual semantic links
+    ligilo_items = _normalize_ligilo_items(parsed.get("ligilo") or [])
+    for item in ligilo_items:
+        uuid_str = item.get("uuid") or ""
+        if not uuid_str:
+            continue
+        # Check if this is a vorto reference
+        if str(uuid_str).lower().startswith("vt#"):
+            # For vorto, we skip validation (external reference)
+            continue
+        # For encik references, validate they exist
+        clean_uuid = _clean_uuid_ref(str(uuid_str))
+        if not clean_uuid:
+            unresolved.append(str(uuid_str))
+            continue
+        target = _find_by_uuid(clean_uuid)
+        if target is None:
+            unresolved.append(clean_uuid)
+    return unresolved
+
+
 def _parse_lang_assignments(values: list[str], *, field: str) -> dict[str, str]:
     parsed: dict[str, str] = {}
     for item in values:
@@ -5112,6 +5140,17 @@ def aldoni(
         raise typer.Exit(code=1) from exc
     parsed = _merge_auto_ligilo_refs(parsed)
     parsed = _canonicalize_class_alias_fields(parsed)
+    
+    # Validate semantic links
+    unresolved_links = _validate_semantic_links(parsed)
+    if unresolved_links:
+        typer.echo(
+            "[!] Eraro: Kelkaj semantikaj ligiloj ne troviĝas:",
+            err=True,
+        )
+        for link_uuid in unresolved_links:
+            typer.echo(f"    - {link_uuid}", err=True)
+        raise typer.Exit(code=1)
 
     # Duplicate title check
     existing = _find_by_title_exact(parsed["titolo"])
