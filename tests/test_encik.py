@@ -2425,7 +2425,7 @@ class TestEncikCLI:
             opened["url"] = url
             return True
 
-        monkeypatch.setattr("autish.commands.encik.webbrowser.open", _fake_open)
+        monkeypatch.setattr("webbrowser.open", _fake_open)
         result = runner.invoke(app, ["encik", "serci", "--ligilo", root_title])
         assert result.exit_code == 0, result.output
         assert "Malfermas rilatan mapon" in result.output
@@ -2447,7 +2447,7 @@ class TestEncikCLI:
             opened["url"] = url
             return True
 
-        monkeypatch.setattr("autish.commands.encik.webbrowser.open", _fake_open)
+        monkeypatch.setattr("webbrowser.open", _fake_open)
         result = runner.invoke(app, ["encik", "serci", "Radiko", "--html"])
         assert result.exit_code == 0, result.output
         assert "Malfermas serĉan mapon en retumilo" in result.output
@@ -2489,7 +2489,7 @@ class TestEncikCLI:
             return True
 
         monkeypatch.setenv("LANG", "en_US.UTF-8")
-        monkeypatch.setattr("autish.commands.encik.webbrowser.open", _fake_open)
+        monkeypatch.setattr("webbrowser.open", _fake_open)
         result = runner.invoke(
             app,
             ["encik", "serci", "--semantiko", "rdf:type", "--html"],
@@ -2768,7 +2768,7 @@ class TestEncikCLI:
             opened["url"] = url
             return True
 
-        monkeypatch.setattr("autish.commands.encik.webbrowser.open", _fake_open)
+        monkeypatch.setattr("webbrowser.open", _fake_open)
         result = runner.invoke(app, ["encik", "vidi", "Hundo", "--html"])
         assert result.exit_code == 0, result.output
         assert "Malfermas en retumilo:" in result.output
@@ -2809,7 +2809,7 @@ class TestEncikCLI:
             opened["url"] = url
             return True
 
-        monkeypatch.setattr("autish.commands.encik.webbrowser.open", _fake_open)
+        monkeypatch.setattr("webbrowser.open", _fake_open)
         result = runner.invoke(app, ["encik", "vidi", "Fonto", "--html"])
         assert result.exit_code == 0, result.output
         html_path = Path(opened["url"][7:])
@@ -3013,7 +3013,7 @@ class TestEncikCLI:
             opened["url"] = url
             return True
 
-        monkeypatch.setattr("autish.commands.encik.webbrowser.open", _fake_open)
+        monkeypatch.setattr("webbrowser.open", _fake_open)
         result = runner.invoke(app, ["encik", "vidi", "[Ir al Celo]", "--html"])
         assert result.exit_code == 0, result.output
         html_path = Path(opened["url"][7:])
@@ -3040,7 +3040,7 @@ class TestEncikCLI:
             opened["url"] = url
             return True
 
-        monkeypatch.setattr("autish.commands.encik.webbrowser.open", _fake_open)
+        monkeypatch.setattr("webbrowser.open", _fake_open)
         result = runner.invoke(app, ["encik", "vidi", "Matematika nodo", "--html"])
         assert result.exit_code == 0, result.output
         html_path = Path(opened["url"][7:])
@@ -3257,7 +3257,7 @@ class TestEncikCLI:
             opened["url"] = url
             return True
 
-        monkeypatch.setattr("autish.commands.encik.webbrowser.open", _fake_open)
+        monkeypatch.setattr("webbrowser.open", _fake_open)
         result = runner.invoke(app, ["encik", "vidi", "Fonta nodo html", "--html"])
         assert result.exit_code == 0, result.output
         html = Path(opened["url"][7:]).read_text(encoding="utf-8")

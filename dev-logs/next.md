@@ -1,11 +1,11 @@
-- `rubo`
-  - converge `forigi` and `rm` in `rubo -h` into one line. `forigi|rm ...`
-    - currently still 2 lines
-    - Update `copilot-instructions.md` and your memory to save this behaviour as default in this repo: `-h` > `command | alias explanation`
+# enhancements
 
-- `encik|vorto|doc|kontakto serci`
-  - ensure the search function is centralised as much as possible
-  - fuzzy match enhancement in all search functions: ignore spaces, punctuations etc. in match strategy
-  - e.g, `AI,` as search term should match for `AI` without problem and vice versa
-    - currently `AI,` not matching for `AI` in `encik`
+- `encik` validation
+  - if failed to resolve one or more semantic link(s) ([](#UUID)), throw error listing offending links
 
+# bug fix
+
+- (critical) currently a pytest opens multiple `html` files when ran
+  - which disrupts developers working on other tasks while the test run
+  - develop alternative less disruptive testing strategy
+    -  Update `copilot-instructions.md` and your memory to save this behaviour as default in this repo

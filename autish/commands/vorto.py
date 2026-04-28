@@ -24,7 +24,6 @@ import sys
 import tempfile
 import unicodedata
 import uuid as _uuid_mod
-import webbrowser
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from html import escape
@@ -38,7 +37,13 @@ from rich.table import Table
 from rich.text import Text
 
 from autish.i18n import tr
-from autish.utils import fuzzy_match_ignore_whitespace
+from autish.utils import (
+    best_text_match_score,
+    fold_search_text,
+    open_path_in_browser,
+    substring_match_folded,
+    substring_match_folded_compact,
+)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Typer app
@@ -508,10 +513,7 @@ def _normalize_oe(text: str) -> str:
 
 
 def _fold_search_text(text: str) -> str:
-    folded_oe = _normalize_oe(str(text or ""))
-    normalized = unicodedata.normalize("NFKD", folded_oe)
-    stripped = "".join(ch for ch in normalized if not unicodedata.combining(ch))
-    return stripped.casefold()
+    return fold_search_text(_normalize_oe(str(text or "")))
 
 
 def _normalize_multiline_text(text: str) -> str:
@@ -1042,8 +1044,7 @@ def _open_entry_preview_file(
         montri_cxion=montri_cxion,
         link_depth=0,
     )
-    webbrowser.open(f"file://{out_path}")
-    return out_path
+    return open_path_in_browser(out_path)
 
 
 def _render_encik_ligilo_markdown(label: str, raw_ref: str) -> str:
@@ -2624,34 +2625,30 @@ def serci(
                 raise typer.Exit(code=1) from exc
             results = [e for e in results if pattern.search(e["teksto"])]
         else:
-            # Try substring matching first (includes punctuation/space insensitivity through fuzzy_match_ignore_whitespace)
-            low = _fold_search_text(teksto)
-            substring_results = [
-                e for e in results if low in _fold_search_text(e.get("teksto") or "")
-            ]
-            
-            # If we have substring matches, use them
-            if substring_results:
-                results = substring_results
-            elif not preciza:
-                # No substring matches found - try fuzzy with punctuation insensitivity
-                fuzzy_with_spaces = []
-                for e in results:
-                    score = fuzzy_match_ignore_whitespace(teksto, e.get("teksto") or "", threshold=0.5)
+            if preciza:
+                results = [
+                    e
+                    for e in results
+                    if substring_match_folded(teksto, e.get("teksto") or "")
+                    or substring_match_folded_compact(teksto, e.get("teksto") or "")
+                ]
+            else:
+                scored_results: list[tuple[float, dict]] = []
+                for entry in results:
+                    score = best_text_match_score(
+                        teksto,
+                        [str(entry.get("teksto") or "")],
+                        threshold=0.5,
+                    )
                     if score is not None:
-                        fuzzy_with_spaces.append((score, e))
-                
-                if fuzzy_with_spaces:
-                    fuzzy_with_spaces.sort(key=lambda x: x[0], reverse=True)
-                    results = [e for _, e in fuzzy_with_spaces]
+                        scored_results.append((score, entry))
+                if scored_results:
+                    scored_results.sort(key=lambda item: item[0], reverse=True)
+                    results = [entry for _, entry in scored_results]
                     fuzzy_used = True
                 else:
-                    # Final fallback to traditional fuzzy text matches
                     fuzzy_used = True
                     results = _fuzzy_text_matches(entries=entries, query=teksto, limit=limo)
-            else:
-                # preciza flag is set, no fuzzy fallback
-                results = []
 
     # Property filters
     if lingvo:

@@ -53,93 +53,7 @@
   - Requires: Parser for markdown links, UID validation across databases, display rendering
 - move old `sistemo` function to `sistemo info`
 
-# new: `sistemo bash alias`
 
-- allowing adding autish managed bash alias
-  - avoid raw `~/.bashrc` file editing
-    - prevent accidental corruption
- - `aldoni alias:TEXT function:TEXT notes:TEXT`
-  - Markdown style links in note: Support [](ec#uuid) to link to `encik` entries and [](vt#uuid) to link to `vorto` entries
-   - each bash-alias is assigned a serial UID: 1,2,3,4...
-   - which should NEVER be recycled
- - `modifi {UID}`
- - `forigi {UID}`
- - `vidi {UID}`
- - `ls`
-   - show all alias in table: UID, alias, function, notes
-   - if more than one full screen, show in a pager (like `less`)
-   - default newest addition first
-   - `--alfabeto/-al` alphabetic ranking
-   - `--inversigi/-i` inverse order
- - `serci`
-   - fuzzy text based match logic and user selection for `vidi` similar to `encik`
-
-# new command: `autish man`
-
- - full markdown parsing in all TEXT fields
- - support to link to `encik` with `[](ec#)` and  `vorto`  with `[](vt#)`
-- make this function available as standalone command
-- `man` is similar to `encik`, but instead of managing `.enc` encyclopedia entries, `man` is for managing `.md` documentation
-  - `man` is meant to supplement `encik`. For instance, if in `encik` there is an entry on `Poetry`, user can create one or more `man` entry linked to it
-- the subcommand schema should be similar to `encik`, with adaptations to suit a `.md` file
- - `aldoni {md-file-path}`
-   - `-L {encik UUID}`: specifies which `encik` concept the `md` manual is about
-   - the link to the manual should also be displayed when user `vidi` the `encik` file in a new section called `manlibro(j)`
- - `modifi {UUID}`
- - `forigi {UUID}`
- - `vidi {UUID}`
-    - the `encik` entry title (href) & UUID in user locale should be displayed 
- - `serci`: filter by every available field
-   - fuzzy match logic and user selection similar to `encik`
-
-
-- `serci`
-  - fuzzy match enhancement: ignore spaces, punctuations etc. in match strategy
-  - e.g, `AI,` as search term should match for `AI` without problem and vice versa
-
-  - `vidi`
-    - new options
-      - `--html/-h`: open in default browser
-      - `--markmap/-mm`: open as [markmap](https://markmap.js.org/docs/packages--markmap-autoloader)
-    - change default: open in `less` pager
-  - entry title shown in linked `encik` file should be href opening in default browser
-
-- `encik|man vidi --html`
-  - should add code syntax highlighting
-
-- `rubo`
-  - `ls` saying `rikirejon estas malplena.` while there are many files in system `trash:///`
-    - `rubo` should use system recycle bin
-  - converge lines of `forigi` and `rm` in `rubo -h` into one line. `forigi|rm ...`
-    - Update `copilot-instructions.md` and your memory to save this behaviour as default in this repo: `-h` > `command | alias explanation`
-
-- `disko` bug
-
-```
-rongzhou@libres:~/kodo/autish/dev-logs$ disko ls
-┏━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━┳━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━┓
-┃ Nomo   ┃ Tipo     ┃ Loko      ┃ Grandeco ┃   Spaco ┃ Dosiersistemo ┃ RM ┃ RO ┃ Modelo                 ┃
-┡━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━╇━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━┩
-│ sda    │ disko    │           │  238.5GB │         │               │ 0  │ 0  │ Micron 1100 SATA 256GB │
-│   sda1 │ subdisko │ /boot/efi │  512.0MB │ 504.8MB │ vfat          │ 0  │ 0  │                        │
-│   sda2 │ subdisko │ /         │  238.0GB │ 174.1GB │ ext4          │ 0  │ 0  │                        │
-└────────┴──────────┴───────────┴──────────┴─────────┴───────────────┴────┴────┴────────────────────────┘
-rongzhou@libres:~/kodo/autish/dev-logs$ disko sano sda1
-Kontrolante sanon de /dev/sda1...
-
-[sudo] pasvorto por rongzhou:          
-Eraro: Nescio dum legado de SMART-informoj.
-
-rongzhou@libres:~/kodo/autish/dev-logs$ disko sano sda
-Kontrolante sanon de /dev/sda...
-
-Eraro: Nescio dum legado de SMART-informoj.
-
-rongzhou@libres:~/kodo/autish/dev-logs$ disko sano sda2
-Kontrolante sanon de /dev/sda2...
-
-Eraro: Nescio dum legado de SMART-informoj.
-```
 
 ## bug fix
 
@@ -156,3 +70,42 @@ Eraro: Nescio dum legado de SMART-informoj.
  - doc vidi --markmap option (requires markmap integration)
    - create reusable helper function
  - Default less pager for doc vidi
+
+- `rubo`
+  - converge `forigi` and `rm` in `rubo -h` into one line. `forigi|rm ...`
+    - currently still 2 lines
+    - Update `copilot-instructions.md` and your memory to save this behaviour as default in this repo: `-h` > `command | alias explanation`
+
+- `encik|vorto|doc|kontakto serci`
+  - ensure the search function is centralised as much as possible
+  - fuzzy match enhancement in all search functions: ignore spaces, punctuations etc. in match strategy
+  - e.g, `AI,` as search term should match for `AI` without problem and vice versa
+    - currently `AI,` not matching for `AI` in `encik`
+- `encik|vorto|doc|md vidi --html`
+  - ensure everyone is using common helper function
+- `doc vidi --markmap`
+  - install markmap render dependencies locally for offline availability
+- `sistemo install`
+  - is using [y|N] confirmation
+    - should be `j|N` for eo locale
+  - still installing `man` instead of `doc` ?
+```
+rongzhou@libres:~/kodo/autish$ doc -h
+Command 'doc' not found, but there are 16 similar ones.
+rongzhou@libres:~/kodo/autish$ man -h
+Usage: autish [OPTIONS] COMMAND [ARGS]...
+Try 'autish -h' for help.
+╭─ Error ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ No such command 'man'.
+```
+
+# Bug fixes
+
+- critical: `encik aldoni` performance issue
+  - this command now takes ~10s on average to run, which is completely inacceptable
+  - must drastically improve performance !
+
+- `encik -L` HTML relation graph rendering
+  - all options are rendered as light grey text over white bg.
+  - should be white text over dark page bg for lisibility
+- persistant eo locale issue: [y/N] should be [j/N] !

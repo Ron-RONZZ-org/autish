@@ -20,6 +20,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from autish import utils
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Typer app
 # ──────────────────────────────────────────────────────────────────────────────
@@ -173,9 +175,12 @@ def check_health(
     )
 
     # Check for common errors
-    # smartctl uses bit flags: 0=OK, 4=warnings, 8=not enabled, 16=device failure, etc.
-    # Accept all non-error codes (exclude only device open failures and access denied)
-    if result.returncode not in (0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 63):
+    # smartctl uses bit flags: 0=OK, 4=warnings, 8=not enabled, etc.
+    # Accept all non-error codes (exclude only open failures and access denied)
+    valid_return_codes = (
+        0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 63
+    )
+    if result.returncode not in valid_return_codes:
         if "sudo" in result.stderr.lower() or "permission" in result.stderr.lower():
             typer.echo(
                 "Eraro: Sudo permeso rifuzita.\n\n"
@@ -185,7 +190,8 @@ def check_health(
             )
             raise typer.Exit(code=1)
         elif result.returncode == 1 or "Unable to" in result.stdout:
-            typer.echo(f"Eraro: Ne eblis legi SMART-informojn por {dev_path}.", err=True)
+            msg = f"Eraro: Ne eblis legi SMART-informojn por {dev_path}."
+            typer.echo(msg, err=True)
             if result.stderr:
                 typer.echo(f"Detalo: {result.stderr}", err=True)
             raise typer.Exit(code=1)
@@ -303,7 +309,7 @@ def mount_disk(
     # Check if mount point exists
     if not mount_path.exists():
         typer.echo(f"Muntpunkto ne ekzistas: {mount_path}")
-        create = typer.confirm("Ĉu krei ĝin?", default=True)
+        create = utils.confirm_esperante("Ĉu krei ĝin?", default_yes=True)
         if not create:
             typer.echo("Nuligita.")
             raise typer.Exit(code=0)
@@ -417,7 +423,10 @@ def shrink_partition(
         typer.echo(f"    Particioxo: {device}")
         typer.echo(f"    Nova grandeco: {new_size}")
         typer.echo("")
-        confirm = typer.confirm("Ĉu vi certas, ke vi volas daŭrigi?", default=False)
+        confirm = utils.confirm_esperante(
+            "Ĉu vi certas, ke vi volas daŭrigi?",
+            default_yes=False,
+        )
         if not confirm:
             typer.echo("Nuligita.")
             raise typer.Exit(0)
@@ -487,7 +496,10 @@ def create_partition(
         typer.echo(f"    Grandeco: {grandeco}")
         typer.echo(f"    Dosierujo-tipo: {dosierujo_tipo}")
         typer.echo("")
-        confirm = typer.confirm("Ĉu vi certas, ke vi volas daŭrigi?", default=False)
+        confirm = utils.confirm_esperante(
+            "Ĉu vi certas, ke vi volas daŭrigi?",
+            default_yes=False,
+        )
         if not confirm:
             typer.echo("Nuligita.")
             raise typer.Exit(0)
@@ -533,7 +545,10 @@ def format_partition(
         typer.echo(f"    Aparato: {device}")
         typer.echo(f"    Dosierujo-tipo: {dosierujo_tipo}")
         typer.echo("")
-        confirm = typer.confirm("Ĉu vi certas, ke vi volas daŭrigi?", default=False)
+        confirm = utils.confirm_esperante(
+            "Ĉu vi certas, ke vi volas daŭrigi?",
+            default_yes=False,
+        )
         if not confirm:
             typer.echo("Nuligita.")
             raise typer.Exit(0)

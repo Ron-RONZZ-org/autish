@@ -46,6 +46,19 @@ def _run(cmd: list[str]) -> str:
         return ""
 
 
+def _confirm_esperante(prompt: str, *, default_yes: bool) -> bool:
+    suffix = "(J/n)" if default_yes else "(j/N)"
+    ans = typer.prompt(f"{prompt} {suffix}", default=("J" if default_yes else "N"))
+    first = ans.strip()[:1].lower() if ans is not None else ""
+    if not first:
+        return default_yes
+    if first in ("j", "y"):
+        return True
+    if first == "n":
+        return False
+    return default_yes
+
+
 def _get_bash_alias_db_path() -> Path:
     """Get path to bash alias database."""
     config_dir = Path.home() / ".config" / "autish"
@@ -200,7 +213,7 @@ def bash_alias_forigi(
         typer.echo("[i] Forigos:")
         for uid, alias_obj in alias_objs:
             typer.echo(f"  UID {uid}: {alias_obj.alias}")
-        confirm = typer.confirm("Ĉu forigi?")
+        confirm = _confirm_esperante("Ĉu forigi?", default_yes=False)
         if not confirm:
             typer.echo("Nuligita")
             raise typer.Exit(0)
@@ -345,7 +358,7 @@ def _generate_command_aliases() -> str:
     commands = [
         "vorto", "retposto", "kontakto", "bluhdento", "wifi",
         "sistemo", "tempo", "kp", "shelo", "sekurkopio",
-        "uzanto", "md", "man", "encik", "disko", "usb", "filmeto",
+        "uzanto", "md", "doc", "encik", "disko", "usb", "filmeto",
         "kalendaro", "etikedo", "todo", "taglibro", "verki", "rubo"
     ]
     
@@ -381,7 +394,11 @@ def _create_man_page(cmd: str, help_text: str) -> str:
     """Create groff/troff formatted man page."""
     desc = _extract_description(help_text)
     
-    man_content = f'''.TH AUTISH\\-{cmd.upper()} 1 "2026-04-27" "autish" "autish CLI Reference"
+    th_line = (
+        f'.TH AUTISH\\-{cmd.upper()} 1 "2026-04-27" "autish" '
+        '"autish CLI Reference"'
+    )
+    man_content = f'''{th_line}
 .SH NAME
 autish\\-{cmd} \\- {desc or f'{cmd} command'}
 .SH SYNOPSIS
@@ -415,7 +432,7 @@ def _install_man_pages() -> None:
     """Install groff man pages to ~/.local/share/man/man1."""
     commands = [
         "tempo", "wifi", "bluhdento", "sistemo", "kp", "shelo", "vorto",
-        "retposto", "kontakto", "sekurkopio", "uzanto", "verki", "md",
+        "retposto", "kontakto", "sekurkopio", "uzanto", "verki", "md", "doc",
         "encik", "kalendaro", "disko", "usb", "filmeto", "etikedo",
         "todo", "taglibro", "rubo",
     ]
@@ -577,9 +594,9 @@ def install(
             typer.echo(f"[i] autish jam instalita ĉe {autish_dst}")
             
             # Ask if they want to reinstall (useful for fixing bugs, etc.)
-            reinstall = typer.confirm(
+            reinstall = _confirm_esperante(
                 "[?] Ĉu repreparinstitali por ripari eblajn erarojn?",
-                default=False,
+                default_yes=False,
             )
             if not reinstall:
                 typer.echo("Nuligita.")
@@ -587,9 +604,9 @@ def install(
             
             autish_dst.unlink()
         else:
-            overwrite = typer.confirm(
+            overwrite = _confirm_esperante(
                 f"[?] {autish_dst} jam ekzistas. Ĉu anstataŭigi?",
-                default=False,
+                default_yes=False,
             )
             if not overwrite:
                 typer.echo("Nuligita.")
@@ -661,7 +678,8 @@ def install(
                     existing = autish_aliases.read_text()
                     # Add comment header for database aliases section
                     db_header = "\n# autish database aliases\n"
-                    autish_aliases.write_text(existing + db_header + "\n".join(db_lines))
+                    combined = existing + db_header + "\n".join(db_lines)
+                    autish_aliases.write_text(combined)
                 typer.echo("[✓] Bash alias-oj regeneritaj")
         except Exception as e:
             typer.echo(

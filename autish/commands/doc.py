@@ -25,9 +25,13 @@ from rich.console import Console
 from rich.markdown import Markdown
 
 from autish.commands.uzanto import _load_profile
+from autish.services.markmap import has_markmap_cli, markmap_cli_path
 from autish.utils import (
-    fuzzy_match_ignore_whitespace,
+    best_text_match_score,
+    confirm_esperante,
     markdown_to_html,
+    open_html_in_browser,
+    open_path_in_browser,
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -493,21 +497,11 @@ def _display_in_pager(entry: dict) -> None:
 
 def _display_as_html(entry: dict) -> None:
     """Render and display entry as HTML in default browser."""
-    import webbrowser
-    
     # Generate HTML
     html_content = markdown_to_html(entry["enhavo"], title=entry["titolo"])
 
-    # Write to temporary file
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".html", delete=False, encoding="utf-8"
-    ) as f:
-        f.write(html_content)
-        temp_path = f.name
-
     try:
-        # Open in default browser
-        webbrowser.open(f"file://{temp_path}")
+        temp_path = open_html_in_browser(html_content)
         typer.echo(f"[dim]Malferma en retumilo: {temp_path}[/]")
     except Exception as e:
         typer.echo(f"Eraro dum malfermo: {e}", err=True)
@@ -515,65 +509,42 @@ def _display_as_html(entry: dict) -> None:
 
 
 def _display_as_markmap(entry: dict) -> None:
-    """Render and display entry as markmap diagram in browser."""
-    import webbrowser
-    
-    title = entry["titolo"]
-    markdown_content = entry["enhavo"]
+    """Render and display entry as markmap diagram using local CLI."""
+    if not has_markmap_cli():
+        typer.echo(
+            "Eraro: markmap-cli ne instalita loke. Rulu: autish sistemo install",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
-    # Generate markmap HTML (CDN-based)
-    html_content = f"""<!DOCTYPE html>
-<html lang="eo">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Markmap — {title}</title>
-    <script src="https://cdn.jsdelivr.net/npm/markmap-autoloader"></script>
-    <style>
-        * {{
-            margin: 0;
-            padding: 0;
-        }}
-        html, body {{
-            width: 100%;
-            height: 100%;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
-                Roboto, "Helvetica Neue", Arial, sans-serif;
-        }}
-        svg {{
-            display: block;
-            width: 100%;
-            height: 100%;
-        }}
-    </style>
-</head>
-<body>
-    <div id="app"></div>
-    <textarea id="content" style="display: none;">
-{markdown_content}
-    </textarea>
-    <script>
-        const content = document.getElementById("content").textContent;
-        const element = document.getElementById("app");
-        markmap.autoLoader.renderContent(content, element);
-    </script>
-</body>
-</html>"""
-
-    # Write to temporary file
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".md", delete=False, encoding="utf-8"
+    ) as src:
+        src.write(entry["enhavo"])
+        src_path = src.name
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".html", delete=False, encoding="utf-8"
-    ) as f:
-        f.write(html_content)
-        temp_path = f.name
+    ) as out:
+        out_path = out.name
 
     try:
-        # Open in default browser
-        webbrowser.open(f"file://{temp_path}")
-        typer.echo(f"[dim]Markmap malferme: {temp_path}[/]")
+        result = subprocess.run(
+            [str(markmap_cli_path()), src_path, "-o", out_path, "--no-open"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            details = (result.stderr or result.stdout or "").strip()
+            typer.echo(f"Eraro dum markmap-generado: {details}", err=True)
+            raise typer.Exit(code=1)
+        open_path_in_browser(out_path)
+        typer.echo(f"[dim]Markmap malferme: {out_path}[/]")
     except Exception as e:
         typer.echo(f"Eraro dum malfermo: {e}", err=True)
         raise typer.Exit(code=1) from None
+    finally:
+        Path(src_path).unlink(missing_ok=True)
 
 
 @app.command("modifi")
@@ -673,7 +644,10 @@ def forigi(
     titolo = entry["titolo"]
 
     # Confirm deletion
-    confirm = typer.confirm(f"Ĉu vi certe volas forigi '{titolo}'?")
+    confirm = confirm_esperante(
+        f"Ĉu vi certe volas forigi '{titolo}'?",
+        default_yes=False,
+    )
     if not confirm:
         typer.echo("Nuligita.")
         raise typer.Exit(code=0)
@@ -741,50 +715,17 @@ def serci(
         cursor.execute(query, params)
         all_results = cursor.fetchall()
 
-        # Filter by search term using hybrid matching approach
+        # Filter by centralized folded+compact+fuzzy matching
         results = []
-        from autish.utils import fold_search_text as utils_fold
-        
-        folded_query = utils_fold(demando)
-        
-        # First pass: exact substring matches
-        substring_matches = []
         for entry in all_results:
-            if teksto:
-                # Search in both title and content
-                title_has_match = folded_query in utils_fold(entry["titolo"])
-                content_has_match = folded_query in utils_fold(entry["enhavo"])
-                if title_has_match or content_has_match:
-                    substring_matches.append((1.0, entry))
-            else:
-                # Search title only
-                if folded_query in utils_fold(entry["titolo"]):
-                    substring_matches.append((1.0, entry))
-        
-        # If we have substring matches, use them
-        if substring_matches:
-            results = substring_matches
-        else:
-            # Second pass: fuzzy matching with punctuation/space insensitivity
-            for entry in all_results:
-                if teksto:
-                    # Search in both title and content
-                    title_score = fuzzy_match_ignore_whitespace(
-                        demando, entry["titolo"], threshold=0.5
-                    )
-                    content_score = fuzzy_match_ignore_whitespace(
-                        demando, entry["enhavo"], threshold=0.5
-                    )
-                    if title_score is not None or content_score is not None:
-                        max_score = max(title_score or 0, content_score or 0)
-                        results.append((max_score, entry))
-                else:
-                    # Search title only
-                    score = fuzzy_match_ignore_whitespace(
-                        demando, entry["titolo"], threshold=0.5
-                    )
-                    if score is not None:
-                        results.append((score, entry))
+            targets = (
+                [entry["titolo"], entry["enhavo"]]
+                if teksto
+                else [entry["titolo"]]
+            )
+            score = best_text_match_score(demando, targets, threshold=0.5)
+            if score is not None:
+                results.append((score, entry))
 
         if not results:
             typer.echo("Neniuj rezultoj trovitaj.")

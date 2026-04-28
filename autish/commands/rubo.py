@@ -29,7 +29,10 @@ def _format_size(size: int) -> str:
     return f"{size:.1f}TB"
 
 
-@app.command("forigi")
+@app.command(
+    "forigi",
+    help="forigi|rm Movi dosierojn al rikirejon (recycle bin).",
+)
 def delete_files(
     paths: list[str] = typer.Argument(
         ...,
@@ -79,7 +82,7 @@ def delete_files(
                 typer.echo(f"[!] Eraro movante al rikirejon: {path}", err=True)
 
 
-@app.command("rm")
+@app.command("rm", hidden=True)
 def delete_files_alias(
     paths: list[str] = typer.Argument(
         ...,

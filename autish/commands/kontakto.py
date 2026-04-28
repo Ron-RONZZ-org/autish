@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-from difflib import SequenceMatcher
 from typing import Any
 
 import typer
@@ -13,7 +12,14 @@ from rich.table import Table
 
 from autish.commands import retposto as retposto_mod
 from autish.commands.uzanto import _normalize_multi_contact_list
-from autish.utils import render_markdown_links_as_rich
+from autish.utils import (
+    best_text_match_score,
+    fuzzy_match_ignore_whitespace,
+    render_markdown_links_as_rich,
+    score_text_match,
+    substring_match_folded,
+    substring_match_folded_compact,
+)
 
 app = typer.Typer(
     name="kontakto",
@@ -194,26 +200,20 @@ def _ensure_categories_exist(categories: list[str]) -> None:
 
 
 def _search_contact_match(contact: dict, query: str) -> bool:
-    q = query.lower().strip()
+    q = str(query or "").strip()
     if not q:
         return True
-    if q in (contact.get("nomo") or "").lower():
-        return True
-    if q in (contact.get("familia_nomo") or "").lower():
-        return True
-    if any(q in email.lower() for email in _contact_email_values(contact)):
-        return True
-    if q in (contact.get("organizo") or "").lower():
-        return True
-    if q in (contact.get("organiza_identiga_numero") or "").lower():
-        return True
-    if q in (contact.get("naskig_loko") or "").lower():
-        return True
-    if q in str((contact.get("kampoj") or {}).get("postadreso") or "").lower():
-        return True
-    if any(q in str(v).lower() for v in (contact.get("kampoj") or {}).values()):
-        return True
-    return False
+    fields = [
+        str(contact.get("nomo") or ""),
+        str(contact.get("familia_nomo") or ""),
+        *[str(email) for email in _contact_email_values(contact)],
+        str(contact.get("organizo") or ""),
+        str(contact.get("organiza_identiga_numero") or ""),
+        str(contact.get("naskig_loko") or ""),
+        str((contact.get("kampoj") or {}).get("postadreso") or ""),
+        *[str(v) for v in (contact.get("kampoj") or {}).values()],
+    ]
+    return best_text_match_score(q, fields, threshold=0.5) is not None
 
 
 def _contact_email_values(contact: dict) -> list[str]:
@@ -440,49 +440,52 @@ def _resolve_targets(
 
 
 def _fuzzy_match_score(contact: dict, query: str) -> float:
-    q = query.lower().strip()
+    q = str(query or "").strip()
+    if not q:
+        return 0.0
     tokens = [
-        str(contact.get("nomo") or "").lower(),
-        str(contact.get("familia_nomo") or "").lower(),
-        str(contact.get("retposto") or "").lower(),
-        str(contact.get("organizo") or "").lower(),
-        str(contact.get("naskig_loko") or "").lower(),
+        str(contact.get("nomo") or ""),
+        str(contact.get("familia_nomo") or ""),
+        str(contact.get("retposto") or ""),
+        str(contact.get("organizo") or ""),
+        str(contact.get("naskig_loko") or ""),
     ]
-    email = str(contact.get("retposto") or "").lower()
+    email = str(contact.get("retposto") or "")
     if "@" in email:
         tokens.append(email.split("@", 1)[0])
-    return max(
-        (SequenceMatcher(None, q, token).ratio() for token in tokens if token),
-        default=0.0,
-    )
+    best = 0.0
+    for token in tokens:
+        if not token:
+            continue
+        score = score_text_match(q, token, threshold=0.0)
+        if score is not None and score > best:
+            best = score
+    return best
 
 
 def _fuzzy_contains(query: str, candidate: str, threshold: float = 0.7) -> bool:
-    q = (query or "").strip().lower()
-    c = (candidate or "").strip().lower()
+    q = (query or "").strip()
+    c = (candidate or "").strip()
     if not q:
         return True
     if not c:
         return False
-    if q in c:
+    if substring_match_folded(q, c) or substring_match_folded_compact(q, c):
         return True
+    local = ""
     if "@" in c:
         local = c.split("@", 1)[0]
-        if q in local:
+        if substring_match_folded(q, local) or substring_match_folded_compact(q, local):
             return True
-        c = local
-    if len(c) >= len(q):
-        win = len(q)
-        best = max(
-            (
-                SequenceMatcher(None, q, c[i : i + win]).ratio()
-                for i in range(len(c) - win + 1)
-            ),
-            default=0.0,
-        )
-    else:
-        best = SequenceMatcher(None, q, c).ratio()
-    return best >= threshold
+    if threshold >= 1.0:
+        return False
+    if fuzzy_match_ignore_whitespace(q, c, threshold=threshold) is not None:
+        return True
+    if local and fuzzy_match_ignore_whitespace(
+        q, local, threshold=threshold
+    ) is not None:
+        return True
+    return False
 
 
 @app.command("listigi")

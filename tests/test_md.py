@@ -120,7 +120,7 @@ class TestVidi:
         md_file = tmp_path / "test.md"
         md_file.write_text("# Hello\n\nWorld", encoding="utf-8")
 
-        with patch("autish.commands.md.webbrowser.open") as mock_open:
+        with patch("webbrowser.open") as mock_open:
             result = runner.invoke(app, ["md", "vidi", str(md_file)])
 
         assert result.exit_code == 0
@@ -144,12 +144,12 @@ class TestVidi:
             return fh
 
         with (
-            patch("autish.commands.md.webbrowser.open"),
+            patch("webbrowser.open"),
             patch("builtins.open", side_effect=capture_write),
         ):
             pass  # Just check that the command accepts the flag
 
-        with patch("autish.commands.md.webbrowser.open"):
+        with patch("webbrowser.open"):
             result = runner.invoke(app, ["md", "vidi", str(md_file), "-f", "2"])
         assert result.exit_code == 0
 
@@ -166,7 +166,7 @@ class TestVidi:
         def fake_open(url: str) -> None:
             captured_paths.append(url.replace("file://", ""))
 
-        with patch("autish.commands.md.webbrowser.open", side_effect=fake_open):
+        with patch("webbrowser.open", side_effect=fake_open):
             runner.invoke(app, ["md", "vidi", str(md_file)])
 
         assert captured_paths

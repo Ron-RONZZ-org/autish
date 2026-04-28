@@ -11,13 +11,14 @@ from __future__ import annotations
 import re
 import subprocess
 import tempfile
-import webbrowser
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
 
 import typer
 from rich.console import Console
+
+from autish.utils import open_html_in_browser
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Typer app
@@ -324,15 +325,8 @@ def vidi(
     md_text = _read_source(source)
     title = _source_title(source)
     html = _build_html(md_text, title=title, fold_level=faldnivelo)
-
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".html", delete=False, encoding="utf-8"
-    ) as fh:
-        fh.write(html)
-        tmp_path = fh.name
-
+    tmp_path = open_html_in_browser(html)
     typer.echo(f"Malfermas en retumilo: {tmp_path}")
-    webbrowser.open(f"file://{tmp_path}")
 
 
 @app.command("eksporti")

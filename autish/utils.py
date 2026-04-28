@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import re
+import tempfile
 import unicodedata
+import webbrowser
+from collections.abc import Iterable
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from pathlib import Path
 
 import typer
 
@@ -19,6 +23,28 @@ def echo_padded(content: str) -> None:
     typer.echo(content)
     typer.echo(_SEP)
     typer.echo("")
+
+
+def confirm_esperante(prompt: str, *, default_yes: bool = False) -> bool:
+    """Prompt user for confirmation with Esperanto locale formatting.
+
+    Args:
+        prompt: The confirmation prompt text (should be in Esperanto).
+        default_yes: If True, defaults to yes; otherwise defaults to no.
+
+    Returns:
+        True if user confirms (enters 'j'/'y'), False otherwise.
+    """
+    suffix = "(J/n)" if default_yes else "(j/N)"
+    ans = typer.prompt(f"{prompt} {suffix}", default=("J" if default_yes else "N"))
+    first = ans.strip()[:1].lower() if ans is not None else ""
+    if not first:
+        return default_yes
+    if first in ("j", "y"):
+        return True
+    if first == "n":
+        return False
+    return default_yes
 
 
 # Markdown link support for encik and vorto references
@@ -158,6 +184,11 @@ def fold_search_text(text: str) -> str:
     return stripped.casefold()
 
 
+def fold_search_compact(text: str) -> str:
+    """Normalize text and remove spaces/punctuation for compact matching."""
+    return re.sub(r"[\s\W_]+", "", fold_search_text(text))
+
+
 def fuzzy_match_score(query: str, target: str, threshold: float = 0.62) -> float | None:
     """Calculate fuzzy match score between query and target text.
     
@@ -214,6 +245,36 @@ def substring_match_folded(query: str, target: str) -> bool:
     q = fold_search_text(query.strip())
     t = fold_search_text(target.strip())
     return q in t if q and t else False
+
+
+def substring_match_folded_compact(query: str, target: str) -> bool:
+    """Substring match after compact folding (ignores spaces/punctuation)."""
+    q = fold_search_compact(query.strip())
+    t = fold_search_compact(target.strip())
+    return q in t if q and t else False
+
+
+def score_text_match(query: str, target: str, threshold: float = 0.62) -> float | None:
+    """Unified score for folded substring + punctuation-insensitive fuzzy match."""
+    if substring_match_folded(query, target) or substring_match_folded_compact(
+        query, target
+    ):
+        return 1.0
+    return fuzzy_match_ignore_whitespace(query, target, threshold=threshold)
+
+
+def best_text_match_score(
+    query: str, targets: Iterable[str], threshold: float = 0.62
+) -> float | None:
+    """Return the highest unified text-match score across multiple targets."""
+    best: float | None = None
+    for target in targets:
+        score = score_text_match(query, str(target or ""), threshold=threshold)
+        if score is None:
+            continue
+        if best is None or score > best:
+            best = score
+    return best
 
 
 def filter_entries_by_text(
@@ -311,7 +372,8 @@ def markdown_to_html(markdown_text: str, title: str = "") -> str:
         }}
         
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                "Helvetica Neue", Arial, sans-serif;
             line-height: 1.6;
             color: #333;
             background-color: #f5f5f5;
@@ -334,7 +396,11 @@ def markdown_to_html(markdown_text: str, title: str = "") -> str:
             font-weight: 600;
         }}
         
-        h1 {{ font-size: 2em; border-bottom: 2px solid #3498db; padding-bottom: 0.3em; }}
+        h1 {{
+            font-size: 2em;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 0.3em;
+        }}
         h2 {{ font-size: 1.5em; }}
         h3 {{ font-size: 1.25em; }}
         
@@ -420,3 +486,26 @@ def markdown_to_html(markdown_text: str, title: str = "") -> str:
 </html>"""
     
     return html_doc
+
+
+def write_html_document(html_doc: str) -> str:
+    """Write HTML to a temporary file and return the path."""
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".html", delete=False, encoding="utf-8"
+    ) as fh:
+        fh.write(html_doc)
+        return fh.name
+
+
+def open_path_in_browser(path: str | Path) -> str:
+    """Open a local file path in default browser and return its absolute path."""
+    resolved = str(Path(path).expanduser().resolve())
+    webbrowser.open(f"file://{resolved}")
+    return resolved
+
+
+def open_html_in_browser(html_doc: str) -> str:
+    """Write HTML to a temp file, open in browser, and return the file path."""
+    out_path = write_html_document(html_doc)
+    open_path_in_browser(out_path)
+    return out_path
