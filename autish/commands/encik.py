@@ -37,6 +37,7 @@ import uuid as _uuid_mod
 from collections import deque
 from datetime import datetime, timezone
 from difflib import get_close_matches
+from functools import lru_cache
 from html import escape
 from pathlib import Path
 
@@ -497,6 +498,7 @@ def _load_semantika_groups() -> dict[str, list[dict[str, object]]]:
     return {name: [dict(row) for row in rows] for name, rows in groups.items()}
 
 
+@lru_cache(maxsize=1)
 def _runtime_semantika_alias_map() -> dict[str, str]:
     mapping = dict(_SEMANTIKAJ_LIGILOJ)
     for rows in _load_semantika_groups().values():
@@ -513,6 +515,7 @@ def _runtime_semantika_alias_map() -> dict[str, str]:
     return mapping
 
 
+@lru_cache(maxsize=1)
 def _runtime_semantika_description_map() -> dict[str, str]:
     descriptions: dict[str, str] = {}
     for canonical, (description, _aliases) in _SEMANTIKA_DEFINOJ_MAP.items():
@@ -531,6 +534,7 @@ def _runtime_semantika_description_map() -> dict[str, str]:
     return descriptions
 
 
+@lru_cache(maxsize=1)
 def _runtime_known_semantika_ligiloj() -> set[str]:
     return set(_runtime_semantika_alias_map().values())
 
