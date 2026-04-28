@@ -7,6 +7,7 @@ from pathlib import Path
 
 import typer
 
+from autish.commands import kunteksto
 from autish.commands.kp import _copy as _kp_copy
 from autish.commands.uzanto import _load_profile
 from autish.services.providers.huggingface import HuggingFaceProvider
@@ -18,6 +19,9 @@ app = typer.Typer(
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
+
+# Add kunteksto subcommand
+app.add_typer(kunteksto.app, name="kunteksto")
 
 _VALIDAJ_LONGOJ = frozenset({"mallonga", "normala", "longa"})
 
@@ -122,8 +126,8 @@ def generi(
         "-lo",
         "--longo",
         help=(
-            "Target text length. Valid values: mallonga (short), normala (normal), longa (long). "
-            "Example: -lo mallonga"
+            "Target text length. Valid values: mallonga (short), "
+            "normala (normal), longa (long). Example: -lo mallonga"
         ),
     ),
     registro: str | None = typer.Option(
