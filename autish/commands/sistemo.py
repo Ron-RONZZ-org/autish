@@ -19,6 +19,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from autish.services import markmap
 from autish.services.bash_alias import BashAliasDB
 from autish.utils import echo_padded
 
@@ -695,6 +696,17 @@ def install(
                 f"[!] Ne povis instali man-paĝojn: {e}",
                 err=True,
             )
+
+        # Install markmap CLI for offline support
+        if markmap.has_markmap_cli():
+            typer.echo("[i] Markmap-cli jam instalita")
+        else:
+            typer.echo("[i] Instalanta markmap-cli por HTML-grafik-subteno...")
+            success, message = markmap.install_markmap_cli()
+            if success:
+                typer.echo("[✓] Markmap-cli instalita")
+            else:
+                typer.echo(f"[!] Markmap instalado: {message}", err=True)
     except PermissionError as e:
         scope_label = "sisteme" if sistema else "uzanto-ĉambro"
         typer.echo(

@@ -85,7 +85,27 @@ Context resolution order (highest priority first):
 
 ---
 
+## Testing Best Practices
+
+**Test Isolation:**
+- Use `@pytest.fixture(autouse=True)` in `conftest.py` to globally mock disruptive operations (webbrowser, file opening).
+- All tests automatically prevent browser windows and external file opens, ensuring non-disruptive test runs.
+- Individual tests can override global mocks using `monkeypatch` or `patch()` decorators for specific behavior.
+
+**Browser/File Opening in Tests:**
+- `webbrowser.open()` is mocked globally via `conftest.py` fixture to prevent actual browser windows during test runs.
+- This prevents disruption to developer workflows while tests run in the background.
+- Tests that need specific behavior can use `monkeypatch.setattr("webbrowser.open", custom_mock)`.
+
+**Database Testing:**
+- Use `monkeypatch` with `tmp_path` to redirect database file paths to isolated temporary directories.
+- Each test runs with its own isolated database instance; no shared state between tests.
+- Fixture setup should occur before module imports when database paths are used during module initialization.
+
+---
+
 ## Help Text Standards
+
 
 **Options with restricted values MUST document all valid values.**
 Example: `--stato` option must document: "Valid values: malfermita (open), farita (done), prokrastita (deferred), nuligita (cancelled)"
