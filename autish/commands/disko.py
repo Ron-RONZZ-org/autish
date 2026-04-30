@@ -41,15 +41,18 @@ console = Console()
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _run_command(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
+def _run_command(cmd: list[str], check: bool = True, timeout: int = 30) -> subprocess.CompletedProcess:
     """Run a shell command and return the result."""
     try:
         return subprocess.run(
-            cmd, capture_output=True, text=True, check=check
+            cmd, capture_output=True, text=True, check=check, timeout=timeout
         )
     except subprocess.CalledProcessError as e:
         typer.echo(f"Eraro: {e.stderr.strip()}", err=True)
         raise typer.Exit(code=1) from e
+    except subprocess.TimeoutExpired:
+        typer.echo(f"Komando ekster tempo: {' '.join(cmd)}", err=True)
+        raise typer.Exit(code=1)
     except FileNotFoundError as e:
         typer.echo(f"Komando ne trovita: {cmd[0]}", err=True)
         raise typer.Exit(code=1) from e

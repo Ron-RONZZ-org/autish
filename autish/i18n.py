@@ -50,10 +50,10 @@ def _system_lang() -> str:
 
 def _profile_langs() -> list[str]:
     try:
-        from autish.commands.uzanto import _load_profile  # noqa: PLC0415
+        from autish.profile import load_profile  # noqa: PLC0415
     except (ImportError, ModuleNotFoundError):
         return []
-    profile = _load_profile(quiet=True)
+    profile = load_profile(quiet=True)
     raw_langs = profile.get("lingvoj")
     if raw_langs is None:
         raw_langs = profile.get("lingvo")

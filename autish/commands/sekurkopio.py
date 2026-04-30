@@ -747,16 +747,19 @@ WantedBy=timers.target
             ["systemctl", "--user", "daemon-reload"],
             check=True,
             capture_output=True,
+            timeout=10,
         )
         subprocess.run(
             ["systemctl", "--user", "enable", "autish-sekurkopio.timer"],
             check=True,
             capture_output=True,
+            timeout=10,
         )
         subprocess.run(
             ["systemctl", "--user", "start", "autish-sekurkopio.timer"],
             check=True,
             capture_output=True,
+            timeout=10,
         )
         typer.echo("[✓] Systemd timer ebligita kaj startita.")
         typer.echo(
@@ -771,6 +774,12 @@ WantedBy=timers.target
             "  systemctl --user daemon-reload\n"
             "  systemctl --user enable autish-sekurkopio.timer\n"
             "  systemctl --user start autish-sekurkopio.timer",
+            err=True,
+        )
+    except subprocess.TimeoutExpired:
+        typer.echo(
+            "[!] Averto: Systemd komando ekster tempo.\n"
+            "Provu mane: systemctl --user daemon-reload",
             err=True,
         )
 
@@ -840,6 +849,7 @@ def install_cron_cmd() -> None:
             capture_output=True,
             text=True,
             check=False,
+            timeout=5,
         )
         current_crontab = result.stdout if result.returncode == 0 else ""
 
@@ -857,6 +867,7 @@ def install_cron_cmd() -> None:
             input=new_crontab,
             text=True,
             check=True,
+            timeout=5,
         )
 
         typer.echo("[✓] Cron job aldonita.")
@@ -870,6 +881,9 @@ def install_cron_cmd() -> None:
             err=True,
         )
         raise typer.Exit(1) from e
+    except subprocess.TimeoutExpired:
+        typer.echo("[!] Eraro: crontab komando ekster tempo.", err=True)
+        raise typer.Exit(1)
 
 
 @app.command("historio")

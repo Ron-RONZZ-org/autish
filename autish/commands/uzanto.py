@@ -230,47 +230,23 @@ def _load_profile(*, quiet: bool = False) -> dict:
     quiet=True suppresses user-facing errors and falls back to {} when the
     profile cannot be read (useful for non-interactive locale probing).
     """
-    from autish.commands._crypto import decrypt, is_encrypted  # noqa: PLC0415
+    from autish.profile import load_profile as _load_profile_impl
+    from autish.profile import _PROFILE_ENC_FILE
 
-    # Try encrypted file first
-    if _PROFILE_ENC_FILE.exists():
-        master = _get_master_password()
-        if not master:
-            if quiet:
-                return {}
+    try:
+        return _load_profile_impl(quiet=quiet)
+    except ValueError as exc:
+        if quiet:
+            return {}
+        # Interactive error handling - only reached when quiet=False
+        if "cifrita" in str(exc).lower() or "encrypted" in str(exc).lower():
             typer.echo(
                 "[!] Profilo estas cifrita, sed neniu majstra pasvorto estas agordita.",
                 err=True,
             )
-            raise typer.Exit(1)
-        raw = _PROFILE_ENC_FILE.read_bytes()
-        if is_encrypted(raw):
-            try:
-                raw = decrypt(raw, master)
-            except ValueError as exc:
-                if quiet:
-                    return {}
-                typer.echo(f"[!] Ne povis malcifri profilon: {exc}", err=True)
-                raise typer.Exit(1) from exc
-        try:
-            return _toml_loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError) as exc:
-            if quiet:
-                return {}
+        else:
             typer.echo(f"[!] Profilo estas nevalida: {exc}", err=True)
-            raise typer.Exit(1) from exc
-
-    # Plain file
-    if _PROFILE_FILE.exists():
-        try:
-            return _toml_loads(_PROFILE_FILE.read_text(encoding="utf-8"))
-        except ValueError as exc:
-            if quiet:
-                return {}
-            typer.echo(f"[!] Profilo estas nevalida: {exc}", err=True)
-            raise typer.Exit(1) from exc
-
-    return {}
+        raise typer.Exit(1)
 
 
 def _save_profile(data: dict) -> None:
