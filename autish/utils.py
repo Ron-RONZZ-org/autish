@@ -8,12 +8,22 @@ import unicodedata
 import webbrowser
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 
 import typer
 
 _SEP = "---"
+
+
+def now_iso() -> str:
+    """Return current UTC timestamp as ISO string with seconds precision.
+
+    This is the canonical timestamp function - use this instead of
+    defining local _now_iso() in command modules.
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def echo_padded(content: str) -> None:

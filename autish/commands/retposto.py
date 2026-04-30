@@ -49,6 +49,7 @@ from typing import TypedDict
 import keyring
 import typer
 import vobject
+from autish.utils import now_iso
 from rich.console import Console
 from rich.table import Table
 
@@ -557,7 +558,7 @@ def _migrate_db(con: sqlite3.Connection) -> None:
         con.commit()
 
 
-def _now_iso() -> str:
+def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -636,7 +637,7 @@ def _save_account(acc: dict) -> int:
                     or acc.get("uzantonomo")
                     or acc["retposto"]
                 ).strip(),
-                acc.get("kreita_je") or _now_iso(),
+                acc.get("kreita_je") or now_iso(),
             ),
         )
         return cur.lastrowid  # type: ignore[return-value]
@@ -1059,7 +1060,7 @@ def _save_message(msg: dict) -> int:
                 json.dumps(msg.get("aldonajoj") or [], ensure_ascii=False),
                 json.dumps(msg.get("etikedoj") or [], ensure_ascii=False),
                 msg.get("ricevita_je"),
-                msg.get("kreita_je") or _now_iso(),
+                msg.get("kreita_je") or now_iso(),
             ),
         )
         return cur.lastrowid  # type: ignore[return-value]
@@ -1307,7 +1308,7 @@ def _copy_message(msg_id: int, konto_id: int, dosierujo_id: int) -> int | None:
                 row["aldonajoj"],
                 row["etikedoj"],
                 row["ricevita_je"],
-                _now_iso(),
+                now_iso(),
             ),
         )
         new_id = int(cur.lastrowid)
@@ -1407,7 +1408,7 @@ def _save_aldonajo(
     Returns: aldonajo_id
     """
     grandeco = len(enhavo)
-    kreita_je = _now_iso()
+    kreita_je = now_iso()
     
     with _get_db() as con:
         if grandeco < _ALDONAJO_MAX_DB_SIZE:
@@ -1607,7 +1608,7 @@ def _upsert_contact(retposto: str, nomo: str | None = None,
                     konfirmita: int | None = None,
                     kategorioj: list[str] | None = None) -> None:
     """Insert or update a contact by email address."""
-    now = _now_iso()
+    now = now_iso()
     with _get_db() as con:
         existing = con.execute(
             "SELECT id FROM kontakto WHERE retposto = ?", (retposto,)
@@ -1700,7 +1701,7 @@ def _insert_contact_without_email(
     telefono: str | None = None,
     noto: str | None = None,
 ) -> dict:
-    now = _now_iso()
+    now = now_iso()
     uid = _make_uuid()
     with _get_db() as con:
         con.execute(
@@ -1753,7 +1754,7 @@ def _add_spam_block(rule: str) -> None:
     with _get_db() as con:
         con.execute(
             "INSERT OR IGNORE INTO spamo_bloko (regulo, kreita_je) VALUES (?,?)",
-            (rule.lower().strip(), _now_iso()),
+            (rule.lower().strip(), now_iso()),
         )
 
 
@@ -1809,7 +1810,7 @@ def _save_filter(nomo: str, sieve_kodo: str, ordo: int = 0) -> None:
                VALUES (?,?,1,?,?)
                ON CONFLICT(nomo) DO UPDATE SET sieve_kodo=excluded.sieve_kodo,
                ordo=excluded.ordo""",
-            (nomo, sieve_kodo, ordo, _now_iso()),
+            (nomo, sieve_kodo, ordo, now_iso()),
         )
 
 
@@ -2148,7 +2149,7 @@ def _parse_imap_message(
         "aldonajoj": aldonajoj_filenames,
         "etikedoj": ["read-receipt-requested"] if receipt_request else [],
         "ricevita_je": ricevita_je,
-        "kreita_je": _now_iso(),
+        "kreita_je": now_iso(),
     }
     
     return mesago_dict, aldonajoj_data
@@ -2496,7 +2497,7 @@ def _send_message(
             "prioritato": prioritato if prioritato is not None else 5,
             "etikedoj": ["read-receipt-requested"] if peti_legokonfirmon else [],
             "legita": 1,
-            "ricevita_je": _now_iso(),
+            "ricevita_je": now_iso(),
         })
         # Auto-save recipients as contacts
         for addr in recipients:

@@ -23,6 +23,7 @@ from rich.markup import escape
 from rich.table import Table
 
 from autish.i18n import tr
+from autish.utils import now_iso
 
 app = typer.Typer(
     name="kalendaro",
@@ -44,7 +45,7 @@ _sync_worker_started = False
 _KEYRING_SERVICE = "autish.kalendaro"
 
 
-def _now_iso() -> str:
+def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
@@ -389,7 +390,7 @@ def _pull_calendar_events(
         raise RuntimeError("Kalendaro ne trovita por sinkronigo.")
     url = str(row["url"] or "").strip()
     username = str(row["username"] or "").strip()
-    ts = now or _now_iso()
+    ts = now or now_iso()
     imported = 0
     if url.lower().startswith("file://"):
         file_path = Path(url[7:])
@@ -412,7 +413,7 @@ def _pull_calendar_events(
 def _queue_sync(
     con: sqlite3.Connection, calendar_uuid: str, operation: str, payload: dict
 ) -> None:
-    now = _now_iso()
+    now = now_iso()
     con.execute(
         """
         INSERT INTO sync_queue(
@@ -449,7 +450,7 @@ def _sync_worker() -> None:
                 ).fetchall()
                 if not pending:
                     return
-                now = _now_iso()
+                now = now_iso()
                 for row in pending:
                     queue_id = str(row["id"])
                     calendar_uuid = str(row["calendar_uuid"])
@@ -519,7 +520,7 @@ def _push_undo(con: sqlite3.Connection, operation: str, payload: dict) -> str:
     con.execute(
         "INSERT INTO undo_changes (id, operacio, payload, kreita_je) "
         "VALUES (?, ?, ?, ?)",
-        (change_id, operation, json.dumps(payload, ensure_ascii=False), _now_iso()),
+        (change_id, operation, json.dumps(payload, ensure_ascii=False), now_iso()),
     )
     rows = con.execute("SELECT id FROM undo_changes ORDER BY kreita_je DESC").fetchall()
     for row in rows[_MAX_UNDO:]:
@@ -580,7 +581,7 @@ def _insert_ics_events(
     *,
     now: str | None = None,
 ) -> list[str]:
-    ts = now or _now_iso()
+    ts = now or now_iso()
     added: list[str] = []
     for event in _iter_ics_events(text):
         start = _to_iso(_ics_dt(str(event.get("DTSTART", ts))))
@@ -689,7 +690,7 @@ def aldoni(
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=1) from exc
         uid = str(_uuid_mod.uuid4())
-        now = _now_iso()
+        now = now_iso()
         con.execute(
             """
             INSERT INTO calendars (uuid, url, username, remote, kreita_je, modifita_je)
@@ -815,7 +816,7 @@ def modifi(
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=1) from exc
 
-        now = _now_iso()
+        now = now_iso()
         con.execute(
             "UPDATE calendars SET url=?, username=?, modifita_je=? WHERE uuid=?",
             (new_url, new_username, now, resolved),
@@ -985,7 +986,7 @@ def importi(
             typer.echo("Kalendaro ne trovita.", err=True)
             raise typer.Exit(code=1)
         _warn_unsynced(con, [resolved_cal])
-        now = _now_iso()
+        now = now_iso()
         added: list[str] = []
         for file_path in dosieroj:
             text = Path(file_path).read_text(encoding="utf-8")
@@ -1311,8 +1312,8 @@ def malfari(
                             uid,
                             str(event.get("calendar_uuid") or ""),
                             str(event.get("titolo") or ""),
-                            str(event.get("komenco") or _now_iso()),
-                            str(event.get("fino") or _now_iso()),
+                            str(event.get("komenco") or now_iso()),
+                            str(event.get("fino") or now_iso()),
                             str(event.get("kategorio") or ""),
                             str(event.get("loko") or ""),
                             str(event.get("ripeto") or ""),
@@ -1320,8 +1321,8 @@ def malfari(
                                 event.get("partoprenantoj") or [], ensure_ascii=False
                             ),
                             str(event.get("priskribo") or ""),
-                            _now_iso(),
-                            _now_iso(),
+                            now_iso(),
+                            now_iso(),
                         ),
                     )
                 if conflicts:
@@ -1353,8 +1354,8 @@ def malfari(
                                 str(cal.get("url") or ""),
                                 str(cal.get("username") or ""),
                                 int(cal.get("remote") or 1),
-                                str(cal.get("kreita_je") or _now_iso()),
-                                str(cal.get("modifita_je") or _now_iso()),
+                                str(cal.get("kreita_je") or now_iso()),
+                                str(cal.get("modifita_je") or now_iso()),
                             ),
                         )
                     for event in item.get("events") or []:
@@ -1378,8 +1379,8 @@ def malfari(
                                 uid,
                                 str(event.get("calendar_uuid") or cal_uuid),
                                 str(event.get("titolo") or ""),
-                                str(event.get("komenco") or _now_iso()),
-                                str(event.get("fino") or _now_iso()),
+                                str(event.get("komenco") or now_iso()),
+                                str(event.get("fino") or now_iso()),
                                 str(event.get("kategorio") or ""),
                                 str(event.get("loko") or ""),
                                 str(event.get("ripeto") or ""),
@@ -1388,8 +1389,8 @@ def malfari(
                                     ensure_ascii=False,
                                 ),
                                 str(event.get("priskribo") or ""),
-                                _now_iso(),
-                                _now_iso(),
+                                now_iso(),
+                                now_iso(),
                             ),
                         )
             con.execute("DELETE FROM undo_changes WHERE id = ?", (str(row["id"]),))
@@ -1628,7 +1629,7 @@ def sinkronigi(
                 _queue_sync(con, uid, "tiri", {"source": "sinkronigi"})
 
         # Retry failed jobs when user explicitly asks for sync.
-        now = _now_iso()
+        now = now_iso()
         con.execute(
             "UPDATE sync_queue SET stato='pending', modifita_je=? "
             "WHERE stato='failed'" + where,

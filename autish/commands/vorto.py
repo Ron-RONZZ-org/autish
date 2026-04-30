@@ -40,6 +40,7 @@ from autish.i18n import tr
 from autish.utils import (
     best_text_match_score,
     fold_search_text,
+    now_iso,
     open_path_in_browser,
     substring_match_folded,
     substring_match_folded_compact,
@@ -452,7 +453,7 @@ _RUBUJO_DAYS = 30  # entries older than this are auto-purged
 
 def _move_to_rubujo(entry: dict) -> None:
     """Move *entry* from the vorto table into the rubujo table."""
-    forigita_je = _now_iso()
+    forigita_je = now_iso()
     params = _dict_to_params(entry) + (forigita_je,)
     with _get_db() as con:
         con.execute("DELETE FROM vorto WHERE uuid = ?", (entry["uuid"],))
@@ -522,7 +523,7 @@ def _cleanup_old_rubujo() -> int:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _now_iso() -> str:
+def now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
 
 
@@ -1297,7 +1298,7 @@ def _sync_bidirectional_links(
     if source is None:
         return
 
-    now = _now_iso()
+    now = now_iso()
 
     normalized_links: list[str] = []
     seen: set[str] = set()
@@ -2014,7 +2015,7 @@ def aldoni(
             existing_entry["autoro"] = _normalize_multiline_text(autoro)
         if verko is not None:
             existing_entry["verko"] = _normalize_multiline_text(verko)
-        existing_entry["modifita_je"] = _now_iso()
+        existing_entry["modifita_je"] = now_iso()
         if not _show_diff_confirmation(
             "modifi (anstataŭigi)",
             existing_entry,
@@ -2043,7 +2044,7 @@ def aldoni(
         return
     # ── No duplicate — create a new entry ────────────────────────────────────
 
-    now = _now_iso()
+    now = now_iso()
     entry: dict = {
         "uuid": str(_uuid_mod.uuid4()),
         "teksto": teksto,
@@ -2360,7 +2361,7 @@ def modifi(
         entry["autoro"] = autoro
     if verko is not None:
         entry["verko"] = verko
-    entry["modifita_je"] = _now_iso()
+    entry["modifita_je"] = now_iso()
 
     # Apply French ligature normalization using the effective language
     effective_lingvo = (entry.get("lingvo") or "").lower()

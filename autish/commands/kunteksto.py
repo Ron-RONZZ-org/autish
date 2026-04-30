@@ -22,6 +22,7 @@ from rich.table import Table
 from autish.utils import (
     confirm_esperante,
     markdown_to_html,
+    now_iso,
     parse_markdown_links,
     score_text_match,
 )
@@ -69,7 +70,7 @@ def _init_db(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _now_iso() -> str:
+def now_iso() -> str:
     """Get current timestamp in ISO format."""
     return datetime.now(timezone.utc).isoformat()
 
@@ -255,7 +256,7 @@ def aldoni(
     linked_uuids = ",".join([link.uuid for link in links]) if links else ""
 
     # Create entry
-    now = _now_iso()
+    now = now_iso()
     entry = {
         "uuid": str(_uuid_mod.uuid4()),
         "titolo": final_title,
@@ -335,7 +336,7 @@ def modifi(
 
         # Update entry
         entry["enhavo"] = updated_content
-        entry["modifita_je"] = _now_iso()
+        entry["modifita_je"] = now_iso()
 
         # Re-extract links
         links = parse_markdown_links(updated_content)

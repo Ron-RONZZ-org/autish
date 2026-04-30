@@ -49,7 +49,7 @@ from rich.table import Table
 from autish.commands.uzanto import _load_profile
 from autish.services.ai_common import build_verki_service, load_ai_context
 from autish.services.verki import VerkiRequest, VerkiServiceError
-from autish.utils import open_path_in_browser
+from autish.utils import now_iso, open_path_in_browser
 
 # Import doc helper for displaying manlibro(j) in encik vidi
 try:
@@ -649,7 +649,7 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
-def _now_iso() -> str:
+def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -2664,7 +2664,7 @@ def _reconcile_all_semantic_reverse_links() -> None:
         ):
             target["ligilo"] = reconciled_serialized
             _save_auto_reverse_pairs(target, final_auto_pairs)
-            target["modifita_je"] = _now_iso()
+            target["modifita_je"] = now_iso()
             changed[target_uuid] = target
 
     for updated in changed.values():
@@ -3351,7 +3351,7 @@ def _sync_bidirectional_relations_for_entry(
     ]
     current["ligilo"] = _serialize_ligilo_items(current_lig_items)
     current["superklaso"] = current_sup
-    current["modifita_je"] = _now_iso()
+    current["modifita_je"] = now_iso()
     changed.append(current)
     current_pairs = {
         (
@@ -3398,7 +3398,7 @@ def _sync_bidirectional_relations_for_entry(
             auto_pairs.add((current["uuid"], reverse_sem))
             _save_auto_reverse_pairs(other, auto_pairs)
             other["ligilo"] = _serialize_ligilo_items(other_lig_items)
-            other["modifita_je"] = _now_iso()
+            other["modifita_je"] = now_iso()
             changed.append(other)
 
     # Remove stale auto-managed reverse links for relations removed from current.
@@ -3427,7 +3427,7 @@ def _sync_bidirectional_relations_for_entry(
         auto_pairs.discard(auto_key)
         _save_auto_reverse_pairs(other, auto_pairs)
         other["ligilo"] = _serialize_ligilo_items(filtered_items)
-        other["modifita_je"] = _now_iso()
+        other["modifita_je"] = now_iso()
         changed.append(other)
 
     # Normalize parent links (superklaso only stores UUID refs)
@@ -3436,7 +3436,7 @@ def _sync_bidirectional_relations_for_entry(
         if parent is None:
             continue
         # touch parent timestamp only when relation exists for visibility freshness
-        parent["modifita_je"] = _now_iso()
+        parent["modifita_je"] = now_iso()
         changed.append(parent)
 
     # Persist deduplicated updates
@@ -5192,7 +5192,7 @@ def aldoni(
             citajo=parsed["citajo"],
             datumo=parsed["datumo"],
             semantika=parsed["semantika"],
-            modifita_je=_now_iso(),
+            modifita_je=now_iso(),
         )
         _update_entry(existing)
         _sync_bidirectional_relations_for_entry(
@@ -5211,7 +5211,7 @@ def aldoni(
                 _display_entry(existing)
         return
 
-    now = _now_iso()
+    now = now_iso()
     entry: dict = {
         "uuid": str(_uuid_mod.uuid4()),
         "kreita_je": now,
@@ -5492,7 +5492,7 @@ def modifi(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1) from exc
     _raise_if_semantic_conflicts(entry, strict=False)
-    entry["modifita_je"] = _now_iso()
+    entry["modifita_je"] = now_iso()
     _update_entry(entry)
     _sync_bidirectional_relations_for_entry(entry, previous_ligilo=previous_ligilo)
     invalid_path.unlink(missing_ok=True)
