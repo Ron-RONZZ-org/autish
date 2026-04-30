@@ -34,6 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Improved exception handling in `_crypto.py` - more specific exception catching for decryption
 - Improved exception handling in `retposto.py` - catch specific exceptions (InvalidDateFormat, OSError) instead of broad `Exception`
 
+### Added (Phase 4)
+- `autish/utils.py` now includes `now_iso()` - canonical timestamp function
+- Consolidated timestamp handling across vorto, kalendaro, retposto, encik, kunteksto
+
+### Fixed (Phase 4)
+- Fixed timestamp inconsistency bug: vorto/kalendaro stripped microseconds but retposto/encik/kunteksto kept them - now all use consistent seconds-precision timestamps
+
 ---
 
 ## [0.0.1] - 2026-04-30
