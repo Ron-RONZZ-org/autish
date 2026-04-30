@@ -300,6 +300,33 @@ def _load_entries() -> list[dict]:
     return [_row_to_dict(r) for r in rows]
 
 
+def _find_entry_by_uuid(uuid: str) -> dict | None:
+    """Find a single entry by UUID using SQL (indexed lookup). Returns None if not found."""
+    with _get_db() as con:
+        row = con.execute(
+            "SELECT * FROM vorto WHERE uuid = ?", (uuid,)
+        ).fetchone()
+        return _row_to_dict(row) if row else None
+
+
+def _find_entry_by_teksto(teksto: str) -> dict | None:
+    """Find a single entry by case-insensitive teksto using SQL. Returns None if not found."""
+    with _get_db() as con:
+        row = con.execute(
+            "SELECT * FROM vorto WHERE LOWER(teksto) = LOWER(?)", (teksto,)
+        ).fetchone()
+        return _row_to_dict(row) if row else None
+
+
+def _find_entries_by_uuid_prefix(prefix: str) -> list[dict]:
+    """Find entries whose UUID starts with prefix using SQL (indexed lookup)."""
+    with _get_db() as con:
+        rows = con.execute(
+            "SELECT * FROM vorto WHERE uuid LIKE ?", (f"{prefix}%",)
+        ).fetchall()
+        return [_row_to_dict(r) for r in rows]
+
+
 def _find_existing_by_teksto_in_list(teksto: str, entries: list[dict]) -> dict | None:
     """Find an entry by teksto using Python list search (case-insensitive). Returns None if not found."""
     return next(
@@ -347,7 +374,57 @@ def _save_undo_stack(stack: list[dict]) -> None:
             "INSERT INTO undo_stack (operation) VALUES (?)",
             [(json.dumps(op, ensure_ascii=False),) for op in stack],
         )
-        con.commit()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Efficient per-operation undo functions (avoid full table rewrite)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _undo_add(uuid: str) -> str:
+    """Undo an add operation by deleting the entry (efficient, no full rewrite)."""
+    with _get_db() as con:
+        result = con.execute("DELETE FROM vorto WHERE uuid = ?", (uuid,))
+        if result.rowcount == 0:
+            return f"Nenio por malfari: #{uuid[:8]} ne ekzistas."
+    return f"Malfaris aldoni — forigis #{uuid[:8]}."
+
+
+def _undo_modify(old_entry: dict) -> str:
+    """Undo a modify operation by restoring the old entry (efficient)."""
+    uuid = old_entry["uuid"]
+    params = _dict_to_params(old_entry)
+    with _get_db() as con:
+        result = con.execute(
+            """
+            UPDATE vorto SET
+                teksto = ?, lingvo = ?, kategorio = ?, tipo = ?, temo = ?,
+                tono = ?, nivelo = ?, difinoj = ?, uzoj = ?, etikedoj = ?,
+                ligiloj = ?, autoro = ?, verko = ?, modifita_je = ?
+            WHERE uuid = ?
+            """,
+            (*params[:14], uuid),  # All except kreita_je and uuid at end
+        )
+        if result.rowcount == 0:
+            return f"Nenio por malfari: #{uuid[:8]} ne ekzistas."
+    return f"Malfaris modifi — restaŭris #{uuid[:8]}."
+
+
+def _undo_delete(entry: dict) -> str:
+    """Undo a delete operation by re-inserting the entry (efficient)."""
+    params = _dict_to_params(entry)
+    with _get_db() as con:
+        con.execute(
+            """
+            INSERT INTO vorto
+                (uuid, teksto, lingvo, kategorio, tipo, temo, tono,
+                 nivelo, difinoj, uzoj, etikedoj, ligiloj,
+                 autoro, verko, kreita_je, modifita_je)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            params,
+        )
+    return f"Malfaris forigi — restaŭris #{entry['uuid'][:8]} \"{entry['teksto']}\"."
 
 
 def _push_undo(operation: dict) -> None:
@@ -2798,7 +2875,7 @@ def forigi(
 
     for entry in to_delete:
         _move_to_rubujo(entry)
-        _push_undo({"op": "forigi", "uuid": entry["uuid"]})
+        _push_undo({"op": "forigi", "uuid": entry["uuid"], "entry": entry})
     typer.echo(
         f"Sendis al rubujo: {len(to_delete)} eniro(j) "
         f"(aŭtomate forigita post {_RUBUJO_DAYS} tagoj)"
@@ -3349,40 +3426,37 @@ def _undo_action() -> str:
         return "Nenio por malfari. (Nothing to undo.)"
 
     op = stack.pop()
-    entries = _load_entries()
 
     if op["op"] == "aldoni":
-        uid = op["uuid"]
-        entries = [e for e in entries if e["uuid"] != uid]
-        _save_entries(entries)
-        msg = f"Malfaris aldoni — forigis #{uid[:8]}."
+        msg = _undo_add(op["uuid"])
     elif op["op"] == "modifi":
-        old = op["old"]
-        idx = next(
-            (i for i, e in enumerate(entries) if e["uuid"] == old["uuid"]), None
-        )
-        if idx is not None:
-            entries[idx] = old
-        _save_entries(entries)
-        msg = f"Malfaris modifi — restaŭris #{old['uuid'][:8]}."
+        msg = _undo_modify(op["old"])
     elif op["op"] == "forigi":
         uuid = op.get("uuid") or (op.get("entry") or {}).get("uuid")
         if uuid:
+            # Try to recover from rubujo first (more complete)
             recovered = _recover_from_rubujo(uuid)
             if recovered:
-                msg = (
-                    f"Malfaris forigi — restaŭris "
-                    f"#{uuid[:8]}  \"{recovered['teksto']}\"."
-                )
+                # Actually it was already removed from rubujo by recover,
+                # so we need to re-delete from rubujo and add to vorto
+                with _get_db() as con:
+                    con.execute("DELETE FROM rubujo WHERE uuid = ?", (uuid,))
+                    params = _dict_to_params(recovered)
+                    con.execute(
+                        """
+                        INSERT INTO vorto (uuid, teksto, lingvo, kategorio, tipo, temo,
+                            tono, nivelo, difinoj, uzoj, etikedoj, ligiloj,
+                            autoro, verko, kreita_je, modifita_je)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        params,
+                    )
+                msg = f"Malfaris forigi — restaŭris #{uuid[:8]} \"{recovered['teksto']}\"."
             else:
+                # Fall back to saved entry in undo operation
                 old = op.get("entry")
                 if old:
-                    entries.append(old)
-                    _save_entries(entries)
-                    msg = (
-                        f"Malfaris forigi — restaŭris "
-                        f"#{old['uuid'][:8]}  \"{old['teksto']}\"."
-                    )
+                    msg = _undo_delete(old)
                 else:
                     msg = "Ne povis restaŭri: eniro ne trovita en rubujo."
         else:
@@ -3446,7 +3520,7 @@ def _tui_save_modified(entry: dict, old_entry: dict) -> None:
 
 def _tui_delete(entry: dict) -> None:
     _move_to_rubujo(entry)
-    _push_undo({"op": "forigi", "uuid": entry["uuid"]})
+    _push_undo({"op": "forigi", "uuid": entry["uuid"], "entry": entry})
 
 
 def _rubujo_entries_to_lines(entries: list[dict]) -> list[str]:
