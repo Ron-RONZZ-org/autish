@@ -2076,9 +2076,14 @@ def _parse_imap_message(
     ricevita_je: str | None = None
     try:
         from email.utils import parsedate_to_datetime
-        ricevita_je = parsedate_to_datetime(date_str).isoformat()
-    except Exception:
+        from email.errors import InvalidDateFormat
+    except ImportError:
         pass
+    else:
+        try:
+            ricevita_je = parsedate_to_datetime(date_str).isoformat()
+        except (InvalidDateFormat, ValueError):
+            pass
 
     # Extract body and attachments
     korpo: str | None = None
@@ -4882,7 +4887,8 @@ def importi(
                 kontoj_bytes = toml_path.read_bytes()
         except typer.Exit:
             raise
-        except Exception as exc:
+        except (OSError, RuntimeError, Exception) as exc:
+            # Catch file errors, 7z errors, and other extraction failures
             typer.echo(f"[!] Arkiv-eraro: {exc}", err=True)
             raise typer.Exit(1) from exc
     elif is_encrypted(raw):
