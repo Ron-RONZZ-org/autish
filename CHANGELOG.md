@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Updated `autish/i18n.py` to use new `autish.profile.load_profile()` function
 - Updated undo operation storage in vorto.py to include full entry data for efficient restoration
 
+### Added (Phase 3)
+- `autish/paths.py` - Centralized path handling module with `data_dir()`, `config_dir()`, database path functions
+
+### Fixed (Phase 3)
+- Improved exception handling in `_crypto.py` - more specific exception catching for decryption
+- Improved exception handling in `retposto.py` - catch specific exceptions (InvalidDateFormat, OSError) instead of broad `Exception`
+
 ---
 
 ## [0.0.1] - 2026-04-30
