@@ -15,10 +15,6 @@ from __future__ import annotations
 import os
 import re
 
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.hashes import SHA256
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-
 _MAGIC = b"AUTX"
 _VERSION = b"\x01"
 _SALT_LEN = 16
@@ -55,6 +51,9 @@ def validate_strong_password(password: str) -> str | None:
 
 
 def _derive_key(password: str, salt: bytes) -> bytes:
+    from cryptography.hazmat.primitives.hashes import SHA256
+    from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
     kdf = PBKDF2HMAC(
         algorithm=SHA256(),
         length=_KEY_LEN,
@@ -71,6 +70,8 @@ def _derive_key(password: str, salt: bytes) -> bytes:
 
 def encrypt(plaintext: bytes, password: str) -> bytes:
     """Encrypt *plaintext* with *password*. Returns opaque encrypted bytes."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
     salt = os.urandom(_SALT_LEN)
     nonce = os.urandom(_NONCE_LEN)
     key = _derive_key(password, salt)
@@ -81,6 +82,8 @@ def encrypt(plaintext: bytes, password: str) -> bytes:
 
 def decrypt(data: bytes, password: str) -> bytes:
     """Decrypt *data* with *password*. Raises ValueError on bad password/data."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
     hdr_len = len(_MAGIC) + len(_VERSION) + _SALT_LEN + _NONCE_LEN
     if len(data) < hdr_len + 16:
         raise ValueError("Malĝusta dosierformato (tro mallonga).")
