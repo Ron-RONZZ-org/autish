@@ -132,4 +132,270 @@ def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
             elif isinstance(item, str):
                 normalized.append(item)
         d["uzoj"] = normalized
+    # Ensure tipo is always a list (handle legacy single-string values)
+    if isinstance(d.get("tipo"), str):
+        d["tipo"] = [d["tipo"]] if d["tipo"] else []
+    elif not isinstance(d.get("tipo"), list):
+        d["tipo"] = []
     return d
+
+
+def dict_to_params(entry: dict[str, Any]) -> tuple:
+    """Return the parameter tuple used for INSERT/UPDATE statements."""
+    return (
+        entry["uuid"],
+        entry["teksto"],
+        entry.get("lingvo"),
+        entry.get("kategorio"),
+        json.dumps(entry.get("tipo") or [], ensure_ascii=False),
+        entry.get("temo"),
+        entry.get("tono"),
+        entry.get("nivelo"),
+        json.dumps(entry.get("difinoj") or [], ensure_ascii=False),
+        json.dumps(entry.get("uzoj") or [], ensure_ascii=False),
+        json.dumps(entry.get("etikedoj") or {}, ensure_ascii=False),
+        json.dumps(entry.get("ligiloj") or [], ensure_ascii=False),
+        entry.get("autoro"),
+        entry.get("verko"),
+        entry["kreita_je"],
+        entry["modifita_je"],
+    )
+
+
+def load_entries() -> list[dict[str, Any]]:
+    """Return all wordbank entries ordered by creation date (oldest first)."""
+    with get_db() as con:
+        rows = con.execute("SELECT * FROM vorto ORDER BY kreita_je ASC").fetchall()
+    return [row_to_dict(r) for r in rows]
+
+
+def find_entry_by_uuid(uuid: str) -> dict[str, Any] | None:
+    """Find a single entry by UUID using SQL (indexed lookup)."""
+    with get_db() as con:
+        row = con.execute("SELECT * FROM vorto WHERE uuid = ?", (uuid,)).fetchone()
+        return row_to_dict(row) if row else None
+
+
+def find_entry_by_teksto(teksto: str) -> dict[str, Any] | None:
+    """Find a single entry by case-insensitive teksto."""
+    with get_db() as con:
+        row = con.execute(
+            "SELECT * FROM vorto WHERE LOWER(teksto) = LOWER(?)", (teksto,)
+        ).fetchone()
+        return row_to_dict(row) if row else None
+
+
+def find_entries_by_uuid_prefix(prefix: str) -> list[dict[str, Any]]:
+    """Find entries whose UUID starts with prefix."""
+    with get_db() as con:
+        rows = con.execute(
+            "SELECT * FROM vorto WHERE uuid LIKE ?", (f"{prefix}%",)
+        ).fetchall()
+        return [row_to_dict(r) for r in rows]
+
+
+def save_entries(entries: list[dict[str, Any]]) -> None:
+    """Replace the entire entry table with entries in a single transaction."""
+    with get_db() as con:
+        con.execute("DELETE FROM vorto")
+        con.executemany(
+            """
+            INSERT INTO vorto
+                (uuid, teksto, lingvo, kategorio, tipo, temo, tono,
+                 nivelo, difinoj, uzoj, etikedoj, ligiloj,
+                 autoro, verko, kreita_je, modifita_je)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [dict_to_params(e) for e in entries],
+        )
+        con.commit()
+
+
+def insert_entry(entry: dict[str, Any]) -> None:
+    """Insert a single entry into the database."""
+    with get_db() as con:
+        con.execute(
+            """
+            INSERT INTO vorto
+                (uuid, teksto, lingvo, kategorio, tipo, temo, tono,
+                 nivelo, difinoj, uzoj, etikedoj, ligiloj,
+                 autoro, verko, kreita_je, modifita_je)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            dict_to_params(entry),
+        )
+        con.commit()
+
+
+def update_entry(entry: dict[str, Any]) -> None:
+    """Update a single entry in the database."""
+    with get_db() as con:
+        con.execute(
+            """
+            UPDATE vorto SET
+                teksto = ?, lingvo = ?, kategorio = ?, tipo = ?, temo = ?,
+                tono = ?, nivelo = ?, difinoj = ?, uzoj = ?, etikedoj = ?,
+                ligiloj = ?, autoro = ?, verko = ?, modifita_je = ?
+            WHERE uuid = ?
+            """,
+            (
+                entry["teksto"],
+                entry.get("lingvo"),
+                entry.get("kategorio"),
+                json.dumps(entry.get("tipo") or [], ensure_ascii=False),
+                entry.get("temo"),
+                entry.get("tono"),
+                entry.get("nivelo"),
+                json.dumps(entry.get("difinoj") or [], ensure_ascii=False),
+                json.dumps(entry.get("uzoj") or [], ensure_ascii=False),
+                json.dumps(entry.get("etikedoj") or {}, ensure_ascii=False),
+                json.dumps(entry.get("ligiloj") or [], ensure_ascii=False),
+                entry.get("autoro"),
+                entry.get("verko"),
+                entry["modifita_je"],
+                entry["uuid"],
+            ),
+        )
+        con.commit()
+
+
+def delete_entry(uuid: str) -> None:
+    """Delete an entry by UUID."""
+    with get_db() as con:
+        con.execute("DELETE FROM vorto WHERE uuid = ?", (uuid,))
+        con.commit()
+
+
+# Rubujo (trash) functions
+def load_rubujo() -> list[dict[str, Any]]:
+    """Return all entries in the trash, ordered by deletion date (newest first)."""
+    with get_db() as con:
+        rows = con.execute(
+            "SELECT * FROM rubujo ORDER BY forigita_je DESC"
+        ).fetchall()
+    return [row_to_dict(r) for r in rows]
+
+
+def move_to_rubujo(entry: dict[str, Any], forigita_je: str) -> None:
+    """Move an entry to the trash."""
+    with get_db() as con:
+        con.execute(
+            """
+            INSERT INTO rubujo
+                (uuid, teksto, lingvo, kategorio, tipo, temo, tono,
+                 nivelo, difinoj, uzoj, etikedoj, ligiloj,
+                 autoro, verko, kreita_je, forigita_je)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                entry["uuid"],
+                entry["teksto"],
+                entry.get("lingvo"),
+                entry.get("kategorio"),
+                json.dumps(entry.get("tipo") or [], ensure_ascii=False),
+                entry.get("temo"),
+                entry.get("tono"),
+                entry.get("nivelo"),
+                json.dumps(entry.get("difinoj") or [], ensure_ascii=False),
+                json.dumps(entry.get("uzoj") or [], ensure_ascii=False),
+                json.dumps(entry.get("etikedoj") or {}, ensure_ascii=False),
+                json.dumps(entry.get("ligiloj") or [], ensure_ascii=False),
+                entry.get("autoro"),
+                entry.get("verko"),
+                entry["kreita_je"],
+                forigita_je,
+            ),
+        )
+        con.commit()
+
+
+def recover_from_rubujo(uuid: str) -> dict[str, Any] | None:
+    """Recover an entry from trash by UUID, returning the entry."""
+    with get_db() as con:
+        row = con.execute("SELECT * FROM rubujo WHERE uuid = ?", (uuid,)).fetchone()
+        if not row:
+            return None
+        entry = row_to_dict(row)
+        # Insert back into vorto
+        con.execute(
+            """
+            INSERT INTO vorto
+                (uuid, teksto, lingvo, kategorio, tipo, temo, tono,
+                 nivelo, difinoj, uzoj, etikedoj, ligiloj,
+                 autoro, verko, kreita_je, modifita_je)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                entry["uuid"],
+                entry["teksto"],
+                entry.get("lingvo"),
+                entry.get("kategorio"),
+                json.dumps(entry.get("tipo") or [], ensure_ascii=False),
+                entry.get("temo"),
+                entry.get("tono"),
+                entry.get("nivelo"),
+                json.dumps(entry.get("difinoj") or [], ensure_ascii=False),
+                json.dumps(entry.get("uzoj") or [], ensure_ascii=False),
+                json.dumps(entry.get("etikedoj") or {}, ensure_ascii=False),
+                json.dumps(entry.get("ligiloj") or [], ensure_ascii=False),
+                entry.get("autoro"),
+                entry.get("verko"),
+                entry["kreita_je"],
+                entry.get("forigita_je"),  # Use deletion time as modifita_je
+            ),
+        )
+        con.execute("DELETE FROM rubujo WHERE uuid = ?", (uuid,))
+        con.commit()
+        return entry
+
+
+def permanent_delete_from_rubujo(uuid: str) -> None:
+    """Permanently delete an entry from trash."""
+    with get_db() as con:
+        con.execute("DELETE FROM rubujo WHERE uuid = ?", (uuid,))
+        con.commit()
+
+
+def clear_old_rubujo(days: int = 30) -> int:
+    """Delete entries from trash older than specified days. Returns count deleted."""
+    with get_db() as con:
+        cursor = con.execute(
+            "DELETE FROM rubujo WHERE forigita_je < datetime('now', ?)",
+            (f"-{days} days",),
+        )
+        con.commit()
+        return cursor.rowcount
+
+
+# Undo stack functions
+def load_undo_stack() -> list[dict[str, Any]]:
+    """Load the undo stack from database."""
+    with get_db() as con:
+        rows = con.execute(
+            "SELECT operation, data, timestamp FROM undo_stack ORDER BY id ASC"
+        ).fetchall()
+    return [
+        {"operation": r[0], "data": json.loads(r[1]), "timestamp": r[2]}
+        for r in rows
+    ]
+
+
+def save_undo_stack(stack: list[dict[str, Any]]) -> None:
+    """Save the entire undo stack to database."""
+    with get_db() as con:
+        con.execute("DELETE FROM undo_stack")
+        con.executemany(
+            "INSERT INTO undo_stack (operation, data, timestamp) VALUES (?, ?, ?)",
+            [(op["operation"], json.dumps(op["data"]), op["timestamp"]) for op in stack],
+        )
+        con.commit()
+
+
+def push_undo(operation: str, data: dict[str, Any], timestamp: str) -> None:
+    """Push a single undo operation onto the stack."""
+    with get_db() as con:
+        con.execute(
+            "INSERT INTO undo_stack (operation, data, timestamp) VALUES (?, ?, ?)",
+            (operation, json.dumps(data), timestamp),
+        )
+        con.commit()

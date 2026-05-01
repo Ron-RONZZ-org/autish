@@ -288,38 +288,22 @@ _TONO_MAP: dict[str, str] = {
 
 def _load_entries() -> list[dict]:
     """Return all wordbank entries ordered by creation date (oldest first)."""
-    with _get_db() as con:
-        rows = con.execute(
-            "SELECT * FROM vorto ORDER BY kreita_je ASC"
-        ).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    return vorto_repo.load_entries()
 
 
 def _find_entry_by_uuid(uuid: str) -> dict | None:
     """Find a single entry by UUID using SQL (indexed lookup). Returns None if not found."""
-    with _get_db() as con:
-        row = con.execute(
-            "SELECT * FROM vorto WHERE uuid = ?", (uuid,)
-        ).fetchone()
-        return _row_to_dict(row) if row else None
+    return vorto_repo.find_entry_by_uuid(uuid)
 
 
 def _find_entry_by_teksto(teksto: str) -> dict | None:
     """Find a single entry by case-insensitive teksto using SQL. Returns None if not found."""
-    with _get_db() as con:
-        row = con.execute(
-            "SELECT * FROM vorto WHERE LOWER(teksto) = LOWER(?)", (teksto,)
-        ).fetchone()
-        return _row_to_dict(row) if row else None
+    return vorto_repo.find_entry_by_teksto(teksto)
 
 
 def _find_entries_by_uuid_prefix(prefix: str) -> list[dict]:
     """Find entries whose UUID starts with prefix using SQL (indexed lookup)."""
-    with _get_db() as con:
-        rows = con.execute(
-            "SELECT * FROM vorto WHERE uuid LIKE ?", (f"{prefix}%",)
-        ).fetchall()
-        return [_row_to_dict(r) for r in rows]
+    return vorto_repo.find_entries_by_uuid_prefix(prefix)
 
 
 def _find_existing_by_teksto_in_list(teksto: str, entries: list[dict]) -> dict | None:
@@ -336,19 +320,7 @@ def _save_entries(entries: list[dict]) -> None:
     This is used exclusively by the undo system which must restore an arbitrary
     prior snapshot.  Normal CRUD operations call the granular helpers below.
     """
-    with _get_db() as con:
-        con.execute("DELETE FROM vorto")
-        con.executemany(
-            """
-            INSERT INTO vorto
-                (uuid, teksto, lingvo, kategorio, tipo, temo, tono,
-                 nivelo, difinoj, uzoj, etikedoj, ligiloj,
-                 autoro, verko, kreita_je, modifita_je)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [_dict_to_params(e) for e in entries],
-        )
-        con.commit()
+    vorto_repo.save_entries(entries)
 
 
 def _load_undo_stack() -> list[dict]:

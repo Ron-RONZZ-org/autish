@@ -48,6 +48,7 @@ from rich.table import Table
 
 from autish.commands.uzanto import _load_profile
 from autish.services.ai_common import build_verki_service, load_ai_context
+from autish.services import encik_repo
 from autish.services.verki import VerkiRequest, VerkiServiceError
 from autish.utils import now_iso, open_path_in_browser
 
@@ -629,24 +630,13 @@ def _format_number_for_display(
 
 
 def _init_db() -> None:
-    _DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(_DB_FILE)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute(_CREATE_ENCIK)
-        conn.executescript(_CREATE_ENCIK_INDEXES)
-        conn.execute(_CREATE_ENCIK_FTS)
-        _migrate_db(conn)
-        conn.commit()
-    finally:
-        conn.close()
+    """Initialize the database (delegated to encik_repo)."""
+    encik_repo.init_db()
 
 
 def _get_conn() -> sqlite3.Connection:
-    _init_db()
-    conn = sqlite3.connect(_DB_FILE)
-    conn.row_factory = sqlite3.Row
-    return conn
+    """Get a database connection (delegated to encik_repo)."""
+    return encik_repo.get_conn()
 
 
 def now_iso() -> str:
@@ -684,27 +674,8 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
-    d = dict(row)
-    for field in ("superklaso", "ligilo", "fonto", "citajo", "source"):
-        if isinstance(d.get(field), str):
-            d[field] = json.loads(d[field])
-    for field in ("terminologio", "difinoj", "datumo", "semantika"):
-        if isinstance(d.get(field), str):
-            d[field] = json.loads(d[field])
-    if "fonto" not in d and "source" in d:
-        d["fonto"] = d.get("source") or []
-    if "terminologio" not in d:
-        titolo = str(d.get("titolo") or "").strip()
-        d["terminologio"] = {"eo": titolo} if titolo else {}
-    if "difinoj" not in d:
-        difinio = str(d.get("difinio") or "").strip()
-        d["difinoj"] = {"eo": difinio} if difinio else {}
-    if "enhavo" not in d:
-        d["enhavo"] = ""
-    if "citajo" not in d:
-        d["citajo"] = []
-    if "datumo" not in d:
-        d["datumo"] = {}
+    """Convert a row to dict (delegated to encik_repo)."""
+    return encik_repo.row_to_dict(row)
     if "semantika" not in d:
         d["semantika"] = []
     if not d.get("titolo"):
@@ -717,25 +688,13 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
 
 
 def _load_all_unsorted() -> list[dict]:
-    """Load all entries without sorting (faster for internal operations)."""
-    conn = _get_conn()
-    try:
-        rows = conn.execute("SELECT * FROM encik").fetchall()
-        return [_row_to_dict(r) for r in rows]
-    finally:
-        conn.close()
+    """Load all entries without sorting (delegated to encik_repo)."""
+    return encik_repo.load_all_unsorted()
 
 
 def _load_all() -> list[dict]:
-    """Load all entries sorted by title (for display/UI)."""
-    conn = _get_conn()
-    try:
-        rows = conn.execute(
-            "SELECT * FROM encik ORDER BY titolo COLLATE NOCASE"
-        ).fetchall()
-        return [_row_to_dict(r) for r in rows]
-    finally:
-        conn.close()
+    """Load all entries sorted by title (delegated to encik_repo)."""
+    return encik_repo.load_all()
 
 
 def _find_by_uuid(uid: str) -> dict | None:
