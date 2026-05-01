@@ -2070,14 +2070,13 @@ def _parse_imap_message(
     # Parse date
     ricevita_je: str | None = None
     try:
-        from email.errors import InvalidDateFormat
         from email.utils import parsedate_to_datetime
     except ImportError:
         pass
     else:
         try:
             ricevita_je = parsedate_to_datetime(date_str).isoformat()
-        except (InvalidDateFormat, ValueError):
+        except (ValueError, TypeError):
             pass
 
     # Extract body and attachments
