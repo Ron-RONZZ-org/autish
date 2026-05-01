@@ -15,6 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Centralized modules: paths.py, console.py, db.py, utils.py
 - Service layer extraction: vorto_repo, encik_repo
 
+### Fixed
+- Fixed all test_sistemo.py failures: psutil v7.x API (mock classes), bash-alias commands, UID usage, battery assertions
+- Fixed test_error_handling.py: replaced requests with urllib (not a dependency)
+- Fixed test_help_i18n.py: monkeypatched correct module (autish.profile)
+- Fixed F821 undefined name errors across 8 files (_retposto_tui.py, encik.py, retposto.py, rubo.py, sekurkopio.py, uzanto.py, verki.py, vorto.py)
+- Added pyperclip import (is a dependency), changed requests exception to generic Exception
+
+### Verified
+- All 1035 tests pass
+- Linter: 0 F821/F822/F823 errors
+- Build: autish-0.0.2-py3-none-any.whl, autish-0.0.2.tar.gz
+
 ---
 
 ## [Unreleased]
