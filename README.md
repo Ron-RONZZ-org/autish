@@ -10,7 +10,7 @@ Cross-platform CLI software for essential tasks with minimum stimulation. Design
 - **Sensible defaults** — works well out of the box without memorising options
 - **Neurodiversity-first** — clear, minimalist syntax; Esperanto keywords so non-English speakers can participate equally
 - **Offline-first** — core functionality works without internet access
-- **Humble scope** — v0.0.1 targets Debian-based Linux
+- **Scope** — v0.0.2 targets Debian-based Linux
 
 ---
 
@@ -20,20 +20,58 @@ All keywords are in **Esperanto** to lower the barrier for non-English speakers.
 
 | Command | Description |
 |---|---|
-| `autish tempo` | Print current local time (ISO) and day of week |
-| `autish wifi ls` | List Wi-Fi connections |
-| `autish wifi konekti` | Connect to a Wi-Fi network |
-| `autish wifi malkonekti` | Disconnect from Wi-Fi |
-| `autish wifi forigi` | Delete a saved Wi-Fi profile |
-| `autish bluhdento ls` | List Bluetooth devices |
-| `autish bluhdento konekti` | Connect a Bluetooth device |
-| `autish bluhdento malkonekti` | Disconnect a Bluetooth device |
-| `autish sistemo` | Print system information |
-| `autish kp` | Copy last command output to clipboard |
-| `autish verki generi` | AI-assisted text generation and rewriting; see [VERKI.md](VERKI.md) |
-
-**Note:** verki may surface router/Cloudflare or host-blocking errors (403/Error 1010 or HTML 404 fallback). See VERKI.md Troubleshooting for recommended actions (try another model/network or contact model owner).
-| `autish verki modelo` | Browse available AI models |
+| `autish tempo` | Current local time (ISO) and day of week |
+| `autish tempo --horzono 9` | Show time for UTC+9 |
+| `autish wifi ls` | List saved Wi-Fi connections |
+| `autish wifi konekti "SSID" -p "password"` | Connect to Wi-Fi |
+| `autish wifi forigi "SSID"` | Delete a saved Wi-Fi profile |
+| `autish bluhdento ls` | List paired Bluetooth devices |
+| `autish bluhdento konekti AA:BB:CC:DD:EE:FF` | Connect to Bluetooth device |
+| `autish bluhdento malkonekti` | Disconnect Bluetooth |
+| `autish sistemo` | System info (CPU, memory, disk, battery, network) |
+| `autish sistemo install` | Install autish globally (add to PATH) |
+| `autish kp [command]` | Run command and copy output to clipboard |
+| `autish kp` | Copy last captured output again |
+| `autish shelo` | Interactive shell with autish commands available |
+| `autish vorto` | Personal word bank / dictionary |
+| `autish vorto aldoni "word" -d "definition"` | Add word with definition |
+| `autish vorto serci "keyword"` | Search word bank |
+| `autish encik` | Personal encyclopedia / knowledge base |
+| `autish encik aldoni "title" -d "content"` | Add encyclopedia entry |
+| `autish encik serci "query"` | Search encyclopedia |
+| `autish retposto` | Email client (IMAP) |
+| `autish retposto ls` | List email folders |
+| `autish kontakto` | Contact manager |
+| `autish kontakto ls` | List contacts |
+| `autish kontakto aldoni "name" -e "email"` | Add contact |
+| `autish kalendaro` | Calendar / event manager |
+| `autish kalendaro ls` | List events |
+| `autish kalendaro aldoni "event" -d "2026-05-15"` | Add event |
+| `autish todo` | Task / todo manager |
+| `autish todo ls` | List tasks |
+| `autish todo aldoni "task"` | Add task |
+| `autish taglibro` | Notebook / journal |
+| `autish taglibro ls` | List entries |
+| `autish taglibro skribi "note"` | Add note |
+| `autish sekurkopio` | Backup tool |
+| `autish sekurkopio krei "backup_name"` | Create backup |
+| `autish sekurkopio restaŭri "backup_name"` | Restore backup |
+| `autish disko` | Disk usage analyzer |
+| `autish usb` | USB device manager |
+| `autish filmeto` | Video downloader (yt-dlp) |
+| `autish filmeto elŝuti "URL"` | Download video |
+| `autish etikedo` | Label / tag manager |
+| `autish etikedo ls` | List labels |
+| `autish md` | Markdown tools |
+| `autish md vidi "file.md"` | Render Markdown to terminal |
+| `autish doc` | Document viewer (PDF, DOCX, etc.) |
+| `autish verki` | AI-assisted writing |
+| `autish verki generi "prompt"` | Generate text with AI |
+| `autish verki modelo` | List available AI models |
+| `autish uzanto` | User profile management |
+| `autish uzanto profilo` | Show current profile |
+| `autish rubo ls` | List trash / recycle bin |
+| `autish rubo vyidi` | Empty trash |
 
 ---
 
@@ -41,232 +79,74 @@ All keywords are in **Esperanto** to lower the barrier for non-English speakers.
 
 > **Requirements:** Python 3.10+, Debian-based Linux (Ubuntu, Debian, Mint, …)
 
-### Option A — Install from PyPI (recommended for regular users)
+### Option A — Install from PyPI (recommended)
 
 ```bash
 pip install --user autish
 ```
 
-After installing with `--user`, the `autish` command is placed in `~/.local/bin/`.
-If that directory is not already on your `PATH`, add it:
+After installing with `--user`, the `autish` command is placed in `~/.local/bin/`. Add to PATH if needed:
 
 ```bash
-# Add to ~/.bashrc (bash) or ~/.zshrc (zsh)
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-Verify the install:
+Verify:
 
 ```bash
 autish --help
 ```
 
-### Option B — Install with pipx (recommended for isolated global install)
-
-[pipx](https://pipx.pypa.io/) installs CLI tools in isolated environments and
-automatically adds them to your `PATH`:
+### Option B — Install with pipx (isolated)
 
 ```bash
-# Install pipx if not already present
 pip install --user pipx
-pipx ensurepath          # adds ~/.local/bin to PATH; restart your shell after
-
-# Install autish
+pipx ensurepath
 pipx install autish
-
-# Verify
 autish --help
 ```
 
-### Making autish available system-wide
-
-If you want `autish` available for all users on the machine:
-
-```bash
-sudo pip install autish
-# or with pipx:
-sudo pipx install autish --global
-```
-
----
-
-## Development Setup
-
-> Requires [Poetry](https://python-poetry.org/) ≥ 2.0 for dependency management.
-
-### 1. Install Poetry
-
-```bash
-curl -sSL https://install.python-poetry.org | python3 -
-```
-
-Make sure Poetry's bin directory is on your PATH (the installer will tell you
-where; typically `~/.local/bin`):
-
-```bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
-poetry --version   # should print e.g. "Poetry (version 2.x.x)"
-```
-
-### 2. Clone and install
+### Option C — Development
 
 ```bash
 git clone https://github.com/Ron-RONZZ-org/autish.git
 cd autish
-
-# Install all dependencies (including dev) into an isolated virtualenv
 poetry install
-
-# Verify the CLI is available inside the Poetry environment
 poetry run autish --help
 ```
 
-### 3. Activate the shell (optional)
+---
 
-Instead of prefixing every command with `poetry run`, you can activate the
-virtualenv directly:
+## Global Installation (for full functionality)
 
-```bash
-eval $(poetry env activate) # spawns a subshell with the venv active
-autish --help         # works without the prefix
-exit                  # return to your normal shell
-```
-
-### 4. Install autish globally (RECOMMENDED for full functionality)
-
-**To use bash aliases and have `autish` available system-wide, install it globally:**
+To use bash aliases and make `autish` available system-wide:
 
 ```bash
 cd /path/to/autish
-poetry install
-autish sistemo install           # Install in ~/.local/bin (default, no sudo needed)
-# or for system-wide:
-sudo autish sistemo install --sistema  # Install in /usr/local/bin (requires sudo)
-```
-
-**What this does:**
-- Creates a symlink to the `autish` binary from your Poetry environment
-- Makes `autish` available in any shell session without activating Poetry
-- Ensures bash aliases work correctly (e.g., `ess='autish encik serci -sk'`)
-- Regenerates existing bash aliases to work with the global installation
-
-**Required PATH setup (user scope only):**
-
-If you installed to `~/.local/bin` (default), ensure `~/.local/bin` is on your PATH:
-
-```bash
-# Check if already present
-echo $PATH | grep -q "$HOME/.local/bin" && echo "✓ PATH OK" || echo "✗ Add ~/.local/bin to PATH"
-
-# Add to PATH if needed
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-Verify installation:
-
-```bash
-which autish     # Should output ~/.local/bin/autish (or /usr/local/bin/autish)
-autish --help    # Should work without 'poetry run'
-```
-
-### 5. Manual setup (alternative — not recommended)
-
-If you prefer manual setup without using `autish sistemo install`:
-
-```bash
-# Find the virtualenv path
-poetry env info --path
-
-# Example output: /home/youruser/.cache/pypoetry/virtualenvs/autish-XYZ-py3.12
-# Add its bin/ to PATH:
-echo 'export PATH="$(poetry -C /path/to/autish env info --path)/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
-```
-
-Or create a symlink manually:
-
-```bash
-ln -s "$(poetry env info --path)/bin/autish" ~/.local/bin/autish
-autish --help
-```
-
-### 6. Run tests and linting
-
-```bash
-# Run tests
-poetry run pytest
-
-# Lint and format check
-poetry run ruff check .
-poetry run ruff format --check .
-
-# Auto-format
-poetry run ruff format .
-```
-
-### 7. Build a distributable package
-
-```bash
-poetry build
-# Creates dist/autish-0.0.2.tar.gz and dist/autish-0.0.2-py3-none-any.whl
+autish sistemo install           # ~/.local/bin (default)
+# or
+sudo autish sistemo install --sistema  # /usr/local/bin
 ```
 
 ---
 
 ## Documentation
 
-### Command Reference
+Full command reference: [docs/man/INDEX.md](docs/man/INDEX.md)
 
-Complete documentation for all 22 autish commands is available in the [Manual Pages](docs/man/INDEX.md) directory:
-
-- View all commands: [docs/man/INDEX.md](docs/man/INDEX.md)
-- Query-specific command help with: `autish {command} --help`
-- Example: `autish vorto --help` for personal wordbank documentation
-
----
-
-## Quick Start
+Get help for any command:
 
 ```bash
-# Show current time and day
-autish tempo
-
-# Show time for UTC+9
-autish tempo --horzono 9
-
-# Show time for all UTC offsets
-autish tempo --horzono
-
-# List Wi-Fi connections
-autish wifi ls
-
-# Connect to a network
-autish wifi konekti "MyNetwork" -p "mypassword"
-
-# Show system info
-autish sistemo
-
-# Run a command and copy its output to clipboard
-autish kp echo "hello"
-
-# Copy the last captured kp output again (without re-running)
-autish kp
+autish vorto --help
+autish retposto --help
 ```
 
 ---
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for style guide and development instructions.
-
----
-
-## Roadmap
-
-See [TODO.md](TODO.md) for the detailed implementation plan and roadmap.
+See [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ---
 
