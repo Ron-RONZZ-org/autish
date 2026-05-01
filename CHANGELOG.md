@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added (Phase 4)
 - `autish/utils.py` now includes `now_iso()` - canonical timestamp function
 - Consolidated timestamp handling across vorto, kalendaro, retposto, encik, kunteksto
+- `autish/services/vorto_repo.py` - extracted database layer from vorto.py
 
 ### Fixed (Phase 4)
 - Fixed timestamp inconsistency bug: vorto/kalendaro stripped microseconds but retposto/encik/kunteksto kept them - now all use consistent seconds-precision timestamps
