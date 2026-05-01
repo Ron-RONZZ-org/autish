@@ -106,7 +106,7 @@ class TestDiskoMalmunti:
             "/dev/sdb4 on /mnt/b type ext4 (rw)\n"
         )
 
-        def _fake_run(cmd, capture_output=True, text=True, check=True):
+        def _fake_run(cmd, capture_output=True, text=True, check=True, timeout=None):
             m = mocker.Mock()
             if cmd == ["mount"]:
                 m.returncode = 0
