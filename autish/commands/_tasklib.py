@@ -12,7 +12,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 import typer
-from autish.utils import now_iso
+from autish.utils import fold_search_text, now_iso
 
 _DATA_DIR: Path = Path.home() / ".local" / "share" / "autish"
 _DB_FILE: Path = _DATA_DIR / "tasklibro.db"
@@ -90,12 +90,6 @@ def connect() -> sqlite3.Connection:
 
 def new_uuid() -> str:
     return str(_uuid_mod.uuid4())
-
-
-def fold_search_text(text: str) -> str:
-    normalized = unicodedata.normalize("NFKD", str(text or ""))
-    stripped = "".join(ch for ch in normalized if not unicodedata.combining(ch))
-    return stripped.casefold()
 
 
 def is_uuid_prefix(ref: str) -> bool:

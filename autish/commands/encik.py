@@ -50,7 +50,7 @@ from autish.console import console
 from autish.services.ai_common import build_verki_service, load_ai_context
 from autish.services import encik_repo
 from autish.services.verki import VerkiRequest, VerkiServiceError
-from autish.utils import now_iso, open_path_in_browser
+from autish.utils import fold_search_text, now_iso, open_path_in_browser
 
 # Import doc helper for displaying manlibro(j) in encik vidi
 try:
@@ -807,11 +807,8 @@ def _count_matches(text: str, needle: str) -> int:
 
 
 def _fold_search_text(text: str) -> str:
-    raw = str(text or "")
-    raw = raw.replace("œ", "oe").replace("Œ", "OE")
-    normalized = unicodedata.normalize("NFKD", raw)
-    stripped = "".join(ch for ch in normalized if not unicodedata.combining(ch))
-    return stripped.casefold()
+    """Normalize text for search - delegates to canonical utils function."""
+    return fold_search_text(text)
 
 
 def _build_subklaso_count_map(entries: list[dict]) -> dict[str, int]:
