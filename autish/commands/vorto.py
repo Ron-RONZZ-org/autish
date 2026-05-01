@@ -37,6 +37,7 @@ from rich.table import Table
 from rich.text import Text
 
 from autish.i18n import tr
+from autish.services import vorto_repo
 from autish.utils import (
     best_text_match_score,
     fold_search_text,
@@ -139,14 +140,7 @@ CREATE TABLE IF NOT EXISTS undo_stack (
 
 def _get_db() -> sqlite3.Connection:
     """Open (and initialise) the SQLite database, returning a connection."""
-    _DATA_DIR.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(_DB_FILE), timeout=5.0)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=WAL;")
-    con.execute("PRAGMA foreign_keys=ON;")
-    con.executescript(_CREATE_VORTO + _CREATE_VORTO_INDEXES + _CREATE_RUBUJO + _CREATE_UNDO)
-    _migrate_db(con)
-    return con
+    return vorto_repo.get_db()
 
 
 def _migrate_db(con: sqlite3.Connection) -> None:
