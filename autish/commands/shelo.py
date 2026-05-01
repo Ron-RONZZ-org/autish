@@ -58,7 +58,7 @@ def _setup_readline() -> None:
         _readline.set_history_length(_MAX_HISTORY)
         if _HISTORY_FILE.exists():
             _readline.read_history_file(str(_HISTORY_FILE))
-    except Exception:
+    except (OSError, ImportError):
         pass
 
 
@@ -69,7 +69,7 @@ def _save_history() -> None:
     try:
         _HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
         _readline.write_history_file(str(_HISTORY_FILE))
-    except Exception:
+    except (OSError, ImportError):
         pass
 
 
@@ -97,7 +97,7 @@ def _search_history(query: str) -> None:
         else:
             _last_query_results = []
             typer.echo(f"Neniu historio trovita por: {query!r}")
-    except Exception:
+    except (OSError, ImportError):
         _last_query_results = []
         typer.echo("Historio ne disponebla en ĉi tiu medio.")
 

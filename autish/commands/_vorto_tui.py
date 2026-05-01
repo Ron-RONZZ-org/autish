@@ -404,7 +404,7 @@ class LineEditor:
             try:
                 import pyperclip  # noqa: PLC0415
                 pyperclip.copy(self.register)
-            except Exception:
+            except (pyperclip.PyperclipException, OSError):
                 pass
 
         self._clamp()
@@ -468,7 +468,7 @@ class LineEditor:
             try:
                 import pyperclip  # noqa: PLC0415
                 pyperclip.copy(self.register)
-            except Exception:
+            except (pyperclip.PyperclipException, OSError):
                 pass
             self.mode = "NORMAL"
         elif ch in ("d", "x"):
@@ -543,7 +543,7 @@ class LineEditor:
                         _safe_addstr(
                             win, row, col + char_in_view, char, curses.A_STANDOUT
                         )
-                    except Exception:
+                    except curses.error:
                         pass
             try:
                 win.move(row, cursor_col)
@@ -1331,7 +1331,7 @@ class Pager:
             import pyperclip  # noqa: PLC0415
             pyperclip.copy(text)
             self._yank_status = f"✓ Yankita: {preview!r}"
-        except Exception:
+        except (pyperclip.PyperclipException, OSError):
             self._yank_status = f"✓ Yankita (tondujo ne disponebla): {preview!r}"
 
 
