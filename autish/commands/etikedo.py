@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import typer
-from rich.console import Console
 from rich.table import Table
 
 from autish.commands import _tasklib
+from autish.console import console
 from autish.i18n import tr
 
 app = typer.Typer(
@@ -19,8 +19,6 @@ app = typer.Typer(
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
-
-console = Console()
 
 
 def _load_all() -> list[dict]:

@@ -36,6 +36,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from autish.console import console
 from autish.i18n import tr
 from autish.services import vorto_repo
 from autish.utils import (
@@ -62,8 +63,6 @@ app = typer.Typer(
     invoke_without_command=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
-
-console = Console()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Storage paths

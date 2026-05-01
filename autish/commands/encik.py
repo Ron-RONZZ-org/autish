@@ -42,11 +42,11 @@ from html import escape
 from pathlib import Path
 
 import typer
-from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
 from autish.commands.uzanto import _load_profile
+from autish.console import console
 from autish.services.ai_common import build_verki_service, load_ai_context
 from autish.services import encik_repo
 from autish.services.verki import VerkiRequest, VerkiServiceError
@@ -83,8 +83,6 @@ app = typer.Typer(
     invoke_without_command=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
-
-console = Console()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Storage paths

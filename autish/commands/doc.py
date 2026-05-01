@@ -21,10 +21,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import typer
-from rich.console import Console
 from rich.markdown import Markdown
 
 from autish.commands.uzanto import _load_profile
+from autish.console import console
 from autish.services.markmap import has_markmap_cli, markmap_cli_path
 from autish.utils import (
     best_text_match_score,
@@ -45,8 +45,6 @@ app = typer.Typer(
     invoke_without_command=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
-
-console = Console()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Storage paths

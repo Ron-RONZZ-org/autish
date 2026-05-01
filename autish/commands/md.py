@@ -16,8 +16,8 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 import typer
-from rich.console import Console
 
+from autish.console import console
 from autish.utils import open_html_in_browser
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -30,8 +30,6 @@ app = typer.Typer(
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
-
-console = Console()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Supported import formats and pandoc format map

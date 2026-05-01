@@ -49,8 +49,8 @@ from typing import TypedDict
 import keyring
 import typer
 import vobject
+from autish.console import console
 from autish.utils import now_iso
-from rich.console import Console
 from rich.table import Table
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -85,8 +85,6 @@ filtro_app = typer.Typer(
     context_settings={"help_option_names": ["-h", "--help", "--helpo"]},
 )
 app.add_typer(filtro_app, name="filtro")
-
-console = Console()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Storage paths
