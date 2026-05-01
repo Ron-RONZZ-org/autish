@@ -50,6 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Parametrized timezone offset tests in test_tempo.py (27 valid offsets, 6 invalid)
 - Parametrized validation tests in test_vorto.py: tipo, tono, etikedo normalization
 
+### Refactored
+- Removed dead code: unused _DB_FILE and schema constants in vorto.py and encik.py after repo extraction
+
 ---
 
 ## [0.0.1] - 2026-04-30
