@@ -528,7 +528,7 @@ def _load_encik_montrado_settings() -> dict[str, object]:
         return settings
     try:
         data = tomllib.loads(_ENCIK_CONFIG_FILE.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, tomllib.TOMLDecodeError):
         return settings
     montrado = data.get("montrado")
     if not isinstance(montrado, dict):
@@ -1854,14 +1854,14 @@ def _parse_enc_file(path: Path) -> dict:
     # Parse the TOML part (comments are automatically ignored)
     try:
         data = tomllib.loads(raw_core)
-    except Exception as exc:
+    except tomllib.TOMLDecodeError as exc:
         stripped_core, extracted_enhavo = _extract_enhavo_block(raw)
         if stripped_core != raw:
             try:
                 data = tomllib.loads(stripped_core)
                 raw_core = stripped_core
                 enhavo = extracted_enhavo
-            except Exception as exc2:
+            except tomllib.TOMLDecodeError as exc2:
                 raise ValueError(_format_enc_parse_error(raw_core, exc)) from exc2
         else:
             raise ValueError(_format_enc_parse_error(raw_core, exc)) from exc
@@ -3790,7 +3790,8 @@ def _markdown_to_html_fragment_with_links(md_text: str, *, link_depth: int = 0) 
     extensions = ["extra", "toc", "tables", "fenced_code", "codehilite"]
     try:
         html = markdown.markdown(safe_text, extensions=extensions)
-    except Exception:
+    except (TypeError, ValueError):
+        # Fallback to basic markdown if extensions fail
         html = markdown.markdown(safe_text)
     return _restore_math_segments(html, math_chunks)
 
@@ -4098,11 +4099,11 @@ def _load_user_language_preferences() -> tuple[list[str], bool]:
     """
     try:
         from autish.commands.uzanto import _load_profile  # noqa: PLC0415
-    except Exception:
+    except ImportError:
         return [], True
     try:
         profile = _load_profile(quiet=True)
-    except Exception:
+    except (KeyError, TypeError, ValueError):
         return [], True
     raw_langs = profile.get("lingvoj")
     if raw_langs is None:
@@ -5604,7 +5605,7 @@ def generi(
         profile: dict | None = None
         try:
             profile = _load_profile(quiet=True)
-        except Exception:
+        except (KeyError, TypeError, ValueError):
             profile = None
         service = build_verki_service(
             provizanto=provizanto,
@@ -6828,7 +6829,7 @@ def forigi(
         conn.commit()
         typer.echo(f"[✓] Forigis {len(to_delete)} eniro(j).")
 
-    except Exception as exc:
+    except sqlite3.Error as exc:
         conn.rollback()
         raise exc
     finally:

@@ -453,7 +453,7 @@ def _install_man_pages() -> None:
                 man_content = _create_man_page(cmd, result.stdout)
                 man_file = man_dir / f"autish-{cmd}.1"
                 man_file.write_text(man_content)
-        except Exception:
+        except OSError:
             pass
     
     # Main autish man page
@@ -636,7 +636,7 @@ def install(
                 # Create .bashrc if it doesn't exist
                 bashrc_path.write_text(f"# autish bash aliases\n{source_line}\n")
                 typer.echo("[✓] Kreitaj ~/.bashrc kun alias-oj")
-        except Exception as e:
+        except OSError as e:
             typer.echo(
                 f"[!] Ne povis ĝisdatigi ~/.bashrc: {e}",
                 err=True,
@@ -658,7 +658,7 @@ def install(
             cmd_aliases = _generate_command_aliases()
             autish_aliases.write_text(cmd_aliases + "\n")
             typer.echo("[✓] Komanda alias-oj ĝisdatigitaj en ~/.autish_aliases")
-        except Exception as e:
+        except OSError as e:
             typer.echo(
                 f"[!] Ne povis ĝisdatigi ~/.autish_aliases: {e}",
                 err=True,
@@ -682,7 +682,7 @@ def install(
                     combined = existing + db_header + "\n".join(db_lines)
                     autish_aliases.write_text(combined)
                 typer.echo("[✓] Bash alias-oj regeneritaj")
-        except Exception as e:
+        except OSError as e:
             typer.echo(
                 f"[!] Ne povis regeneri alias-ojn: {e}",
                 err=True,
@@ -691,7 +691,7 @@ def install(
         try:
             _install_man_pages()
             typer.echo("[✓] Man-paĝoj instalitaj en ~/.local/share/man/man1")
-        except Exception as e:
+        except OSError as e:
             typer.echo(
                 f"[!] Ne povis instali man-paĝojn: {e}",
                 err=True,
@@ -721,7 +721,7 @@ def install(
             err=True,
         )
         raise typer.Exit(1) from None
-    except Exception as e:
+    except (OSError, subprocess.CalledProcessError) as e:
         typer.echo(f"[!] Eraro dum instalado: {e}", err=True)
         raise typer.Exit(1) from None
 
