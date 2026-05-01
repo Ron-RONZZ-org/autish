@@ -37,7 +37,6 @@ import uuid as _uuid_mod
 import webbrowser
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -49,9 +48,10 @@ from typing import TypedDict
 import keyring
 import typer
 import vobject
+from rich.table import Table
+
 from autish.console import console
 from autish.utils import now_iso
-from rich.table import Table
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Typer apps
@@ -1530,7 +1530,7 @@ def _malfermi_aldonajon(aldonajo_id: int) -> None:
     
     # Open with system default app
     try:
-        subprocess.run(["xdg-open", str(file_path)], check=True)
+        subprocess.run(["xdg-open", str(file_path)], check=True, timeout=10)
     except subprocess.CalledProcessError as e:
         typer.echo(f"Eraro malfermante dosieron: {e}", err=True)
         raise typer.Exit(1) from e
@@ -2070,8 +2070,8 @@ def _parse_imap_message(
     # Parse date
     ricevita_je: str | None = None
     try:
-        from email.utils import parsedate_to_datetime
         from email.errors import InvalidDateFormat
+        from email.utils import parsedate_to_datetime
     except ImportError:
         pass
     else:
@@ -3197,7 +3197,7 @@ def _upload_sieve(acc: dict, sieve_script: str,
         sieve.setactive("autish-retposto")
         sieve.logout()
         return True
-    except (socket.error, smtplib.SMTPAuthenticationError, OSError) as exc:
+    except (smtplib.SMTPAuthenticationError, OSError) as exc:
         typer.echo(f"[!] ManageSieve error: {exc}", err=True)
         return False
 
@@ -5018,7 +5018,7 @@ def konton() -> None:
         tmp_file = tf.name
 
     try:
-        result = subprocess.run([editor, tmp_file], check=False)
+        result = subprocess.run([editor, tmp_file], check=False, timeout=30)
         if result.returncode != 0:
             typer.echo(f"[!] Redaktoro finis kun kodo {result.returncode}.", err=True)
             return

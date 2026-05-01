@@ -16,7 +16,6 @@ from rich.console import Console
 console = Console(
     theme=None,  # Use default theme
     force_terminal=None,  # Let Rich detect
-    rich_traceback=True,
     markup=True,
     emoji=True,  # Allow emoji in output
     safe_box=True,

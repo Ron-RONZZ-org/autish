@@ -24,8 +24,10 @@ app = typer.Typer(
 )
 
 
-def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, capture_output=True, text=True, check=False)
+def _run(cmd: list[str], timeout: int = 10) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd, capture_output=True, text=True, check=False, timeout=timeout
+    )
 
 
 @app.command("ls")

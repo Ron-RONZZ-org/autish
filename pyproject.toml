@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "autish"
-version = "0.0.1"
+version = "0.0.2"
 description = "Cross-platform CLI for essential tasks with minimum stimulation — designed with neurodiversity in mind."
 readme = "README.md"
 license = "GPL-3.0-only"

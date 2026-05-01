@@ -17,7 +17,6 @@ import sqlite3
 import subprocess
 import tempfile
 import uuid as _uuid_mod
-from datetime import datetime, timezone
 from pathlib import Path
 
 import typer
@@ -483,7 +482,7 @@ def _display_in_pager(entry: dict) -> None:
     # Use less pager
     try:
         pager_cmd = ["less", "-R"]
-        subprocess.run(pager_cmd, input=content.encode(), check=False)
+        subprocess.run(pager_cmd, input=content.encode(), check=False, timeout=30)
     except FileNotFoundError:
         typer.echo("Eraro: 'less' pagilo ne trovita", err=True)
         _display_in_console(entry)
@@ -527,6 +526,7 @@ def _display_as_markmap(entry: dict) -> None:
             capture_output=True,
             text=True,
             check=False,
+            timeout=30,
         )
         if result.returncode != 0:
             details = (result.stderr or result.stdout or "").strip()
@@ -579,7 +579,7 @@ def modifi(
         # Open in editor
         editor = _get_editor()
         if editor:
-            subprocess.run([editor, tmp_path], check=False)
+            subprocess.run([editor, tmp_path], check=False, timeout=30)
         else:
             typer.echo("Neniuj redaktiloj trovitaj ($EDITOR ne difinita).", err=True)
             raise typer.Exit(code=1)

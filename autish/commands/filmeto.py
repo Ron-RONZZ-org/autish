@@ -12,14 +12,65 @@ import tempfile
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import typer
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
-from yt_dlp import YoutubeDL
-from yt_dlp.utils import DownloadError
+
+if TYPE_CHECKING:
+    from yt_dlp import YoutubeDL
+    from yt_dlp.utils import DownloadError
+
+
+# Lazy import helpers - patchable via tests
+
+# Module-level cache for lazy imports (tests can patch these)
+_youtube_dl_class: type | None = None
+_download_error_class: type | None = None
+
+# Backwards compatibility: tests patch these directly
+YoutubeDL: type | None = None  # type: ignore[misc,valid-type]
+DownloadError: type | None = None  # type: ignore[misc,valid-type]
+
+
+def _get_youtube_dl_class():
+    """Lazy import YoutubeDL. Patch _youtube_dl_class or YoutubeDL in tests."""
+    import autish.commands.filmeto as _mod
+
+    # First check backwards-compatible alias (tests patch this)
+    if hasattr(_mod, "YoutubeDL") and _mod.YoutubeDL is not None:
+        return _mod.YoutubeDL
+    # Check module-level cache
+    if hasattr(_mod, "_youtube_dl_class") and _mod._youtube_dl_class is not None:
+        return _mod._youtube_dl_class
+    # Otherwise do lazy import
+    from yt_dlp import YoutubeDL
+
+    _mod._youtube_dl_class = YoutubeDL
+    return YoutubeDL
+
+
+def _get_download_error():
+    """Lazy import DownloadError. Patch _download_error_class or DownloadError in tests."""
+    import autish.commands.filmeto as _mod
+
+    # First check backwards-compatible alias (tests patch this)
+    if hasattr(_mod, "DownloadError") and _mod.DownloadError is not None:
+        return _mod.DownloadError
+    # Check module-level cache
+    if hasattr(_mod, "_download_error_class") and _mod._download_error_class is not None:
+        return _mod._download_error_class
+    # Otherwise do lazy import
+    from yt_dlp.utils import DownloadError
+
+    _mod._download_error_class = DownloadError
+    return DownloadError
+
+    _mod._download_error_class = DownloadError
+    return DownloadError
+
 
 app = typer.Typer(
     name="filmeto",
@@ -418,10 +469,10 @@ def _extract_entries_for_search(
         if opts_key in seen_opts:
             continue
         seen_opts.add(opts_key)
-        with YoutubeDL(opts) as ydl:
+        with _get_youtube_dl_class()(opts) as ydl:
             try:
                 result = ydl.extract_info(query, download=False)
-            except DownloadError as exc:
+            except _get_download_error() as exc:
                 last_error = exc
                 msg = str(exc).lower()
                 if (
@@ -515,11 +566,11 @@ def _estimate_downloads(
         opts["cookiefile"] = cookies
     if cookies_from_browser:
         opts["cookiesfrombrowser"] = _cookies_from_browser_arg(cookies_from_browser)
-    with YoutubeDL(opts) as ydl:
+    with _get_youtube_dl_class()(opts) as ydl:
         for target in targets:
             try:
                 info = ydl.extract_info(target, download=False)
-            except DownloadError:
+            except _get_download_error():
                 continue
             for item in _flatten_download_items(info):
                 count += 1
@@ -778,11 +829,11 @@ def _collect_download_plan(
         opts["cookiefile"] = cookies
     if cookies_from_browser:
         opts["cookiesfrombrowser"] = _cookies_from_browser_arg(cookies_from_browser)
-    with YoutubeDL(opts) as ydl:
+    with _get_youtube_dl_class()(opts) as ydl:
         for target in targets:
             try:
                 info = ydl.extract_info(target, download=False)
-            except DownloadError:
+            except _get_download_error():
                 continue
             for item in _flatten_download_items(info):
                 size_bytes = _estimate_one_item_size(item)
@@ -808,7 +859,7 @@ def _destination_path_for_item(
         "skip_download": True,
         "outtmpl": str(output_dir / outtmpl_name),
     }
-    with YoutubeDL(opts) as ydl:
+    with _get_youtube_dl_class()(opts) as ydl:
         prepared = ydl.prepare_filename(item)
     return Path(prepared).expanduser().resolve()
 
@@ -887,7 +938,7 @@ def _run_download(
                 opts["subtitleslangs"] = langs
         opts["subtitlesformat"] = "best"
     created: list[Path] = []
-    with YoutubeDL(opts) as ydl:
+    with _get_youtube_dl_class()(opts) as ydl:
         for target in targets:
             before = {p for p in output_dir.iterdir() if p.is_file()}
             ydl.extract_info(target, download=True)
@@ -1042,7 +1093,7 @@ def serci(
             cookies=kuketoj,
             cookies_from_browser=kuketoj_de_retumilo,
         )
-    except DownloadError as exc:
+    except _get_download_error() as exc:
         typer.echo(f"Serĉ-eraro: {exc}", err=True)
         typer.echo(
             "Sugesto: uzu --kuketoj aŭ --kuketoj-de-retumilo por YouTube-bot-kontrolo.",
@@ -1083,7 +1134,7 @@ def serci(
     if playlistoj:
         playlist_query = f"ytsearch{max(1, int(limo))}:{seed} playlist"
         opts = {"quiet": True, "skip_download": True, "extract_flat": True}
-        with YoutubeDL(opts) as ydl:
+        with _get_youtube_dl_class()(opts) as ydl:
             info = ydl.extract_info(playlist_query, download=False)
         for item in (info.get("entries") or []):
             if not isinstance(item, dict):
@@ -1174,7 +1225,7 @@ def vidi(
             "extract_flat": True,
             "ignoreerrors": True,
         }
-        with YoutubeDL(opts) as ydl:
+        with _get_youtube_dl_class()(opts) as ydl:
             info = ydl.extract_info(targets[0], download=False)
         entries = [
             e for e in (info.get("entries") or []) if isinstance(e, dict)
@@ -1194,7 +1245,7 @@ def vidi(
             cookies=kuketoj,
             cookies_from_browser=kuketoj_de_retumilo,
         )
-    except DownloadError as exc:
+    except _get_download_error() as exc:
         typer.echo(f"Elŝut-eraro: {exc}", err=True)
         typer.echo(
             "Sugesto: uzu --kuketoj aŭ --kuketoj-de-retumilo por YouTube-bot-kontrolo.",
@@ -1355,7 +1406,7 @@ def elsuti(
                 cookies=row_kuketoj,
                 cookies_from_browser=row_browser,
             )
-        except DownloadError as exc:
+        except _get_download_error() as exc:
             typer.echo(f"Taks-eraro (vico {index}): {exc}", err=True)
             typer.echo(
                 "Sugesto: uzu --kuketoj aŭ --kuketoj-de-retumilo por "
@@ -1454,7 +1505,7 @@ def elsuti(
                 subtitles=str(job.get("subtitoloj") or "") or None,
             )
             downloaded_total += len(files)
-        except DownloadError as exc:
+        except _get_download_error() as exc:
             prefix = f" (vico {job_index})" if job_index else ""
             typer.echo(f"Elŝut-eraro{prefix}: {exc}", err=True)
             typer.echo(

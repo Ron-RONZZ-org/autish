@@ -35,7 +35,6 @@ import urllib.parse
 import urllib.request
 import uuid as _uuid_mod
 from collections import deque
-from datetime import datetime, timezone
 from difflib import get_close_matches
 from functools import lru_cache
 from html import escape
@@ -47,8 +46,8 @@ from rich.table import Table
 
 from autish.commands.uzanto import _load_profile
 from autish.console import console
-from autish.services.ai_common import build_verki_service, load_ai_context
 from autish.services import encik_repo
+from autish.services.ai_common import build_verki_service, load_ai_context
 from autish.services.verki import VerkiRequest, VerkiServiceError
 from autish.utils import fold_search_text, now_iso, open_path_in_browser
 

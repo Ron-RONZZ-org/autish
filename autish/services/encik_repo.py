@@ -191,7 +191,7 @@ def search_entries_with_fts(
         # Match in titolo, terminologio, difinio, difinoj, enhavo
         fts_query = " OR ".join([f'"{query}"'] * 5)
         rows = conn.execute(
-            f"""
+            """
             SELECT encik.* FROM encik
             JOIN encik_fts ON encik.rowid = encik_fts.rowid
             WHERE encik_fts MATCH ?

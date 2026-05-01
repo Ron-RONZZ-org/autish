@@ -30,7 +30,7 @@ from html import escape
 from pathlib import Path
 
 import typer
-from rich.console import Console, Group
+from rich.console import Group
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table

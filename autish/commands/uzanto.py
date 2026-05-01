@@ -231,7 +231,6 @@ def _load_profile(*, quiet: bool = False) -> dict:
     profile cannot be read (useful for non-interactive locale probing).
     """
     from autish.profile import load_profile as _load_profile_impl
-    from autish.profile import _PROFILE_ENC_FILE
 
     try:
         return _load_profile_impl(quiet=quiet)

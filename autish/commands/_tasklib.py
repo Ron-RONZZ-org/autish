@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import re
 import sqlite3
-import unicodedata
 import uuid as _uuid_mod
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime
 from difflib import SequenceMatcher
 from pathlib import Path
 
 import typer
+
 from autish.utils import fold_search_text, now_iso
 
 _DATA_DIR: Path = Path.home() / ".local" / "share" / "autish"

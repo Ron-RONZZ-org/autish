@@ -11,7 +11,6 @@ import sqlite3
 import subprocess
 import tempfile
 import uuid as _uuid_mod
-from datetime import datetime, timezone
 from pathlib import Path
 
 import typer
@@ -319,7 +318,7 @@ def modifi(
 
     try:
         editor = os.environ.get("EDITOR", "nano")
-        result = subprocess.run([editor, tmp_path], check=False)
+        result = subprocess.run([editor, tmp_path], check=False, timeout=30)
         if result.returncode != 0:
             typer.echo("[i] Ĝisdatigo nuligita.", err=True)
             raise typer.Exit(code=0)

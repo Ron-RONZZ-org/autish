@@ -93,7 +93,9 @@ def kp(
 
     # Execute mode — run the command (auto-resolving autish subcommands)
     resolved = _resolve_command(command)
-    result = subprocess.run(resolved, capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        resolved, capture_output=True, text=True, check=False, timeout=30
+    )
     output = result.stdout
     if result.stderr:
         typer.echo(result.stderr, nl=False, err=True)

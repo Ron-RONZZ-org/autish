@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.0.2] - 2026-05-01
+
+### Added
+- Major restructure complete - leaner code, better performance
+- Lazy imports: yt-dlp, cryptography
+- Centralized modules: paths.py, console.py, db.py, utils.py
+- Service layer extraction: vorto_repo, encik_repo
+
+---
+
 ## [Unreleased]
 
 ### Added
@@ -48,6 +58,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added (Phase 5)
 - `tests/conftest.py` now includes: temp_db, mock_profile, isolated_config fixtures
 - Parametrized timezone offset tests in test_tempo.py (27 valid offsets, 6 invalid)
+
+### Performance
+- Lazy import yt-dlp in filmeto.py - only loaded when filmeto commands are used, not at startup
+- Lazy import cryptography in _crypto.py - loaded only when encrypt/decrypt functions called
+
+### Fixed
+- Removed invalid `rich_traceback` parameter from console.py that caused import errors
+- Added subprocess timeouts to: md.py, retposto.py, doc.py, kunteksto.py, kp.py, bluetooth.py, wifi.py, usb.py
+
+### Refactored
+- Renamed internal search functions to canonical names: `fold_search_text()`, `normalize_search_text()`
+- Replaced broad `Exception` handlers with specific types across all commands
 - Parametrized validation tests in test_vorto.py: tipo, tono, etikedo normalization
 
 ### Refactored

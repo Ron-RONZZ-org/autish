@@ -17,7 +17,6 @@ from urllib.request import urlopen
 
 import typer
 
-from autish.console import console
 from autish.utils import open_html_in_browser
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -289,6 +288,7 @@ def _check_pandoc() -> None:
             ["pandoc", "--version"],
             capture_output=True,
             check=True,
+            timeout=5,
         )
     except (FileNotFoundError, subprocess.CalledProcessError):
         typer.echo(
@@ -455,7 +455,7 @@ def importi(
         input_path,
     ]
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=30)
     except subprocess.CalledProcessError as exc:
         typer.echo(f"Eraro dum konverto: {exc.stderr}", err=True)
         raise typer.Exit(code=1) from exc
