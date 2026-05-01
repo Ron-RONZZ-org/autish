@@ -694,14 +694,26 @@ class TestParseEncFile:
 
 
 class TestUuidRefExtraction:
+    def _setup_encik_db(self, tmp_path, monkeypatch):
+        """Helper to set up temp database for uuid tests."""
+        import autish.commands.encik as enc_mod
+        import autish.services.encik_repo as enc_repo
+
+        data_dir = tmp_path / ".local" / "share" / "autish"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        db_path = data_dir / "encik.db"
+
+        monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
+        monkeypatch.setattr(enc_mod, "_DATA_DIR", tmp_path)
+        monkeypatch.setattr(enc_repo, "get_db_path", lambda: db_path)
+        return db_path
+
     def test_extract_markdown_ligilo_refs_resolves_existing_full_uuid(
         self, tmp_path, monkeypatch
     ):
         import autish.commands.encik as enc_mod
 
-        db_path = tmp_path / "encik.db"
-        monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
-        monkeypatch.setattr(enc_mod, "_DATA_DIR", tmp_path)
+        db_path = self._setup_encik_db(tmp_path, monkeypatch)
         _load_db_fixture(
             [
                 _make_entry(uuid=SAMPLE_UUID, titolo="A"),
@@ -717,11 +729,7 @@ class TestUuidRefExtraction:
         assert CHILD_UUID in uuids
 
     def test_extract_markdown_ligilo_refs_with_semantics(self, tmp_path, monkeypatch):
-        import autish.commands.encik as enc_mod
-
-        db_path = tmp_path / "encik.db"
-        monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
-        monkeypatch.setattr(enc_mod, "_DATA_DIR", tmp_path)
+        db_path = self._setup_encik_db(tmp_path, monkeypatch)
         _load_db_fixture([_make_entry(uuid=SAMPLE_UUID, titolo="A")], db_path)
         refs = _extract_markdown_ligilo_refs(f"[A](#{SAMPLE_UUID[:8]},rdfs:subClassOf)")
         assert refs[0]["uuid"] == SAMPLE_UUID
@@ -731,12 +739,16 @@ class TestUuidRefExtraction:
         self, tmp_path, monkeypatch
     ):
         import autish.commands.encik as enc_mod
+        import autish.services.encik_repo as enc_repo
 
-        db_path = tmp_path / "encik.db"
+        data_dir = tmp_path / ".local" / "share" / "autish"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        db_path = data_dir / "encik.db"
         vorto_db = tmp_path / "vorto.db"
         monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
         monkeypatch.setattr(enc_mod, "_DATA_DIR", tmp_path)
         monkeypatch.setattr(enc_mod, "_VORTO_DB_FILE", vorto_db)
+        monkeypatch.setattr(enc_repo, "get_db_path", lambda: db_path)
         _load_db_fixture([_make_entry(uuid=SAMPLE_UUID, titolo="A")], db_path)
         vorto_uuid = "8bf534dc-1111-2222-3333-444444444444"
         _load_vorto_db_fixture([{"uuid": vorto_uuid, "teksto": "mot"}], vorto_db)
@@ -748,12 +760,16 @@ class TestUuidRefExtraction:
         self, tmp_path, monkeypatch
     ):
         import autish.commands.encik as enc_mod
+        import autish.services.encik_repo as enc_repo
 
-        db_path = tmp_path / "encik.db"
+        data_dir = tmp_path / ".local" / "share" / "autish"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        db_path = data_dir / "encik.db"
         vorto_db = tmp_path / "vorto.db"
         monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
         monkeypatch.setattr(enc_mod, "_DATA_DIR", tmp_path)
         monkeypatch.setattr(enc_mod, "_VORTO_DB_FILE", vorto_db)
+        monkeypatch.setattr(enc_repo, "get_db_path", lambda: db_path)
         _load_db_fixture([_make_entry(uuid=SAMPLE_UUID, titolo="A")], db_path)
         vorto_uuid = "8bf534dc-1111-2222-3333-444444444444"
         _load_vorto_db_fixture([{"uuid": vorto_uuid, "teksto": "mot"}], vorto_db)
@@ -776,11 +792,7 @@ class TestUuidRefExtraction:
         assert f"vt#{vorto_uuid}" in merged["ligilo"]
 
     def test_linked_graph_collects_super_sub_and_ligilo(self, tmp_path, monkeypatch):
-        import autish.commands.encik as enc_mod
-
-        db_path = tmp_path / "encik.db"
-        monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
-        monkeypatch.setattr(enc_mod, "_DATA_DIR", tmp_path)
+        db_path = self._setup_encik_db(tmp_path, monkeypatch)
         _load_db_fixture(
             [
                 _make_entry(uuid=SAMPLE_UUID, titolo="Root"),
@@ -807,11 +819,7 @@ class TestUuidRefExtraction:
         ) in edge_types
 
     def test_linked_graph_keeps_semantic_edge_label(self, tmp_path, monkeypatch):
-        import autish.commands.encik as enc_mod
-
-        db_path = tmp_path / "encik.db"
-        monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
-        monkeypatch.setattr(enc_mod, "_DATA_DIR", tmp_path)
+        db_path = self._setup_encik_db(tmp_path, monkeypatch)
         _load_db_fixture(
             [
                 _make_entry(uuid=SAMPLE_UUID, titolo="Root"),
@@ -841,11 +849,7 @@ class TestUuidRefExtraction:
     def test_linked_graph_hides_generic_if_semantic_exists_between_same_nodes(
         self, tmp_path, monkeypatch
     ):
-        import autish.commands.encik as enc_mod
-
-        db_path = tmp_path / "encik.db"
-        monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
-        monkeypatch.setattr(enc_mod, "_DATA_DIR", tmp_path)
+        db_path = self._setup_encik_db(tmp_path, monkeypatch)
         _load_db_fixture(
             [
                 _make_entry(
@@ -1038,11 +1042,16 @@ class TestGraphTraversal:
 
     @pytest.fixture(autouse=True)
     def use_temp_db(self, tmp_path, monkeypatch):
-        db_path = tmp_path / "encik.db"
         import autish.commands.encik as enc_mod
+        import autish.services.encik_repo as enc_repo
+
+        data_dir = tmp_path / ".local" / "share" / "autish"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        db_path = data_dir / "encik.db"
 
         monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
         monkeypatch.setattr(enc_mod, "_DATA_DIR", tmp_path)
+        monkeypatch.setattr(enc_repo, "get_db_path", lambda: db_path)
 
         # Build a small taxonomy:
         # Animal (root) <- Mammal <- Dog
@@ -1113,11 +1122,16 @@ class TestGraphTraversal:
 class TestEncikCLI:
     @pytest.fixture(autouse=True)
     def isolate_db(self, tmp_path, monkeypatch):
-        db_path = tmp_path / "encik.db"
         import autish.commands.encik as enc_mod
+        import autish.services.encik_repo as enc_repo
+
+        data_dir = tmp_path / ".local" / "share" / "autish"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        db_path = data_dir / "encik.db"
 
         monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
         monkeypatch.setattr(enc_mod, "_DATA_DIR", tmp_path)
+        monkeypatch.setattr(enc_repo, "get_db_path", lambda: db_path)
 
     def _make_enc_file(self, tmp_path: Path, titolo: str, difinio: str = "") -> Path:
         p = tmp_path / f"{titolo.replace(' ', '_')}.enc"
