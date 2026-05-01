@@ -98,46 +98,8 @@ _ENCIK_CONFIG_FILE: Path = _CONFIG_DIR / "encik.toml"
 _SEMANTIKA_CONFIG_DIR: Path = _CONFIG_DIR / "semantika"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# DB schema
+# DB schema (moved to autish/services/encik_repo.py)
 # ──────────────────────────────────────────────────────────────────────────────
-
-_CREATE_ENCIK = """
-CREATE TABLE IF NOT EXISTS encik (
-    uuid        TEXT PRIMARY KEY,
-    titolo      TEXT NOT NULL,
-    difinio     TEXT NOT NULL DEFAULT '',
-    terminologio TEXT NOT NULL DEFAULT '{}',
-    difinoj     TEXT NOT NULL DEFAULT '{}',
-    enhavo      TEXT NOT NULL DEFAULT '',
-    superklaso  TEXT NOT NULL DEFAULT '[]',
-    ligilo      TEXT NOT NULL DEFAULT '[]',
-    fonto       TEXT NOT NULL DEFAULT '[]',
-    citajo      TEXT NOT NULL DEFAULT '[]',
-    datumo      TEXT NOT NULL DEFAULT '{}',
-    semantika   TEXT NOT NULL DEFAULT '[]',
-    kreita_je   TEXT NOT NULL,
-    modifita_je TEXT NOT NULL
-);
-"""
-
-_CREATE_ENCIK_INDEXES = """
-CREATE INDEX IF NOT EXISTS idx_encik_titolo_lower ON encik(LOWER(titolo));
-CREATE INDEX IF NOT EXISTS idx_encik_uuid_prefix ON encik(substr(uuid, 1, 8));
-CREATE INDEX IF NOT EXISTS idx_encik_kreita_je ON encik(kreita_je);
-"""
-
-_CREATE_ENCIK_FTS = """
-CREATE VIRTUAL TABLE IF NOT EXISTS encik_fts USING fts5(
-    uuid UNINDEXED,
-    titolo,
-    terminologio,
-    difinio,
-    difinoj,
-    enhavo,
-    content=encik,
-    content_rowid=rowid
-);
-"""
 
 _ISO_690_TIPOJ: dict[str, str] = {
     "lib": "libroj",

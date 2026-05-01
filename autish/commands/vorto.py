@@ -70,7 +70,6 @@ console = Console()
 # ──────────────────────────────────────────────────────────────────────────────
 
 _DATA_DIR: Path = Path.home() / ".local" / "share" / "autish"
-_DB_FILE: Path = _DATA_DIR / "vorto.db"
 _ENCIK_DB_FILE: Path = _DATA_DIR / "encik.db"
 _MAX_UNDO: int = 10
 
