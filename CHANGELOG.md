@@ -45,6 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed (Phase 4)
 - Fixed timestamp inconsistency bug: vorto/kalendaro stripped microseconds but retposto/encik/kunteksto kept them - now all use consistent seconds-precision timestamps
 
+### Added (Phase 5)
+- `tests/conftest.py` now includes: temp_db, mock_profile, isolated_config fixtures
+- Parametrized timezone offset tests in test_tempo.py (27 valid offsets, 6 invalid)
+- Parametrized validation tests in test_vorto.py: tipo, tono, etikedo normalization
+
 ---
 
 ## [0.0.1] - 2026-04-30
