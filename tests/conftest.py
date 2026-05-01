@@ -84,3 +84,43 @@ def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("XDG_DATA_HOME", str(data_dir))
 
     return config_dir
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Error handling test fixtures
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def mock_network_timeout(monkeypatch: pytest.MonkeyPatch):
+    """Mock network operations to raise timeout errors."""
+    import socket
+
+    original_socket = socket.socket
+
+    def timeout_socket(*args, **kwargs):
+        s = original_socket(*args, **kwargs)
+        s.settimeout(0.001)  # Very short timeout
+        return s
+
+    monkeypatch.setattr(socket, "socket", timeout_socket)
+    return monkeypatch
+
+
+@pytest.fixture
+def corrupted_db(tmp_path: Path) -> Path:
+    """Create a corrupted SQLite database file for testing recovery."""
+    db_path = tmp_path / "corrupted.db"
+    # Write invalid/corrupted content
+    db_path.write_bytes(b"This is not a valid SQLite database\x00\x00\x00")
+    return db_path
+
+
+@pytest.fixture
+def permission_denied_path(tmp_path: Path) -> Path:
+    """Create a path with no write permissions."""
+    protected_dir = tmp_path / "protected"
+    protected_dir.mkdir()
+    # Make directory read-only (remove write permission)
+    protected_dir.chmod(0o555)
+    return protected_dir
