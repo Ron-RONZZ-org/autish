@@ -2,6 +2,7 @@
 
 Cross-platform CLI software for essential tasks with minimum stimulation. Designed with neurodiversity in mind.
 
+> compatibility note: as of now, Autish only works on Debian-based Linux. This project started with personal needs as a neurodiverse user. I use Linux Mint Cinnamon 22.1 personally, as I found the UI simple, soothing, and predictable. You should try it out. Autish may work on other linux distros. You need to test for yourself. If you are on Windows or Mac, you are out of luck.
 ---
 
 ## Goals
