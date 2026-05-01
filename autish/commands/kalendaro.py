@@ -45,10 +45,6 @@ _sync_worker_started = False
 _KEYRING_SERVICE = "autish.kalendaro"
 
 
-def now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-
 def _connect() -> sqlite3.Connection:
     _DATA_DIR.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(_DB_FILE)

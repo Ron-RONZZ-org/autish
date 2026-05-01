@@ -488,10 +488,6 @@ def _cleanup_old_rubujo() -> int:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def now_iso() -> str:
-    return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
-
-
 def _detect_kategorio(teksto: str) -> str:
     """Auto-detect entry category: 'vorto', 'frazo', or 'frazdaro'."""
     words = teksto.strip().split()

@@ -558,10 +558,6 @@ def _migrate_db(con: sqlite3.Connection) -> None:
         con.commit()
 
 
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _make_uuid() -> str:
     return str(_uuid_mod.uuid4())
 

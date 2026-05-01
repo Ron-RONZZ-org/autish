@@ -601,10 +601,6 @@ def _get_conn() -> sqlite3.Connection:
     return encik_repo.get_conn()
 
 
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _migrate_db(conn: sqlite3.Connection) -> None:
     cols = {
         row[1]

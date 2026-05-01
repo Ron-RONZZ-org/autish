@@ -70,11 +70,6 @@ def _init_db(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def now_iso() -> str:
-    """Get current timestamp in ISO format."""
-    return datetime.now(timezone.utc).isoformat()
-
-
 # ============================================================================
 # Helper functions
 # ============================================================================

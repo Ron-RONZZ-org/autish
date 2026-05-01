@@ -12,6 +12,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 import typer
+from autish.utils import now_iso
 
 _DATA_DIR: Path = Path.home() / ".local" / "share" / "autish"
 _DB_FILE: Path = _DATA_DIR / "tasklibro.db"
@@ -85,10 +86,6 @@ def connect() -> sqlite3.Connection:
     con.execute("PRAGMA foreign_keys=ON;")
     con.executescript(_CREATE_SCHEMA)
     return con
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def new_uuid() -> str:
