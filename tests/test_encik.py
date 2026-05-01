@@ -1125,9 +1125,8 @@ class TestEncikCLI:
         import autish.commands.encik as enc_mod
         import autish.services.encik_repo as enc_repo
 
-        data_dir = tmp_path / ".local" / "share" / "autish"
-        data_dir.mkdir(parents=True, exist_ok=True)
-        db_path = data_dir / "encik.db"
+        # Use same path as tests expect: tmp_path / "encik.db"
+        db_path = tmp_path / "encik.db"
 
         monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
         monkeypatch.setattr(enc_mod, "_DATA_DIR", tmp_path)
