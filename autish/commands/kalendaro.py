@@ -158,7 +158,7 @@ def _get_password(calendar_uuid: str) -> str:
 def _delete_password(calendar_uuid: str) -> None:
     try:
         keyring.delete_password(_KEYRING_SERVICE, calendar_uuid)
-    except Exception:
+    except keyring.errors.PasswordDeleteError:
         return
 
 

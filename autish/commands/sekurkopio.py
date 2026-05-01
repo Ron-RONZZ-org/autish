@@ -360,7 +360,7 @@ def importi(
 
     try:
         count = _import_from_archive(in_path, pasvorto, formato, overwrite=anstatauigi)
-    except Exception as exc:
+    except (OSError, ValueError) as exc:
         typer.echo(f"[!] Importado malsukcesis: {exc}", err=True)
         raise typer.Exit(1) from exc
 
@@ -593,7 +593,7 @@ def daemon_cmd(
             _push_history("auto-daemon", {"dosiero": str(out)})
 
             typer.echo(f"[✓] Sekurkopio kreita: {out.name}")
-        except Exception as e:
+        except (OSError, subprocess.CalledProcessError, ValueError) as e:
             typer.echo(f"[!] Eraro dum sekurkopio: {e}", err=True)
             raise typer.Exit(1) from e
         return
@@ -638,7 +638,7 @@ def daemon_cmd(
                 typer.echo(f"[✓] Sekurkopio kreita: {out.name}")
                 last_backup_time = now
 
-            except Exception as e:
+            except (OSError, subprocess.CalledProcessError, ValueError) as e:
                 typer.echo(f"[!] Eraro dum sekurkopio: {e}", err=True)
                 # Continue running even if one backup fails
 
@@ -998,7 +998,7 @@ def reveni(
         count = _import_from_archive(
             selected, pasvorto, formato="7z", overwrite=True
         )
-    except Exception as exc:
+    except (OSError, ValueError) as exc:
         typer.echo(f"[!] Restarigado malsukcesis: {exc}", err=True)
         raise typer.Exit(1) from exc
 

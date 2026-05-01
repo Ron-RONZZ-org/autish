@@ -71,7 +71,7 @@ def delete_files(
                 else:
                     path.unlink()
                 typer.echo(f"[✓] Ĉapele forigita: {path}")
-            except Exception as e:
+            except OSError as e:
                 typer.echo(f"[!] Eraro: {e}", err=True)
         else:
             # Move to trash
@@ -205,7 +205,7 @@ def search_trash(
     
     try:
         items = db.search_items(keyword, use_regex=regex)
-    except Exception as e:
+    except (sqlite3.Error, ValueError) as e:
         typer.echo(f"[!] Eraro en serĉo: {e}", err=True)
         raise typer.Exit(1) from None
     

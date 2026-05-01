@@ -228,7 +228,7 @@ def _get_user_locale_languages() -> list[str]:
                 return [lingvoj]
             elif isinstance(lingvoj, list):
                 return lingvoj
-    except Exception:
+    except (KeyError, TypeError, ValueError):
         pass
     return ["eo", "en"]
 
@@ -448,7 +448,7 @@ def _display_in_console(entry: dict) -> None:
     try:
         md = Markdown(entry["enhavo"])
         console.print(md)
-    except Exception:
+    except (TypeError, ValueError):
         typer.echo(entry["enhavo"])
 
     # Display metadata
@@ -501,7 +501,7 @@ def _display_as_html(entry: dict) -> None:
     try:
         temp_path = open_html_in_browser(html_content)
         typer.echo(f"[dim]Malferma en retumilo: {temp_path}[/]")
-    except Exception as e:
+    except OSError as e:
         typer.echo(f"Eraro dum malfermo: {e}", err=True)
         raise typer.Exit(code=1) from None
 
@@ -538,7 +538,7 @@ def _display_as_markmap(entry: dict) -> None:
             raise typer.Exit(code=1)
         open_path_in_browser(out_path)
         typer.echo(f"[dim]Markmap malferme: {out_path}[/]")
-    except Exception as e:
+    except (subprocess.CalledProcessError, OSError) as e:
         typer.echo(f"Eraro dum malfermo: {e}", err=True)
         raise typer.Exit(code=1) from None
     finally:

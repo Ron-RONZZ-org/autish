@@ -200,7 +200,7 @@ def _get_master_password() -> str | None:
         import keyring  # noqa: PLC0415
 
         return keyring.get_password(_KEYRING_SERVICE, _KEYRING_KEY)
-    except Exception:
+    except keyring.errors.KeyringError:
         return None
 
 
@@ -215,7 +215,7 @@ def _delete_master_password() -> None:
         import keyring  # noqa: PLC0415
 
         keyring.delete_password(_KEYRING_SERVICE, _KEYRING_KEY)
-    except Exception:
+    except keyring.errors.KeyringError:
         pass
 
 
@@ -574,7 +574,7 @@ def profilo_importi(
 
     try:
         imported = _toml_loads(raw.decode("utf-8"))
-    except Exception as exc:
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
         typer.echo(f"[!] Malvalida dosierformato: {exc}", err=True)
         raise typer.Exit(1) from exc
 

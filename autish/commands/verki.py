@@ -66,7 +66,7 @@ def _resolve_hf_token(explicit_token: str | None) -> str | None:
             value = profile["api_slosilo_huggingface"]
             if value and value.strip():
                 return value.strip()
-    except Exception:
+    except (KeyError, TypeError):
         pass
     return None
 
@@ -276,7 +276,7 @@ def generi(
     if kopii:
         try:
             _kp_copy(output)
-        except Exception as exc:
+        except (pyperclip.PyperclipException, OSError) as exc:
             typer.echo(f"[!] Ne povis kopii al tondujo: {exc}", err=True)
 
     typer.echo(output)
@@ -334,6 +334,6 @@ def modelo(
             return
         for model_id in models:
             typer.echo(model_id)
-    except Exception as exc:
+    except (KeyError, TypeError, requests.RequestException) as exc:
         typer.echo(f"Eraro dum listigado: {exc}", err=True)
         raise typer.Exit(code=1) from exc

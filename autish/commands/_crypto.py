@@ -101,8 +101,8 @@ def decrypt(data: bytes, password: str) -> bytes:
     try:
         return aesgcm.decrypt(nonce, ciphertext, None)
     except Exception as exc:
-        # cryptography library raises Exception subclasses for decryption failures
-        # Preserve the original exception chain for debugging
+        # cryptography raises various exceptions for decryption failures
+        # Catch all but wrap in ValueError with user-friendly message
         raise ValueError(
             "Malĝusta pasvorto aŭ koruptitaj datumoj."
         ) from exc

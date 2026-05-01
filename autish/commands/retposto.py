@@ -3197,7 +3197,7 @@ def _upload_sieve(acc: dict, sieve_script: str,
         sieve.setactive("autish-retposto")
         sieve.logout()
         return True
-    except Exception as exc:
+    except (socket.error, smtplib.SMTPAuthenticationError, OSError) as exc:
         typer.echo(f"[!] ManageSieve error: {exc}", err=True)
         return False
 
@@ -3234,7 +3234,7 @@ def _import_vcf(vcf_path: Path) -> int:
             _upsert_contact(email_addr, nomo or None, organizo or None,
                             telefono or None)
             count += 1
-        except Exception:
+        except (KeyError, TypeError, AttributeError):
             continue
     return count
 
