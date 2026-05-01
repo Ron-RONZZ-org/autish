@@ -15,6 +15,7 @@ from autish.commands.uzanto import _normalize_multi_contact_list
 from autish.utils import (
     best_text_match_score,
     fuzzy_match_ignore_whitespace,
+    now_iso,
     render_markdown_links_as_rich,
     score_text_match,
     substring_match_folded,
@@ -164,7 +165,7 @@ def _find_by_uuid(identifier: str) -> dict | None:
 
 
 def _save_undo(operation: dict) -> None:
-    now = retposto_mod._now_iso()
+    now = now_iso()
     with retposto_mod._get_db() as con:
         con.execute(
             "INSERT INTO kontakto_undo (operation, kreita_je) VALUES (?, ?)",
@@ -189,7 +190,7 @@ def _pop_undo() -> dict | None:
 
 
 def _ensure_categories_exist(categories: list[str]) -> None:
-    now = retposto_mod._now_iso()
+    now = now_iso()
     with retposto_mod._get_db() as con:
         for category in categories:
             con.execute(
@@ -302,7 +303,7 @@ def _insert_contact_without_email(
     noto: str | None = None,
     konfirmita: int = 1,
 ) -> dict:
-    now = retposto_mod._now_iso()
+    now = now_iso()
     uid = retposto_mod._make_uuid()
     with retposto_mod._get_db() as con:
         con.execute(
@@ -917,7 +918,7 @@ def aldoni(
             pass
         else:  # update
             target = chosen
-            update_fields: dict[str, object] = {"modifita_je": retposto_mod._now_iso()}
+            update_fields: dict[str, object] = {"modifita_je": now_iso()}
             if nomo is not None:
                 update_fields["nomo"] = nomo
             if familia_nomo is not None:
@@ -1085,7 +1086,7 @@ def modifi(
                 merged_cats = cats
             else:
                 merged_cats = _norm_kategorioj([*merged_cats, *cats])
-        update_fields = {"modifita_je": retposto_mod._now_iso()}
+        update_fields = {"modifita_je": now_iso()}
         update_fields["nomo"] = nomo if nomo is not None else target.get("nomo")
         update_fields["familia_nomo"] = (
             familia_nomo if familia_nomo is not None else target.get("familia_nomo")
@@ -1374,7 +1375,7 @@ def kategorio_listigi() -> None:
 def kategorio_aldoni(
     nomo: str = typer.Argument(..., help="Nomo de kategorio."),
 ) -> None:
-    now = retposto_mod._now_iso()
+    now = now_iso()
     with retposto_mod._get_db() as con:
         con.execute(
             "INSERT OR IGNORE INTO kontakto_kategorio (nomo, kreita_je) VALUES (?,?)",
@@ -1403,7 +1404,7 @@ def kategorio_forigi(
                     "WHERE uuid = ?",
                     (
                         json.dumps(new_cats, ensure_ascii=False),
-                        retposto_mod._now_iso(),
+                        now_iso(),
                         row["uuid"],
                     ),
                 )

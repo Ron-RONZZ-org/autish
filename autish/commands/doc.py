@@ -30,6 +30,7 @@ from autish.utils import (
     best_text_match_score,
     confirm_esperante,
     markdown_to_html,
+    now_iso,
     open_html_in_browser,
     open_path_in_browser,
 )
@@ -108,11 +109,6 @@ def _ensure_db() -> None:
         conn.commit()
     finally:
         conn.close()
-
-
-def _get_now_iso() -> str:
-    """Get current timestamp in ISO 8601 format."""
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _extract_title_from_markdown(content: str, filename: str) -> str:
@@ -296,7 +292,7 @@ def aldoni(
 
     # Generate UUID
     uuid_str = str(_uuid_mod.uuid4())
-    now = _get_now_iso()
+    now = now_iso()
 
     # Validate encik linkage if provided
     encik_uuid = None
@@ -603,7 +599,7 @@ def modifi(
                     "UPDATE man SET titolo = ?, enhavo = ?, modifita_je = ? "
                     "WHERE uuid = ?"
                 ),
-                (new_titolo, new_content, _get_now_iso(), uuid_str),
+                (new_titolo, new_content, now_iso(), uuid_str),
             )
             conn.commit()
         except sqlite3.Error as e:
