@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import uuid
+import pytest
 from unittest.mock import patch
 
 from rich.console import Group
