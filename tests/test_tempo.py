@@ -121,3 +121,25 @@ class TestTempoAllOffsets:
             # Each line has format: "UTC+N  <ISO datetime>"
             assert _is_iso(line.split()[-1]), f"Line missing ISO datetime: {line!r}"
 
+
+class TestTempoTimezoneOffsets:
+    """Parametrized tests for timezone offset handling."""
+
+    @pytest.mark.parametrize("offset", [
+        "-12", "-11", "-10", "-9", "-8", "-7", "-6", "-5", "-4", "-3",
+        "-2", "-1", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+        "10", "11", "12", "14",
+    ])
+    def test_valid_offsets(self, offset: str):
+        """Test that all valid UTC offsets are accepted."""
+        result = runner.invoke(app, ["tempo", "-z", offset])
+        assert result.exit_code == 0, f"Failed for offset {offset}: {result.output}"
+
+    @pytest.mark.parametrize("invalid_offset", [
+        "-13", "13", "abc", "", "99", "+", "-",
+    ])
+    def test_invalid_offsets_rejected(self, invalid_offset: str):
+        """Test that invalid offsets produce errors."""
+        result = runner.invoke(app, ["tempo", "-z", invalid_offset])
+        assert result.exit_code != 0, f"Should reject invalid offset: {invalid_offset}"
+

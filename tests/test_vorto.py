@@ -2980,3 +2980,61 @@ class TestEntryToLinesAutoroVerko:
         joined = "\n".join(lines)
         assert "aŭtoro:" not in joined
         assert "verko:" not in joined
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Parametrized validation tests
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestTipoNormalization:
+    """Parametrized tests for tipo (part of speech) normalization."""
+
+    @pytest.mark.parametrize("input_tipo,expected", [
+        ("subst", ["substantivo"]),
+        ("adj", ["adjektivo"]),
+        ("verb", ["verbo"]),
+        ("adv", ["adverbo"]),
+        ("konj", ["konjunkcio"]),
+        ("prep", ["prepozicio"]),
+        ("inter", ["interjekcio"]),
+        ("sub", ["subordinaciant"]),
+        ("subs", ["substantivo"]),
+        ("subs.", ["substantivo"]),
+    ])
+    def test_tipo_normalization(self, input_tipo: str, expected: list[str]):
+        """Test that tipo abbreviations are normalized to full forms."""
+        result = _normalize_tipo(input_tipo)
+        assert result == expected
+
+
+class TestTonoNormalization:
+    """Parametrized tests for tono (tone) normalization."""
+
+    @pytest.mark.parametrize("input_tono,expected", [
+        ("f", "fakula"),
+        ("p", "poezia"),
+        ("m", "meznombra"),
+        ("sf", "sciencafakula"),
+        ("sp", "sciencapoezia"),
+    ])
+    def test_tono_normalization(self, input_tono: str, expected: str):
+        """Test that tono abbreviations are normalized."""
+        result = _normalize_tono(input_tono)
+        assert result == expected
+
+
+class TestEtikedoParsing:
+    """Parametrized tests for etikedo (label) parsing."""
+
+    @pytest.mark.parametrize("raw,expected_key,expected_val", [
+        ("koloro:ruĝa", "koloro", "ruĝa"),
+        ("fak:matematiko", "fak", "matematiko"),
+        ("nivelo:meza", "nivelo", "meza"),
+        ("最简单的", "zh", "最简单的"),
+    ])
+    def test_etikedo_parsing(self, raw: str, expected_key: str, expected_val: str):
+        """Test that etikedo strings are parsed into key:value pairs."""
+        result = _parse_etikedo(raw)
+        assert expected_key in result
+        assert result[expected_key] == expected_val
