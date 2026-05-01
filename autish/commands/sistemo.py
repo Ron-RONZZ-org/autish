@@ -159,7 +159,7 @@ def bash_alias_aldoni(
     notes: str = typer.Option("", "--notes", "-n", help="Opciaj notoj (markdown)"),
 ) -> None:
     """Add new bash alias to database and shell configuration."""
-    db = BashAliasDB()
+    db = BashAliasDB(_get_bash_alias_db_path())
 
     try:
         uid = db.add_alias(alias, function, notes or None)
@@ -178,7 +178,7 @@ def bash_alias_modifi(
     notes: str = typer.Option(None, "--notes", "-n", help="Novaj notoj"),
 ) -> None:
     """Modify existing bash alias."""
-    db = BashAliasDB()
+    db = BashAliasDB(_get_bash_alias_db_path())
 
     if not db.update_alias(uid, alias, function, notes):
         typer.echo(f"[!] Bash-alias UID {uid} ne trovita", err=True)
@@ -198,7 +198,7 @@ def bash_alias_forigi(
         typer.echo("[!] Al minas unu UID bezonata", err=True)
         raise typer.Exit(1)
 
-    db = BashAliasDB()
+    db = BashAliasDB(_get_bash_alias_db_path())
 
     # Verify all UIDs exist first
     alias_objs = []
@@ -235,7 +235,7 @@ def bash_alias_vidi(
     uid: int = typer.Argument(..., help="Bash-alias UID"),
 ) -> None:
     """View single bash alias details."""
-    db = BashAliasDB()
+    db = BashAliasDB(_get_bash_alias_db_path())
 
     alias_obj = db.get_alias(uid)
     if alias_obj is None:
@@ -267,7 +267,7 @@ def bash_alias_ls(
     inversigi: bool = typer.Option(False, "--inversigi", "-i", help="Inversa ordo"),
 ) -> None:
     """List all bash aliases with optional paging."""
-    db = BashAliasDB()
+    db = BashAliasDB(_get_bash_alias_db_path())
 
     sort_by = "alias" if alfabeto else "created_at"
     descending = not inversigi  # Default: newest first or alpha first
@@ -305,7 +305,7 @@ def bash_alias_serci(
     query: str = typer.Argument("", help="Serĉa termino (fuzzy)"),
 ) -> None:
     """Search bash aliases with fuzzy matching and user selection."""
-    db = BashAliasDB()
+    db = BashAliasDB(_get_bash_alias_db_path())
 
     if not query:
         query = typer.prompt("Serĉa termino")
@@ -666,7 +666,7 @@ def install(
 
         # Regenerate aliases from database and append to ~/.autish_aliases
         try:
-            db = BashAliasDB()
+            db = BashAliasDB(_get_bash_alias_db_path())
             aliases = db.list_aliases()
             if aliases:
                 typer.echo("[i] Regeneranta bash alias-ojn...")

@@ -80,17 +80,13 @@ class TestNetworkErrors:
             s.close()
 
     def test_requests_connection_error(self):
-        """Test that requests library handles connection errors."""
-        from requests import RequestException
+        """Test that connection errors are handled properly."""
+        import urllib.request
+        from urllib.error import URLError
 
-        # Mock a connection failure
-        with patch("requests.get") as mock_get:
-            mock_get.side_effect = RequestException("Connection refused")
-
-            from requests import get
-
-            with pytest.raises(RequestException):
-                get("http://localhost:99999")
+        # Test that URLError is raised for invalid connections
+        with pytest.raises(URLError):
+            urllib.request.urlopen("http://localhost:99999", timeout=1)
 
 
 class TestVortoRepoErrorHandling:
