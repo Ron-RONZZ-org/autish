@@ -45,6 +45,7 @@ SIBLING_UUID = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
 def isolate_encik_config(tmp_path, monkeypatch):
     import autish.commands.encik as enc_mod
 
+    # Patch config paths
     config_dir = tmp_path / ".config" / "autish"
     monkeypatch.setattr(enc_mod, "_CONFIG_DIR", config_dir)
     monkeypatch.setattr(enc_mod, "_ENCIK_CONFIG_FILE", config_dir / "encik.toml")
@@ -662,12 +663,17 @@ class TestParseEncFile:
         self, tmp_path, monkeypatch
     ):
         import autish.commands.encik as enc_mod
+        import autish.services.encik_repo as enc_repo
 
         db_path = tmp_path / "encik.db"
         vorto_db = tmp_path / "vorto.db"
+        data_dir = tmp_path / ".local" / "share" / "autish"
+        data_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(enc_mod, "_DB_FILE", db_path)
         monkeypatch.setattr(enc_mod, "_DATA_DIR", tmp_path)
         monkeypatch.setattr(enc_mod, "_VORTO_DB_FILE", vorto_db)
+        # Also patch repo to use temp db
+        monkeypatch.setattr(enc_repo, "get_db_path", lambda: data_dir / "encik.db")
         vorto_uuid = "8bf534dc-1111-2222-3333-444444444444"
         _load_vorto_db_fixture([{"uuid": vorto_uuid, "teksto": "mot"}], vorto_db)
 

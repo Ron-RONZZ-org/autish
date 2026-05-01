@@ -264,6 +264,17 @@ _TIPO_MAP: dict[str, str] = {
     "poemo": "poemo",
     "ek": "ekzemplo",
     "ekzemplo": "ekzemplo",
+    # additional common abbreviations (tested in test_vorto.py)
+    "subst": "substantivo",
+    "adj": "adjektivo",
+    "verb": "verbo",
+    "adv": "adverbo",
+    "konj": "konjunkcio",
+    "prep": "prepozicio",
+    "inter": "interjekcio",
+    "sub": "subordinaciant",
+    "subs": "substantivo",
+    "subs.": "substantivo",
 }
 
 _TONO_MAP: dict[str, str] = {
@@ -276,6 +287,12 @@ _TONO_MAP: dict[str, str] = {
     "formala": "formala",
     "am": "ambaŭ",
     "ambaŭ": "ambaŭ",
+    # additional abbreviations (tested in test_vorto.py)
+    "f": "fakula",
+    "p": "poezia",
+    "m": "meznombra",
+    "sf": "sciencafakula",
+    "sp": "sciencapoezia",
 }
 
 # ──────────────────────────────────────────────────────────────────────────────

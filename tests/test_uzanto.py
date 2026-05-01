@@ -24,10 +24,16 @@ _SET_MASTER = "autish.commands.uzanto._set_master_password"
 def isolated_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Redirect uzanto profile files to a temp directory."""
     import autish.commands.uzanto as uz_mod
+    import autish.profile as prof_mod
 
+    # Patch uzanto module
     monkeypatch.setattr(uz_mod, "_DATA_DIR", tmp_path)
     monkeypatch.setattr(uz_mod, "_PROFILE_FILE", tmp_path / "uzanto_profilo.toml")
     monkeypatch.setattr(uz_mod, "_PROFILE_ENC_FILE", tmp_path / "uzanto_profilo.enc")
+    # Patch profile module (used by vidi command)
+    monkeypatch.setattr(prof_mod, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(prof_mod, "_PROFILE_FILE", tmp_path / "uzanto_profilo.toml")
+    monkeypatch.setattr(prof_mod, "_PROFILE_ENC_FILE", tmp_path / "uzanto_profilo.enc")
     yield tmp_path
 
 
