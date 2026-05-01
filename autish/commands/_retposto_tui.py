@@ -950,7 +950,7 @@ class ComposePanel:
             return ""
         try:
             return str(pyperclip.paste() or "")
-        except Exception:
+        except (pyperclip.PyperclipException, OSError):
             return ""
 
     def _insert_multiline_at_cursor(self, text: str) -> None:
@@ -2497,7 +2497,7 @@ class RetpostoTUI:
             import locale
 
             locale.setlocale(locale.LC_ALL, "")
-        except Exception:
+        except (locale.Error, OSError):
             pass
         try:
             fd = sys.stdin.fileno()
@@ -2505,7 +2505,7 @@ class RetpostoTUI:
             new_termios = termios.tcgetattr(fd)
             new_termios[0] = new_termios[0] & ~termios.IXON
             termios.tcsetattr(fd, termios.TCSANOW, new_termios)
-        except Exception:
+        except (termios.error, OSError):
             old_termios = None
 
         # Half-second tick so transient status messages expire automatically
@@ -2523,7 +2523,7 @@ class RetpostoTUI:
             if old_termios is not None and fd >= 0:
                 try:
                     termios.tcsetattr(fd, termios.TCSANOW, old_termios)
-                except Exception:
+                except termios.error:
                     pass
 
     def _draw(self) -> None:
@@ -3238,7 +3238,7 @@ class RetpostoTUI:
                 if p.suffix.lower() in (".html", ".htm") or _looks_like_html(content):
                     return ("\n\n-- \n" + _strip_html(content), content)
                 return ("\n\n-- \n" + content, None)
-        except Exception:
+        except OSError:
             pass
         return ("", None)
 
@@ -3965,7 +3965,7 @@ class RetpostoTUI:
                 self._set_status(
                     f"Malfermis: {aldonajoj[0]['dosiernomo']}", transient=True
                 )
-            except Exception as e:
+            except (OSError, subprocess.CalledProcessError, ValueError) as e:
                 self._set_status(f"[!] Eraro: {e}", transient=True)
             return
 
@@ -4019,7 +4019,7 @@ class RetpostoTUI:
                         f"Malfermis: {aldonajoj[cursor]['dosiernomo']}", transient=True
                     )
                     break
-                except Exception as e:
+                except (OSError, subprocess.CalledProcessError, ValueError) as e:
                     self._set_status(f"[!] Eraro: {e}", transient=True)
                     break
 
@@ -4414,7 +4414,7 @@ class RetpostoTUI:
             self._status_msg = f"[✓] Konto aldonis: {retposto}"
             self._folder_panel._refresh_items()
             self._load_initial()
-        except Exception as exc:
+        except (KeyError, ValueError, sqlite3.Error) as exc:
             self._status_msg = f"[!] Eraro: {exc}"
 
     def _action_create_folder(self, folder_name: str) -> None:
@@ -4435,7 +4435,7 @@ class RetpostoTUI:
                 transient=True,
             )
             self._folder_panel._refresh_items()
-        except Exception as exc:
+        except (sqlite3.Error, KeyError, ValueError) as exc:
             self._status_msg = f"[!] Eraro kreante dosierujon: {exc}"
 
     def _action_create_local_folder(self) -> None:
@@ -4595,13 +4595,13 @@ class RetpostoTUI:
             try:
                 self._update_account(acc["id"], updates)
                 self._status_msg = "[✓] Konto ĝisdatigita."
-            except Exception as exc:
+            except (KeyError, ValueError, sqlite3.Error) as exc:
                 self._status_msg = f"[!] Eraro: {exc}"
         if new_pw and self._set_password is not None:
             try:
                 self._set_password(acc["id"], new_pw)
                 self._status_msg = "[✓] Pasvorto ĝisdatigita."
-            except Exception as exc:
+            except (KeyError, ValueError) as exc:
                 self._status_msg = f"[!] Eraro pasvorto: {exc}"
 
     def _edit_account_signature(self, acc: dict) -> None:
@@ -4619,7 +4619,7 @@ class RetpostoTUI:
                 self._status_msg = f"[✓] Subskribo agordita: {new_val}"
             else:
                 self._status_msg = "[✓] Subskribo forigita."
-        except Exception as exc:
+        except (KeyError, ValueError, sqlite3.Error) as exc:
             self._status_msg = f"[!] Eraro: {exc}"
 
     def _show_spam_pane(self) -> None:
