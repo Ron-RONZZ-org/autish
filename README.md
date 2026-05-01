@@ -14,7 +14,7 @@ Cross-platform CLI software for essential tasks with minimum stimulation. Design
 
 ---
 
-## Commands (v0.0.1)
+## Commands (v0.0.2)
 
 All keywords are in **Esperanto** to lower the barrier for non-English speakers.
 
@@ -211,7 +211,7 @@ poetry run ruff format .
 
 ```bash
 poetry build
-# Creates dist/autish-0.0.1.tar.gz and dist/autish-0.0.1-py3-none-any.whl
+# Creates dist/autish-0.0.2.tar.gz and dist/autish-0.0.2-py3-none-any.whl
 ```
 
 ---
