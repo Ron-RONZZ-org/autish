@@ -32,6 +32,8 @@ import termios
 import textwrap
 import time
 import unicodedata
+import sqlite3
+import subprocess
 import webbrowser
 from collections.abc import Callable
 from datetime import datetime

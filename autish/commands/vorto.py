@@ -3713,7 +3713,7 @@ def _interactive_mode() -> None:
         normalize_tono=_normalize_tono,
         parse_etikedo=_parse_etikedo,
         find_entry=_find_entry,
-        now_iso=_now_iso,
+        now_iso=now_iso,
         make_uuid=lambda: str(_uuid_mod.uuid4()),
         load_rubujo=_load_rubujo,
         render_rubujo_results=_rubujo_entries_to_lines,

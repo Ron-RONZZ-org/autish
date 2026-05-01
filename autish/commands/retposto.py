@@ -46,6 +46,7 @@ from tempfile import NamedTemporaryFile
 from typing import TypedDict
 
 import keyring
+from rich.console import Console
 import typer
 import vobject
 from rich.table import Table

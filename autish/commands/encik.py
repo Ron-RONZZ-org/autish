@@ -631,15 +631,6 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
 def _row_to_dict(row: sqlite3.Row) -> dict:
     """Convert a row to dict (delegated to encik_repo)."""
     return encik_repo.row_to_dict(row)
-    if "semantika" not in d:
-        d["semantika"] = []
-    if not d.get("titolo"):
-        d["titolo"] = next(iter(d.get("terminologio", {}).values()), "")
-    if not d.get("difinio") and d.get("difino"):
-        d["difinio"] = str(d.get("difino") or "")
-    if not d.get("difinio"):
-        d["difinio"] = next(iter(d.get("difinoj", {}).values()), "")
-    return d
 
 
 def _load_all_unsorted() -> list[dict]:

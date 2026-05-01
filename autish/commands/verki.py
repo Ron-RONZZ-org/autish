@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import pyperclip
 from pathlib import Path
 
 import typer
@@ -334,6 +335,6 @@ def modelo(
             return
         for model_id in models:
             typer.echo(model_id)
-    except (KeyError, TypeError, requests.RequestException) as exc:
+    except (KeyError, TypeError, Exception) as exc:
         typer.echo(f"Eraro dum listigado: {exc}", err=True)
         raise typer.Exit(code=1) from exc

@@ -3,6 +3,7 @@
 from datetime import datetime
 from pathlib import Path
 
+import sqlite3
 import typer
 from rich.console import Console
 from rich.table import Table

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import tomllib
 import tempfile
 from pathlib import Path
 from urllib.parse import quote
